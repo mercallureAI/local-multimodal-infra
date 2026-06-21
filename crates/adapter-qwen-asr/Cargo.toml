@@ -1,0 +1,20 @@
+[package]
+name = "lcoal-adapter-qwen-asr"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+half = "2"
+hound.workspace = true
+lcoal-backend-ort = { path = "../backend-ort" }
+lcoal-core = { path = "../core" }
+lcoal-error = { path = "../error" }
+lcoal-files = { path = "../files" }
+rustfft = "6"
+serde.workspace = true
+serde_json.workspace = true
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+
+[dev-dependencies]
+tempfile = "3"

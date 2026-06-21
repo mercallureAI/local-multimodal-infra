@@ -1,0 +1,11 @@
+[package]
+name = "lcoal-config"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+lcoal-core = { path = "../core" }
+lcoal-error = { path = "../error" }
+serde.workspace = true
+serde_yaml.workspace = true

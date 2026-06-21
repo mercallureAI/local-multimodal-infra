@@ -1,0 +1,16 @@
+[package]
+name = "lcoal-registry"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+lcoal-core = { path = "../core" }
+lcoal-error = { path = "../error" }
+serde_json.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,22 @@
+[package]
+name = "lcoal-adapter-index-tts"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+hound.workspace = true
+lcoal-backend-ort = { path = "../backend-ort" }
+lcoal-core = { path = "../core" }
+lcoal-error = { path = "../error" }
+lcoal-files = { path = "../files" }
+pinyin = { version = "0.11.0", default-features = false, features = ["with_tone_num_end"] }
+sentencepiece-rs = "0.2.2"
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

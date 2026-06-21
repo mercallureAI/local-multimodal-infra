@@ -1,0 +1,10 @@
+/target/
+/.pa/
+/workdir/
+/.env
+/docs/init/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.pdb
+*.rlib

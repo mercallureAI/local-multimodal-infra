@@ -1,0 +1,28 @@
+[package]
+name = "lcoal-controller"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+axum.workspace = true
+chrono.workspace = true
+hmac.workspace = true
+lcoal-api-mcp-admin = { path = "../api-mcp-admin" }
+lcoal-api-mcp-infer = { path = "../api-mcp-infer" }
+lcoal-api-openai = { path = "../api-openai" }
+lcoal-core = { path = "../core" }
+lcoal-error = { path = "../error" }
+lcoal-files = { path = "../files" }
+lcoal-model-store = { path = "../model-store" }
+lcoal-registry = { path = "../registry" }
+lcoal-scheduler = { path = "../scheduler" }
+reqwest.workspace = true
+rmcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true

@@ -1,0 +1,46 @@
+x-lcoal-service: &lcoal-service
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: lcoal-multimodal-infra:local
+  volumes:
+    # Persists runtime data/db/uploads and the explicit model artifact directory.
+    - ./workdir:/app/workdir
+
+services:
+  controller:
+    <<: *lcoal-service
+    environment:
+      # Values are resolved by Docker Compose from the local .env file.
+      LCOAL_WORKER_REGISTRATION_TOKEN: ${LCOAL_WORKER_REGISTRATION_TOKEN:?set in .env}
+      LCOAL_UPLOAD_SIGNING_SECRET: ${LCOAL_UPLOAD_SIGNING_SECRET:?set in .env}
+      LCOAL_ADMIN_TOKEN: ${LCOAL_ADMIN_TOKEN:?set in .env}
+      LCOAL_PUBLIC_BASE_URL: ${LCOAL_PUBLIC_BASE_URL:?set in .env}
+    command:
+      - /usr/local/bin/controller
+      - configs/docker-controller.yaml
+      - --workdir
+      - /app/workdir
+      # Real model files/artifacts; configs/models.d only contains model spec YAML.
+      - --model-dir
+      - /app/workdir/models
+    ports:
+      - "17890:17890"
+
+  worker:
+    <<: *lcoal-service
+    environment:
+      # Worker only needs the shared registration token; do not pass controller secrets.
+      LCOAL_WORKER_REGISTRATION_TOKEN: ${LCOAL_WORKER_REGISTRATION_TOKEN:?set in .env}
+    depends_on:
+      - controller
+    command:
+      - /usr/local/bin/worker
+      - configs/docker-worker.yaml
+      - --workdir
+      - /app/workdir
+      # Same artifact directory as the controller; specs are read from configs/models.d.
+      - --model-dir
+      - /app/workdir/models
+    ports:
+      - "17891:17891"

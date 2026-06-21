@@ -1,0 +1,14 @@
+node_id: local-worker
+bind: 127.0.0.1:17891
+base_url: http://127.0.0.1:17891
+controller_url: http://127.0.0.1:17890
+workdir: workdir
+# database_path defaults to workdir/data/lcoal.db; model_dir defaults to workdir/models.
+models_conf_dir: configs/models.d
+heartbeat_interval_sec: 5
+# Set via config, env LCOAL_WORKER_REGISTRATION_TOKEN, or CLI --registration-token.
+registration_token: null
+runtime:
+  idle_ttl_sec: 300
+  min_residency_sec: 60
+  memory_pressure_threshold: 0.85

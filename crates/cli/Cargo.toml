@@ -1,0 +1,30 @@
+[package]
+name = "lcoal-cli"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum.workspace = true
+lcoal-config = { path = "../config" }
+lcoal-controller = { path = "../controller" }
+lcoal-error = { path = "../error" }
+lcoal-model-store = { path = "../model-store" }
+lcoal-registry = { path = "../registry" }
+lcoal-runtime = { path = "../runtime" }
+lcoal-telemetry = { path = "../telemetry" }
+lcoal-worker = { path = "../worker" }
+tokio.workspace = true
+tracing.workspace = true
+
+[[bin]]
+name = "controller"
+path = "src/bin/controller.rs"
+
+[[bin]]
+name = "worker"
+path = "src/bin/worker.rs"
+
+[[bin]]
+name = "lcoal-multimodal-infra"
+path = "src/main.rs"

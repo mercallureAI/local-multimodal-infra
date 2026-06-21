@@ -1,0 +1,13 @@
+[package]
+name = "lcoal-adapter-yolo"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+image.workspace = true
+lcoal-backend-ort = { path = "../backend-ort" }
+lcoal-core = { path = "../core" }
+lcoal-error = { path = "../error" }
+lcoal-files = { path = "../files" }
+serde_yaml.workspace = true

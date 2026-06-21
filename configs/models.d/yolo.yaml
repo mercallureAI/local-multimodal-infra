@@ -1,0 +1,32 @@
+id: yolo11n.onnx
+name: YOLO11n ONNX
+enabled: true
+task_kinds:
+  - object.detect
+adapter: yolo
+backend: ort
+artifacts:
+  - type: hugging_face
+    repo_id: aaurelions/yolo11n.onnx
+    revision: f46d9b72aa9a0f02bc00484446e2310b1a549bce
+    files: [yolo11n.onnx]
+  - type: url
+    url: https://raw.githubusercontent.com/ultralytics/ultralytics/main/ultralytics/cfg/datasets/coco.yaml
+    # Labels are not in the HF repo; path materializes to <model_dir>/yolo11n.onnx/coco.yaml.
+runtime:
+  # CPU is the portable default. Add cuda only after building/verifying the CUDA ORT EP.
+  provider_order: [cpu]
+  max_concurrency: 4
+  idle_ttl_sec: 600
+resources:
+  min_ram_mb: 1024
+  min_vram_mb: 0
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  runtime: onnxruntime
+  used_storage_bytes: 10700000
+  provider_note: CPU is the default provider; CUDA is optional only when the backend feature/runtime supports it.
+  labels_source: COCO labels URL from Ultralytics, not from the HF model repo.

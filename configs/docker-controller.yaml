@@ -1,0 +1,13 @@
+# Docker Compose binds all interfaces so the host port mapping can reach it.
+# Secrets and public URLs are supplied from .env via LCOAL_* environment vars.
+bind: 0.0.0.0:17890
+# Persistent runtime root for data/db/uploads; compose also passes --model-dir.
+workdir: /app/workdir
+# Model spec YAML config directory, not downloaded model weights/artifacts.
+# Real artifacts are in /app/workdir/models via compose --model-dir.
+models_conf_dir: configs/models.d
+admin_token: null
+worker_registration_token: null
+public_base_url: null
+file_upload_base_url: null
+upload_signing_secret: null

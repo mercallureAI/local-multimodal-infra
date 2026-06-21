@@ -1,0 +1,20 @@
+[package]
+name = "lcoal-backend-ort"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+cuda = ["ort/cuda"]
+directml = ["ort/directml"]
+ort-runtime = []
+
+[dependencies]
+lcoal-error = { path = "../error" }
+ort = { workspace = true, features = ["std", "tracing", "download-binaries", "copy-dylibs", "tls-rustls", "api-24"] }
+serde.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

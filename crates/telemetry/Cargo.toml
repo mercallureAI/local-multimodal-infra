@@ -1,0 +1,9 @@
+[package]
+name = "lcoal-telemetry"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
