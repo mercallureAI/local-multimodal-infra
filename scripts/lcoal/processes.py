@@ -32,33 +32,36 @@ class ManagedProcess:
                 pass
 
 
-def run_build(root: Path) -> None:
-    print("[smoke] building binaries with cargo build --bins")
+def run_build(root: Path, *, release: bool = False) -> None:
+    profile_args = ["--release"] if release else []
+    command = ["cargo", "build", *profile_args, "--bins"]
+    print(f"[smoke] building binaries with {' '.join(command)}")
     try:
         completed = subprocess.run(
-            ["cargo", "build", "--bins"],
+            command,
             cwd=str(root),
             text=True,
             timeout=600,
         )
     except subprocess.TimeoutExpired as exc:
-        raise SmokeError("cargo build --bins timed out after 600s") from exc
+        raise SmokeError(f"{' '.join(command)} timed out after 600s") from exc
     if completed.returncode != 0:
-        raise SmokeError(f"cargo build --bins failed with exit code {completed.returncode}")
+        raise SmokeError(f"{' '.join(command)} failed with exit code {completed.returncode}")
 
 
-def locate_bin(root: Path, name: str, override: Path | None) -> Path:
+def locate_bin(root: Path, name: str, override: Path | None, *, release: bool = False) -> Path:
     if override is not None:
         path = override.resolve()
         if not path.exists():
             raise SmokeError(f"{name} binary override does not exist: {path}")
         return path
-    candidates = [root / "target" / "debug" / f"{name}.exe", root / "target" / "debug" / name]
+    profile = "release" if release else "debug"
+    candidates = [root / "target" / profile / f"{name}.exe", root / "target" / profile / name]
     for candidate in candidates:
         if candidate.exists():
             return candidate
     joined = ", ".join(str(path) for path in candidates)
-    raise SmokeError(f"could not locate {name} binary; tried {joined}. Run without --skip-build or pass --{name}-bin")
+    raise SmokeError(f"could not locate {name} binary; tried {joined}. Run without --skip-build, use the matching --release flag, or pass --{name}-bin")
 
 
 def start_service(name: str, cmd: list[str], root: Path, data_dir: Path, timestamp: str, env: dict[str, str]) -> ManagedProcess:

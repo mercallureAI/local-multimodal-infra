@@ -1,4 +1,4 @@
-"""Python-only API/MCP smoke harness for local controller and worker.
+"""Python-only API/legacy-RPC/MCP smoke harness for local controller and worker.
 
 The harness intentionally uses only Python subprocess management for services so
 that smoke tests can run consistently from shells and agent environments without
@@ -29,7 +29,22 @@ WORKER_URL = "http://127.0.0.1:17891"
 REGISTRATION_TOKEN = "lcoal-smoke-registration-token"
 MCP_STANDARD_URL = "http://127.0.0.1:17892/mcp"
 PORTS = (17890, 17891, 17892)
-TEST_ALIASES = {"assets", "yolo", "qwen", "indextts", "indextts_asr", "mcp_standard"}
+ASSET_DIR = repo_root() / "scripts" / "assets"
+DEFAULT_YOLO_IMAGE = ASSET_DIR / "yolo-input.jpg"
+DEFAULT_QWEN_ASR_AUDIO = ASSET_DIR / "tts-input-mon3tr.wav"
+TEST_ALIASES = {
+    "all",
+    "rpc",
+    "mcp",
+    "assets",
+    "yolo",
+    "qwen-asr",
+    "indextts",
+    "indextts_asr",
+    "mcp_standard",
+}
+RPC_TESTS = {"assets", "yolo", "qwen-asr", "indextts", "indextts_asr"}
+MCP_TESTS = {"mcp_standard"}
 INDEXTTS_MODEL_ID = "indextts-1.5-onnx"
 ADMIN_TOKEN = "lcoal-smoke-admin-token"
 INDEXTTS_REQUIRED = [
@@ -42,15 +57,14 @@ INDEXTTS_REQUIRED = [
     "bpe.model",
 ]
 
-
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     root = repo_root()
     workdir = resolve_cli_path(args.workdir, root)
     model_dir = resolve_cli_path(args.model_dir, root) if args.model_dir else (workdir / "models").resolve()
-    yolo_image = resolve_cli_path(args.yolo_image, root) if args.yolo_image else workdir / "data" / "samples" / "cars.jpg"
-    qwen_audio = resolve_cli_path(args.qwen_audio, root) if args.qwen_audio else workdir / "data" / "samples" / "0_jackson_0.wav"
-    indextts_reference = resolve_cli_path(args.indextts_reference, root) if args.indextts_reference else qwen_audio
+    yolo_image = resolve_cli_path(args.yolo_image, root) if args.yolo_image else DEFAULT_YOLO_IMAGE
+    qwen_asr_audio = resolve_cli_path(args.qwen_asr_audio, root) if args.qwen_asr_audio else DEFAULT_QWEN_ASR_AUDIO
+    indextts_reference = resolve_cli_path(args.indextts_reference, root) if args.indextts_reference else qwen_asr_audio
     data_dir = workdir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -60,21 +74,25 @@ def main(argv: list[str] | None = None) -> int:
     except SmokeError as exc:
         print(f"[smoke] FAIL: {exc}", file=sys.stderr)
         return 1
-    indextts_artifacts = inspect_indextts_artifacts(model_dir)
     launched: list[ManagedProcess] = []
     failures: list[str] = []
 
     try:
+        indextts_artifacts = inspect_indextts_artifacts(model_dir)
         if args.build:
-            run_build(root)
+            run_build(root, release=args.release)
 
-        controller_bin = locate_bin(root, "controller", args.controller_bin)
-        worker_bin = locate_bin(root, "worker", args.worker_bin)
+        controller_bin = locate_bin(root, "controller", args.controller_bin, release=args.release)
+        worker_bin = locate_bin(root, "worker", args.worker_bin, release=args.release)
 
         print(f"[smoke] root={root}")
         print(f"[smoke] workdir={workdir}")
         print(f"[smoke] model_dir={model_dir}")
         print(f"[smoke] data_dir={data_dir}")
+        print("[smoke] default assets=scripts/assets/yolo-input.jpg, tts-input-mon3tr.wav")
+        print(f"[smoke] yolo_image={yolo_image}")
+        print(f"[smoke] qwen_asr_audio={qwen_asr_audio}")
+        print(f"[smoke] indextts_reference={indextts_reference}")
         print(f"[smoke] requested_tests={','.join(sorted(requested_tests)) or '<none>'}")
 
         env = os.environ.copy()
@@ -111,9 +129,9 @@ def main(argv: list[str] | None = None) -> int:
         launched.append(controller)
         wait_health("controller", f"{CONTROLLER_URL}/health", controller, args.ready_timeout, args.request_timeout, data_dir)
 
-        if ({"indextts", "indextts_asr"} & requested_tests) and indextts_artifacts["ready"]:
+        if ({"indextts", "indextts_asr", "mcp_standard"} & requested_tests) and indextts_artifacts["ready"]:
             print("[smoke] enabling IndexTTS before worker starts so worker registry snapshot can serve it")
-            enable_indextts(args.request_timeout)
+            rpc_enable_indextts(args.request_timeout)
 
         worker_args = [
             str(worker_bin),
@@ -133,6 +151,10 @@ def main(argv: list[str] | None = None) -> int:
             "controller": checked_json_request("GET", f"{CONTROLLER_URL}/health", None, args.request_timeout),
             "worker": checked_json_request("GET", f"{WORKER_URL}/health", None, args.request_timeout),
         }
+        try:
+            health_payload["route_policy"] = check_route_policy(args.request_timeout)
+        except SmokeError as exc:
+            failures.append(f"route policy: {exc}")
         save_json(data_dir / f"smoke-health-{timestamp}.json", health_payload)
 
         if "assets" in requested_tests:
@@ -143,7 +165,16 @@ def main(argv: list[str] | None = None) -> int:
 
         if "mcp_standard" in requested_tests:
             try:
-                run_mcp_standard(data_dir, timestamp, args.request_timeout)
+                run_mcp_standard(
+                    data_dir,
+                    timestamp,
+                    args.request_timeout,
+                    None if args.skip_yolo else yolo_image,
+                    None if args.skip_asr_qwen else qwen_asr_audio,
+                    None if args.skip_indextts else indextts_reference,
+                    args.indextts_text,
+                    {"ready": False, "reason": "--skip-indextts"} if args.skip_indextts else indextts_artifacts,
+                )
             except SmokeError as exc:
                 failures.append(f"mcp_standard: {exc}")
 
@@ -153,11 +184,11 @@ def main(argv: list[str] | None = None) -> int:
             except SmokeError as exc:
                 failures.append(f"yolo: {exc}")
 
-        if "qwen" in requested_tests:
+        if "qwen-asr" in requested_tests:
             try:
-                run_qwen(qwen_audio, data_dir, timestamp, args.request_timeout)
+                run_qwen_asr(qwen_asr_audio, data_dir, timestamp, args.request_timeout)
             except SmokeError as exc:
-                failures.append(f"qwen: {exc}")
+                failures.append(f"qwen-asr: {exc}")
 
         if "indextts" in requested_tests:
             try:
@@ -210,7 +241,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run local controller/worker API and MCP smoke tests.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run local controller/worker API, legacy RPC, and MCP smoke tests. "
+            "Default media assets are local files under scripts/assets; this harness has no network-download sample args."
+        )
+    )
     parser.add_argument("--workdir", type=Path, default=Path("./workdir"))
     parser.add_argument("--model-dir", type=Path, default=None)
     parser.add_argument("--controller-bin", type=Path, default=None)
@@ -218,25 +254,57 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--build",
         action="store_true",
-        help="Run `cargo build --bins` before locating binaries (default; kept for compatibility).",
+        help="Run cargo build before locating binaries (default; kept for compatibility).",
+    )
+    parser.add_argument(
+        "--release",
+        action="store_true",
+        help="Build/use target/release/controller(.exe) and target/release/worker(.exe). Overrides still take precedence.",
     )
     parser.add_argument("--skip-build", action="store_true", help="Do not build; use existing binaries.")
     parser.add_argument(
         "--tests",
-        default="assets,yolo,qwen,indextts",
-        help="Comma-separated smoke tests: assets,yolo,qwen,indextts,indextts_asr,mcp_standard",
+        default="assets,yolo,qwen-asr,indextts",
+        help=(
+            "Comma-separated smoke tests or groups: rpc,mcp,all,assets,yolo,qwen-asr,indextts,"
+            "indextts_asr,mcp_standard. "
+            "rpc expands to legacy JSON-RPC coverage on /rpc/admin and /rpc/infer. "
+            "mcp expands to standard MCP SDK coverage on http://127.0.0.1:17892/mcp. "
+            "all runs both groups. OCR smoke aliases were removed after withdrawal."
+        ),
     )
     parser.add_argument("--skip-yolo", action="store_true")
-    parser.add_argument("--skip-qwen", action="store_true")
+    parser.add_argument(
+        "--skip-qwen-asr",
+        dest="skip_asr_qwen",
+        action="store_true",
+        help="Skip Qwen ASR smoke coverage.",
+    )
     parser.add_argument("--skip-indextts", action="store_true")
     parser.add_argument(
         "--indextts-asr-check",
         action="store_true",
-        help="Also synthesize IndexTTS audio and transcribe it with Qwen ASR via generic MCP tasks.",
+        help="Also synthesize IndexTTS audio and transcribe it with Qwen ASR via generic legacy RPC tasks.",
     )
-    parser.add_argument("--yolo-image", type=Path, default=None, help="Default: <workdir>/data/samples/cars.jpg")
-    parser.add_argument("--qwen-audio", type=Path, default=None, help="Default: <workdir>/data/samples/0_jackson_0.wav")
-    parser.add_argument("--indextts-reference", type=Path, default=None)
+    parser.add_argument(
+        "--yolo-image",
+        type=Path,
+        default=None,
+        help="Local YOLO image override. Default: scripts/assets/yolo-input.jpg.",
+    )
+    parser.add_argument(
+        "--qwen-asr-audio",
+        dest="qwen_asr_audio",
+        type=Path,
+        default=None,
+        help="Local Qwen ASR WAV override. Default: scripts/assets/tts-input-mon3tr.wav.",
+    )
+    parser.add_argument(
+        "--indextts-reference",
+        type=Path,
+        default=None,
+        help="Local IndexTTS reference WAV override. Default: scripts/assets/tts-input-mon3tr.wav.",
+    )
     parser.add_argument("--indextts-text", default="你好，这是本地 IndexTTS 冒烟测试。")
     parser.add_argument(
         "--indextts-frontend",
@@ -254,16 +322,26 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def selected_tests(args: argparse.Namespace) -> set[str]:
-    tests = {item.strip().lower() for item in args.tests.split(",") if item.strip()}
-    unknown = tests - TEST_ALIASES
+    raw_tests = {item.strip().lower() for item in args.tests.split(",") if item.strip()}
+    unknown = raw_tests - TEST_ALIASES
     if unknown:
         raise SmokeError(f"unknown --tests entries: {', '.join(sorted(unknown))}")
+    tests = set(raw_tests)
+    if "all" in raw_tests:
+        tests.update(RPC_TESTS)
+        tests.update(MCP_TESTS)
+    if "rpc" in raw_tests:
+        tests.update(RPC_TESTS)
+    if "mcp" in raw_tests:
+        tests.update(MCP_TESTS)
+    tests.difference_update({"all", "rpc", "mcp"})
     if args.skip_yolo:
         tests.discard("yolo")
-    if args.skip_qwen:
-        tests.discard("qwen")
+    if args.skip_asr_qwen:
+        tests.discard("qwen-asr")
     if args.skip_indextts:
         tests.discard("indextts")
+        tests.discard("indextts_asr")
     if args.indextts_asr_check:
         tests.add("indextts_asr")
     return tests
@@ -317,26 +395,79 @@ def collect_recent_logs(data_dir: Path, preferred: Iterable[Path], max_files: in
     return logs
 
 
-def mcp_infer(method: str, params: dict, request_id: str, timeout: float) -> tuple[int, dict]:
+def check_route_policy(timeout: float) -> dict:
+    """Assert legacy RPC and standard MCP routes stay separate."""
+    checks: list[dict] = []
+    for path in ("/mcp/admin", "/mcp/infer"):
+        url = f"{CONTROLLER_URL}{path}"
+        for method, body_data, headers in (
+            ("GET", None, {"Accept": "*/*"}),
+            (
+                "POST",
+                json.dumps({"jsonrpc": "2.0", "id": "route-policy", "method": "list_models", "params": {}}).encode(
+                    "utf-8"
+                ),
+                {"Accept": "application/json", "Content-Type": "application/json"},
+            ),
+        ):
+            status, body, _headers = raw_bytes_request(method, url, body_data, headers, timeout)
+            check = {"method": method, "url": url, "expected_status": 404, "status": status, "ok": status == 404}
+            checks.append(check)
+            if status != 404:
+                preview = body[:200].decode("utf-8", errors="replace")
+                raise SmokeError(f"{method} {path} must remain unavailable on controller; got HTTP {status}: {preview}")
+    print("[smoke] route policy ok: /mcp/admin and /mcp/infer returned 404 for GET and POST")
+    return {"ok": True, "checks": checks}
+
+
+def rpc_infer(method: str, params: dict, request_id: str, timeout: float) -> tuple[int, dict]:
     payload = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
-    return json_request("POST", f"{CONTROLLER_URL}/mcp/infer", payload, timeout)
+    return json_request("POST", f"{CONTROLLER_URL}/rpc/infer", payload, timeout)
 
 
-def mcp_admin(method: str, params: dict, request_id: str, timeout: float) -> tuple[int, dict]:
+def rpc_admin(method: str, params: dict, request_id: str, timeout: float) -> tuple[int, dict]:
     payload = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
-    return json_request("POST", f"{CONTROLLER_URL}/mcp/admin", payload, timeout)
+    return json_request("POST", f"{CONTROLLER_URL}/rpc/admin", payload, timeout)
 
-
-def run_mcp_standard(data_dir: Path, timestamp: str, timeout: float) -> None:
+def run_mcp_standard(
+    data_dir: Path,
+    timestamp: str,
+    timeout: float,
+    sample_image: Path | None,
+    sample_audio: Path | None,
+    reference_audio: Path | None,
+    text: str,
+    indextts_artifacts: dict,
+) -> None:
     print("[smoke] validating standard MCP endpoint")
     output_path = data_dir / f"smoke-mcp-standard-{timestamp}.json"
+    cmd = [
+        sys.executable,
+        "-m",
+        "scripts.lcoal.mcp_standard_client",
+        "--url",
+        MCP_STANDARD_URL,
+        "--full",
+        "--text",
+        text,
+        "--timeout",
+        str(int(timeout)),
+    ]
+    if sample_image is not None:
+        cmd.extend(["--sample-image", str(sample_image)])
+    if sample_audio is not None:
+        cmd.extend(["--sample-audio", str(sample_audio)])
+    if reference_audio is not None:
+        cmd.extend(["--reference-audio", str(reference_audio)])
+    if indextts_artifacts.get("ready"):
+        cmd.append("--indextts-artifacts-ready")
     try:
         completed = subprocess.run(
-            [sys.executable, "-m", "scripts.lcoal.mcp_standard_client", "--url", MCP_STANDARD_URL],
+            cmd,
             cwd=str(repo_root()),
             text=True,
             capture_output=True,
-            timeout=max(10.0, timeout + 5.0),
+            timeout=max(10.0, timeout + 15.0),
         )
     except subprocess.TimeoutExpired as exc:
         raise SmokeError(f"standard MCP client timed out after {exc.timeout}s") from exc
@@ -371,24 +502,24 @@ def run_assets(data_dir: Path, timestamp: str, timeout: float) -> None:
         ]
     }
     http_sign_payload = checked_json_request("POST", f"{CONTROLLER_URL}/assets/sign", sign_request, timeout)
-    sign_status, mcp_sign_payload = mcp_infer(
+    sign_status, rpc_sign_payload = rpc_infer(
         "sign_asset_urls",
         {"items": sign_request["requests"]},
-        f"smoke-assets-mcp-sign-{timestamp}",
+        f"smoke-assets-rpc-sign-{timestamp}",
         timeout,
     )
-    assert_mcp_success(sign_status, mcp_sign_payload, "MCP sign_asset_urls")
+    assert_rpc_success(sign_status, rpc_sign_payload, "legacy RPC sign_asset_urls")
     signed = http_sign_payload.get("items") or []
-    mcp_signed = (mcp_sign_payload.get("result") or {}).get("items") or []
+    rpc_signed = (rpc_sign_payload.get("result") or {}).get("items") or []
     if (
         len(signed) != 2
         or signed[0].get("method") != "POST"
         or signed[1].get("method") != "GET"
-        or len(mcp_signed) != 2
-        or mcp_signed[0].get("method") != "POST"
-        or mcp_signed[1].get("method") != "GET"
+        or len(rpc_signed) != 2
+        or rpc_signed[0].get("method") != "POST"
+        or rpc_signed[1].get("method") != "GET"
     ):
-        raise SmokeError(f"sign_assets did not preserve batch order/methods: http={signed} mcp={mcp_signed}")
+        raise SmokeError(f"sign_assets did not preserve batch order/methods: http={signed} legacy_rpc={rpc_signed}")
     upload_url = signed[0].get("signed_url")
     download_url = signed[1].get("signed_url")
     status, payload = raw_request("POST", upload_url, body, {"Content-Type": "text/plain; charset=utf-8"}, timeout)
@@ -424,57 +555,87 @@ def run_assets(data_dir: Path, timestamp: str, timeout: float) -> None:
     print(f"[smoke] assets saved {out}")
 
 
-def assert_mcp_success(status: int, payload: dict, label: str) -> None:
+def assert_rpc_success(status: int, payload: dict, label: str) -> None:
     if status != 200:
         raise SmokeError(f"{label} returned HTTP {status}: {payload}")
     if payload.get("error"):
         raise SmokeError(f"{label} returned JSON-RPC error: {payload['error']}")
 
 
+def image_mime(path: Path | str) -> str:
+    suffix = Path(path).suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".png":
+        return "image/png"
+    if suffix == ".bmp":
+        return "image/bmp"
+    return "application/octet-stream"
+
 def run_yolo(image: Path, data_dir: Path, timestamp: str, timeout: float) -> None:
     if not image.exists():
         raise SmokeError(f"YOLO image does not exist: {image}")
-    create = create_task(
+    content_type = image_mime(image)
+    create = rpc_create_task(
         {
             "task_kind": "object.detect",
             "model": "yolo11n.onnx",
-            "files": [{"name": image.name, "mime": "image/jpeg", "role": "image", "required": True}],
+            "files": [{"name": image.name, "mime": content_type, "role": "image", "required": True}],
             "params": {},
         },
         f"smoke-yolo-create-{timestamp}",
         timeout,
     )
     upload = first_upload(create, "image")
-    payload = upload_file(upload["upload_url"] + "&with_start_task=true", image, "image/jpeg", timeout)
+    payload = upload_file(upload["upload_url"] + "&with_start_task=true", image, content_type, timeout)
     if payload.get("uri", "").startswith("assets://"):
-        payload = start_task(create["task_id"], f"smoke-yolo-start-{timestamp}", timeout)
+        payload = rpc_start_task(create["task_id"], f"smoke-yolo-start-{timestamp}", timeout)
+    object_count, car_count = validate_yolo_payload(payload)
     out = data_dir / f"smoke-yolo-{timestamp}.json"
-    save_json(out, payload)
-    if payload.get("state") != "succeeded":
-        raise SmokeError(f"YOLO generic task did not succeed: {payload}")
-    print(f"[smoke] yolo saved {out}")
+    save_json(
+        out,
+        {
+            "input_image": str(image),
+            "object_count": object_count,
+            "car_count": car_count,
+            "task": payload,
+        },
+    )
+    print(f"[smoke] yolo car_count={car_count} object_count={object_count} saved {out}")
 
 
-def run_qwen(audio: Path, data_dir: Path, timestamp: str, timeout: float) -> None:
+def run_qwen_asr(audio: Path, data_dir: Path, timestamp: str, timeout: float) -> None:
     if not audio.exists():
         raise SmokeError(f"Qwen ASR audio does not exist: {audio}")
     out = data_dir / f"smoke-qwen-asr-{timestamp}.json"
-    create = create_task(
+    create = rpc_create_task(
         {
             "task_kind": "asr.transcribe",
             "model": "qwen3-asr-0.6b-onnx",
             "files": [{"name": audio.name, "mime": "audio/wav", "role": "audio", "required": True}],
             "params": {},
         },
-        f"smoke-qwen-create-{timestamp}",
+        f"smoke-qwen-asr-create-{timestamp}",
         timeout,
     )
     upload_file(first_upload(create, "audio")["upload_url"], audio, "audio/wav", timeout)
-    payload = start_task(create["task_id"], f"smoke-qwen-start-{timestamp}", timeout)
-    save_json(out, payload)
+    payload = rpc_start_task(create["task_id"], f"smoke-qwen-asr-start-{timestamp}", timeout)
     if payload.get("state") != "succeeded":
-        raise SmokeError(f"Qwen generic task did not succeed: {payload}")
-    print(f"[smoke] qwen generic MCP saved {out}")
+        raise SmokeError(f"Qwen ASR generic task did not succeed: {payload}")
+    asr_text = extract_asr_text(payload)
+    if not asr_text.strip():
+        raise SmokeError(f"Qwen ASR generic task returned empty text: {payload}")
+    save_json(
+        out,
+        {
+            "input_audio": str(audio),
+            "asr_text": asr_text,
+            "asr_text_length": len(asr_text),
+            "task": payload,
+        },
+    )
+    print(f"[smoke] qwen-asr text prefix={asr_text[:120]!r} length={len(asr_text)} saved {out}")
+
 
 
 def post_openai_transcription_multipart(audio: Path, timeout: float) -> tuple[int, dict]:
@@ -504,9 +665,10 @@ def inspect_indextts_artifacts(model_dir: Path) -> dict:
     }
 
 
-def enable_indextts(timeout: float) -> None:
-    status, payload = mcp_admin("enable_model", {"id": INDEXTTS_MODEL_ID}, "smoke-enable-indextts", timeout)
-    assert_mcp_success(status, payload, "IndexTTS enable_model")
+
+def rpc_enable_indextts(timeout: float) -> None:
+    status, payload = rpc_admin("enable_model", {"id": INDEXTTS_MODEL_ID}, "smoke-enable-indextts", timeout)
+    assert_rpc_success(status, payload, "IndexTTS enable_model")
 
 
 def run_indextts(
@@ -551,7 +713,7 @@ def synthesize_indextts(reference: Path, text: str, timestamp: str, timeout: flo
     task_params = {"text": text}
     if extra_params:
         task_params.update(extra_params)
-    create = create_task(
+    create = rpc_create_task(
         {
             "task_kind": "tts.synthesize",
             "model": INDEXTTS_MODEL_ID,
@@ -564,7 +726,7 @@ def synthesize_indextts(reference: Path, text: str, timestamp: str, timeout: flo
         timeout,
     )
     upload_file(first_upload(create, "reference_audio")["upload_url"], reference, "audio/wav", timeout)
-    return start_task(create["task_id"], f"smoke-indextts-start-{timestamp}", timeout)
+    return rpc_start_task(create["task_id"], f"smoke-indextts-start-{timestamp}", timeout)
 
 
 def run_indextts_asr(
@@ -611,6 +773,8 @@ def run_indextts_asr(
     if asr_payload.get("state") != "succeeded":
         raise SmokeError(f"IndexTTS ASR cross-check transcription did not succeed: {asr_payload}")
     asr_text = extract_asr_text(asr_payload)
+    if not asr_text.strip():
+        raise SmokeError(f"IndexTTS ASR cross-check transcription returned empty text: {asr_payload}")
     expected_text = normalize_expected_text(text)
     comparison = compare_text(expected_text, normalize_expected_text(asr_text))
     payload = {
@@ -624,6 +788,7 @@ def run_indextts_asr(
             "url": audio_ref.get("url"),
         },
         "asr_text": asr_text,
+        "asr_text_length": len(asr_text),
         "similarity": comparison["similarity"],
         "char_coverage": comparison["char_coverage"],
         "missing_chars": comparison["missing_chars"],
@@ -701,18 +866,18 @@ def indextts_bridge_bpe_model(root: Path, artifact_root: Path) -> Path | None:
 
 
 def transcribe_audio_generic(audio: Path, timestamp: str, timeout: float) -> dict:
-    create = create_task(
+    create = rpc_create_task(
         {
             "task_kind": "asr.transcribe",
             "model": "qwen3-asr-0.6b-onnx",
             "files": [{"name": audio.name, "mime": "audio/wav", "role": "audio", "required": True}],
             "params": {},
         },
-        f"smoke-indextts-asr-qwen-create-{timestamp}",
+        f"smoke-indextts-asr-qwen-asr-create-{timestamp}",
         timeout,
     )
     upload_file(first_upload(create, "audio")["upload_url"], audio, "audio/wav", timeout)
-    return start_task(create["task_id"], f"smoke-indextts-asr-qwen-start-{timestamp}", timeout)
+    return rpc_start_task(create["task_id"], f"smoke-indextts-asr-qwen-asr-start-{timestamp}", timeout)
 
 
 def extract_tts_audio_ref(payload: dict) -> dict:
@@ -731,6 +896,35 @@ def resolve_audio_path(file_ref: dict) -> Path | None:
         return None
     path = Path(raw_path)
     return path if path.is_absolute() else (repo_root() / path).resolve()
+
+
+def validate_yolo_payload(payload: dict) -> tuple[int, int]:
+    if payload.get("state") != "succeeded":
+        raise SmokeError(f"YOLO generic task did not succeed: {payload}")
+    output = payload.get("output") or {}
+    if not isinstance(output, dict) or output.get("type") != "object_detections":
+        raise SmokeError(f"YOLO output type mismatch: {payload}")
+    objects = output.get("objects")
+    if not isinstance(objects, list) or not objects:
+        raise SmokeError(f"YOLO output did not contain any objects: {payload}")
+    labels = [object_label(item) for item in objects if isinstance(item, dict)]
+    car_count = sum(1 for label in labels if is_car_like_label(label))
+    if car_count <= 0:
+        raise SmokeError(f"YOLO output did not contain a car-like label: labels={labels!r}")
+    return len(objects), car_count
+
+
+def object_label(item: dict) -> str:
+    for key in ("label", "class", "name", "class_name"):
+        value = item.get(key)
+        if isinstance(value, str):
+            return value
+    return ""
+
+
+def is_car_like_label(label: str) -> bool:
+    normalized = "".join(ch for ch in label.lower() if ch.isalnum())
+    return normalized in {"car", "cars", "automobile"} or "car" in normalized
 
 
 def extract_asr_text(payload: dict) -> str:
@@ -760,18 +954,18 @@ def compare_text(expected: str, actual: str) -> dict:
     }
 
 
-def create_task(params: dict, request_id: str, timeout: float) -> dict:
-    status, payload = mcp_infer("create_task", params, request_id, timeout)
-    assert_mcp_success(status, payload, "MCP create_task")
+def rpc_create_task(params: dict, request_id: str, timeout: float) -> dict:
+    status, payload = rpc_infer("create_task", params, request_id, timeout)
+    assert_rpc_success(status, payload, "legacy RPC create_task")
     result = payload.get("result")
     if not isinstance(result, dict) or not result.get("task_id"):
         raise SmokeError(f"create_task returned malformed result: {payload}")
     return result
 
 
-def start_task(task_id: str, request_id: str, timeout: float) -> dict:
-    status, payload = mcp_infer("start_task", {"task_id": task_id, "wait": True, "timeout_sec": int(timeout)}, request_id, timeout)
-    assert_mcp_success(status, payload, "MCP start_task")
+def rpc_start_task(task_id: str, request_id: str, timeout: float) -> dict:
+    status, payload = rpc_infer("start_task", {"task_id": task_id, "wait": True, "timeout_sec": int(timeout)}, request_id, timeout)
+    assert_rpc_success(status, payload, "legacy RPC start_task")
     result = payload.get("result")
     if not isinstance(result, dict):
         raise SmokeError(f"start_task returned malformed result: {payload}")

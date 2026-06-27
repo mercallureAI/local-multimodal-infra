@@ -108,6 +108,8 @@ pub struct OrtOutput {
 #[serde(rename_all = "snake_case")]
 pub enum TensorElement {
     F32,
+    F16,
+    Bool,
     I8,
     I16,
     I32,
@@ -134,6 +136,8 @@ pub struct SessionMetadata {
 #[derive(Debug, Clone, PartialEq)]
 pub enum OrtTensorData {
     F32(Vec<f32>),
+    F16(Vec<half::f16>),
+    Bool(Vec<bool>),
     I8(Vec<i8>),
     I16(Vec<i16>),
     I32(Vec<i32>),
@@ -144,6 +148,8 @@ impl OrtTensorData {
     pub fn element_type(&self) -> TensorElement {
         match self {
             Self::F32(_) => TensorElement::F32,
+            Self::F16(_) => TensorElement::F16,
+            Self::Bool(_) => TensorElement::Bool,
             Self::I8(_) => TensorElement::I8,
             Self::I16(_) => TensorElement::I16,
             Self::I32(_) => TensorElement::I32,
@@ -151,9 +157,11 @@ impl OrtTensorData {
         }
     }
 
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         match self {
             Self::F32(data) => data.len(),
+            Self::F16(data) => data.len(),
+            Self::Bool(data) => data.len(),
             Self::I8(data) => data.len(),
             Self::I16(data) => data.len(),
             Self::I32(data) => data.len(),
@@ -472,6 +480,16 @@ impl RealSession {
                         .map_err(map_ort_err)?
                         .upcast()
                 }
+                OrtTensorData::F16(data) => {
+                    Tensor::from_array((shape, data.clone().into_boxed_slice()))
+                        .map_err(map_ort_err)?
+                        .upcast()
+                }
+                OrtTensorData::Bool(data) => {
+                    Tensor::from_array((shape, data.clone().into_boxed_slice()))
+                        .map_err(map_ort_err)?
+                        .upcast()
+                }
                 OrtTensorData::I8(data) => {
                     Tensor::from_array((shape, data.clone().into_boxed_slice()))
                         .map_err(map_ort_err)?
@@ -507,6 +525,20 @@ impl RealSession {
                         data: OrtTensorData::F32(data.to_vec()),
                     });
                 }
+                if let Ok((shape, data)) = value.try_extract_tensor::<half::f16>() {
+                    return Ok(OrtTensorOutput {
+                        name: name.to_string(),
+                        shape: shape_to_usize(name, shape)?,
+                        data: OrtTensorData::F16(data.to_vec()),
+                    });
+                }
+                if let Ok((shape, data)) = value.try_extract_tensor::<bool>() {
+                    return Ok(OrtTensorOutput {
+                        name: name.to_string(),
+                        shape: shape_to_usize(name, shape)?,
+                        data: OrtTensorData::Bool(data.to_vec()),
+                    });
+                }
                 if let Ok((shape, data)) = value.try_extract_tensor::<i8>() {
                     return Ok(OrtTensorOutput {
                         name: name.to_string(),
@@ -536,7 +568,7 @@ impl RealSession {
                     });
                 }
                 Err(InfraError::Backend(format!(
-                    "output `{name}` has unsupported tensor type; supported output element types are f32, i8, i16, i32, and i64; available outputs: {}",
+                    "output `{name}` has unsupported tensor type; extractable output element types are f32, f16, bool, i8, i16, i32, and i64; available outputs: {}",
                     format_names(self.metadata.outputs.iter().map(|output| output.name.as_str()))
                 )))
             })
@@ -598,6 +630,8 @@ fn tensor_metadata(outlet: &ort::value::Outlet) -> TensorMetadata {
 fn tensor_element(element: TensorElementType) -> TensorElement {
     match element {
         TensorElementType::Float32 => TensorElement::F32,
+        TensorElementType::Float16 => TensorElement::F16,
+        TensorElementType::Bool => TensorElement::Bool,
         TensorElementType::Int8 => TensorElement::I8,
         TensorElementType::Int16 => TensorElement::I16,
         TensorElementType::Int32 => TensorElement::I32,
@@ -728,6 +762,29 @@ mod tests {
 
         assert_eq!(outputs[0].name, "y");
         assert_eq!(outputs[0].data, OrtTensorData::I64(vec![4, 9]));
+    }
+
+    #[test]
+    fn generated_f16_identity_runs_on_cpu() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model_path = dir.path().join("identity_f16.onnx");
+        fs::write(&model_path, identity_model(10)).expect("write model");
+
+        let mut session = OrtSession::load(&model_path, ProviderSelection::default())
+            .expect("load identity model");
+        assert_eq!(session.inputs()[0].element_type, TensorElement::F16);
+
+        let data = vec![half::f16::from_f32(1.5), half::f16::from_f32(-2.0)];
+        let outputs = session
+            .run_tensors(&[OrtTensorInput {
+                name: "x".to_string(),
+                shape: vec![2],
+                data: OrtTensorData::F16(data.clone()),
+            }])
+            .expect("run identity");
+
+        assert_eq!(outputs[0].name, "y");
+        assert_eq!(outputs[0].data, OrtTensorData::F16(data));
     }
 
     #[test]

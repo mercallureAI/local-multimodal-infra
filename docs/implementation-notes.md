@@ -6,7 +6,6 @@ This MVP intentionally implements only the ORT backend seam. Candle, Python, C++
 
 The `ort` crate is configured with downloaded/copied CPU binaries so build/check does not require a system-wide ONNX Runtime install. The backend remains ORT-specific at the API/config layer; CUDA/DML provider features are opt-in and must be validated against the local ORT execution providers before use.
 
-`crates/controller` has no dependency on `crates/runtime`, `crates/backend-ort`, `crates/adapter-yolo`, or `crates/adapter-qwen-asr`.
 
 ## Providers: CPU, CUDA, DML
 
@@ -17,6 +16,7 @@ The `ort` crate is configured with downloaded/copied CPU binaries so build/check
 - DML: enum/config placeholder only. It is not claimed complete in this MVP.
 
 Model/provider differences are handled by model config `runtime.provider_order`. The checked-in Qwen ASR and YOLO specs use `[cpu]`; CUDA must be added manually after provider validation.
+
 
 ## Qwen ASR limitations
 
@@ -37,9 +37,11 @@ For official parity research without starting services, run `python -m scripts.l
 
 Optional IndexTTS ASR cross-validation lives in the Python harness, not in ad-hoc curl scripts. Run `python -m scripts.lcoal.smoke --tests indextts_asr --indextts-frontend auto --workdir ./workdir --model-dir ./workdir/models` or add `--indextts-asr-check` to an existing smoke run. The flow enables IndexTTS, uses the Rust frontend by default (official Python only when explicitly requested), synthesizes a WAV through generic `create_task`/upload/`start_task`, transcribes that WAV with the Qwen ASR generic task path, and saves `workdir/data/smoke-indextts-asr-<timestamp>.json` containing the source text, frontend mode, token-id source, normalized expected text, WAV path/URL, ASR text, simple similarity/coverage, and missing/extra character summaries.
 
-## Admin MCP-like API
 
-The MVP uses JSON-RPC over HTTP at `/mcp/admin` with this response shape:
+
+## Legacy JSON-RPC API
+
+The controller exposes the legacy JSON-RPC API on port `17890` only at canonical `POST /rpc/admin` for admin/model operations and canonical `POST /rpc/infer` for inference/task operations. Legacy JSON-RPC `/mcp/admin` and `/mcp/infer` compatibility aliases are removed and must remain absent. These legacy JSON-RPC routes are not the standard MCP protocol. Requests and responses use JSON-RPC 2.0, for example:
 
 ```json
 {"jsonrpc":"2.0","id":1,"result":{}}
@@ -51,28 +53,40 @@ Errors use:
 {"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"..."}}
 ```
 
-Supported methods: `list_models`, `get_model`, `enable_model`, `disable_model`, `list_nodes`, `get_cluster_status`.
 
-This round adds `add_model`/`upsert_model` and `download_model`. The API still accepts core `ModelSpec` JSON, not MCP/OpenAI-specific schemas. `download_model` returns persisted per-artifact `DownloadStatus` values.
+The API accepts core `ModelSpec` JSON, not MCP/OpenAI-specific schemas. `download_model` returns persisted per-artifact `DownloadStatus` values.
 
 ## Standard MCP Streamable HTTP API
 
-The controller also starts an official SDK-backed standard MCP server on a separate bind to avoid path/protocol conflicts with the legacy JSON-RPC MCP-like endpoints. The default is `127.0.0.1:17892` with path `/mcp`; override it with `--mcp-bind <addr>`, `--mcp-bind=<addr>`, or `LCOAL_MCP_BIND`.
+The controller also starts an official SDK-backed standard MCP server on a separate bind to avoid path/protocol conflicts with the legacy JSON-RPC endpoints. The default and only documented local endpoint is `http://127.0.0.1:17892/mcp`; override the bind only for controlled local development with `--mcp-bind <addr>`, `--mcp-bind=<addr>`, or `LCOAL_MCP_BIND`.
 
-The standard server uses the official Rust `rmcp` Streamable HTTP transport in stateless mode (`stateful_mode=false`) and responds according to the SDK 0.16 streamable HTTP behavior. It exposes tool names matching the legacy style: generic inference (`create_task`, `start_task`, `get_task`, `wait_task`, `run_task`, `sign_assets`, `sign_asset_urls`), direct inference (`asr_transcribe`, `object_detect`, `tts_synthesize`), and admin/asset operations (`list_models`, `get_model`, `add_model`, `upsert_model`, `download_model`, `enable_model`, `disable_model`, `list_nodes`, `get_cluster_status`, `list_assets`, `search_assets`). Tool success content is JSON text containing the same result object/array that the old JSON-RPC `result` carried.
 
 Security boundary: the standard MCP endpoint exposes admin and mutating tools. Keep the bind loopback-only for local automation (`127.0.0.1:17892` or `[::1]:17892`). Do **not** bind it to `0.0.0.0:17892` or another shared-network address. Any future non-loopback deployment must add an admin token and/or ACL in front of the standard MCP transport before exposing these tools.
 
-Validate a running controller with the official Python SDK client:
+Validate a running controller with the official Python SDK client. Do not validate this endpoint with raw HTTP JSON-RPC; use official Python MCP SDK or rmcp client semantics for MCP protocol calls. Raw `urllib`/HTTP is used by the smoke client only for asset bytes uploaded/downloaded through signed URLs returned by MCP tools.
 
 ```bash
-python -m scripts.lcoal.mcp_standard_client --url http://127.0.0.1:17892/mcp
+python -m scripts.lcoal.mcp_standard_client --url http://127.0.0.1:17892/mcp --full
 ```
 
-The smoke harness has a lightweight alias that starts controller/worker and runs the same client:
+The smoke harness has aliases that start controller/worker and run the same client or the legacy RPC helpers:
 
 ```bash
-python -m scripts.lcoal.smoke --tests mcp_standard --workdir ./workdir --model-dir ./workdir/models
+python -m scripts.lcoal.smoke --tests rpc --workdir ./workdir --model-dir ./workdir/models
+python -m scripts.lcoal.smoke --tests mcp --workdir ./workdir --model-dir ./workdir/models
+python -m scripts.lcoal.smoke --tests all --workdir ./workdir --model-dir ./workdir/models
+```
+
+
+
+
+- `mcp` expands to standard MCP SDK coverage on `http://127.0.0.1:17892/mcp`: tool listing, admin/catalog/assets, generic task flow, and direct inference where local resources/artifacts are available.
+- `all` expands both groups and still respects sensible skip flags.
+- `qwen-asr` is the canonical Qwen ASR smoke alias.
+
+
+```bash
+python -m scripts.lcoal.smoke --tests qwen-asr --workdir ./workdir --model-dir ./workdir/models
 ```
 
 ## Model catalog, SQLite, and workdir layout
@@ -102,6 +116,14 @@ The controller depends on the store for metadata/status only. It still does not 
 
 - ASR: `andrewleech/qwen3-asr-0.6b-onnx` at revision `4fc24a1402e74db89c4d2ef256875e71680128c4`; enabled because it is ONNX/ORT. The int4 file subset is downloaded into `<model_dir>/qwen3-asr-0.6b-onnx`. The real CPU ORT encoder/decoder/tokenizer path is implemented; real INT4 execution still depends on ORT contrib `MatMulNBits` support and should be verified with the `LCOAL_QWEN_ASR_MODEL_DIR`-gated smoke test.
 - Object detection: `aaurelions/yolo11n.onnx` at revision `f46d9b72aa9a0f02bc00484446e2310b1a549bce`; enabled. The model file downloads to `<model_dir>/yolo11n.onnx/yolo11n.onnx`. COCO labels are a separate URL artifact from Ultralytics raw GitHub because the HF repository does not provide labels.
-- TTS/IndexTTS: paused. There is no active default TTS model and no IndexTTS YAML/default catalog entry.
+- TTS/IndexTTS: `indextts-1.5-onnx` remains disabled/local-only.
 
 Remote downloads use Hugging Face resolve URLs or direct URLs. `HF_TOKEN`/`HUGGINGFACE_HUB_TOKEN` is used for Hugging Face metadata and file requests when present. Explicit HF `files` remain supported; `allow_patterns` are expanded by reading HF model metadata siblings and matching simple `*`/`?` globs. SHA-256 is verified only when configured; otherwise status explicitly records that verification was skipped. No Candle/Python/C++/sidecar path is implemented.
+
+Release smoke examples:
+
+```bash
+cargo build --release --bins
+python -m scripts.lcoal.smoke --skip-build --release --tests mcp --workdir ./workdir --model-dir ./workdir/models --ready-timeout 60 --request-timeout 600
+python -m scripts.lcoal.smoke --skip-build --release --tests rpc --workdir ./workdir --model-dir ./workdir/models --ready-timeout 60 --request-timeout 600
+```

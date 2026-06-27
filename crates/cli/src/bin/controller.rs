@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
     }
     let layout = config.layout();
     let store = SqliteModelStore::new(&layout.database_path, &layout.model_dir)?;
+    store.delete_models(["glm-ocr-onnx-q4f16", "glm-ocr-onnx-fp16"])?;
     store.seed_models(lcoal_registry::default_catalog(&layout.model_dir))?;
     store.seed_models(lcoal_registry::load_yaml_specs(&layout.models_conf_dir)?)?;
     let registry = ModelRegistry::from_models(store.list_models()?);

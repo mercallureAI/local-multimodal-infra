@@ -362,6 +362,16 @@ pub(crate) fn attention_mask_input(
             shape,
             data.into_iter().map(|value| value as f32).collect(),
         ),
+        TensorElement::F16 => {
+            return Err(InfraError::Unsupported(
+                "IndexTTS_E attention_mask f16 input is not supported".to_string(),
+            ));
+        }
+        TensorElement::Bool => OrtTensorInput {
+            name: "attention_mask".to_string(),
+            shape,
+            data: OrtTensorData::Bool(data.into_iter().map(|value| value != 0).collect()),
+        },
         TensorElement::I32 => tensor_i32("attention_mask", shape, data),
         TensorElement::I64 | TensorElement::Other => tensor_i64(
             "attention_mask",

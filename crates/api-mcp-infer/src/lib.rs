@@ -57,7 +57,7 @@ pub struct InferenceApiState {
 
 pub fn router(state: InferenceApiState) -> Router {
     Router::new()
-        .route("/mcp/infer", post(handle_json_rpc))
+        .route("/rpc/infer", post(handle_json_rpc))
         .with_state(state)
 }
 
@@ -306,7 +306,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn object_detect_route_dispatches_controller_task() {
+    async fn mcp_infer_route_is_not_registered_while_rpc_infer_remains_canonical() {
+        let service = Arc::new(RecordingApi::default());
+        let app = router(InferenceApiState {
+            service: service.clone(),
+        });
+
+        let mcp_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp/infer")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"object_detect","params":{"image":{"path":"./image.jpg"}}}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(mcp_response.status(), StatusCode::NOT_FOUND);
+
+        let rpc_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/rpc/infer")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"object_detect","params":{"image":{"path":"./image.jpg"}}}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(rpc_response.status(), StatusCode::OK);
+        let tasks = service.tasks.lock().expect("tasks lock");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].kind, TaskKind::ObjectDetect);
+    }
+
+    #[tokio::test]
+    async fn object_detect_rpc_route_dispatches_controller_task() {
         let service = Arc::new(RecordingApi::default());
         let app = router(InferenceApiState {
             service: service.clone(),
@@ -316,7 +360,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/mcp/infer")
+                    .uri("/rpc/infer")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"jsonrpc":"2.0","id":1,"method":"object_detect","params":{"model":"yolo11n.onnx","image":{"path":"./image.jpg","mime":"image/jpeg"}}}"#,
@@ -350,7 +394,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn asr_transcribe_route_dispatches_controller_task() {
+    async fn asr_transcribe_rpc_route_dispatches_controller_task() {
         let service = Arc::new(RecordingApi::default());
         let app = router(InferenceApiState {
             service: service.clone(),
@@ -360,7 +404,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/mcp/infer")
+                    .uri("/rpc/infer")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"jsonrpc":"2.0","id":2,"method":"asr_transcribe","params":{"model":"qwen3-asr-0.6b-onnx","audio":{"path":"./audio.wav","mime":"audio/wav"}}}"#,
@@ -394,7 +438,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tts_synthesize_route_dispatches_controller_task() {
+    async fn tts_synthesize_rpc_route_dispatches_controller_task() {
         let service = Arc::new(RecordingApi::default());
         let app = router(InferenceApiState {
             service: service.clone(),
@@ -404,7 +448,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/mcp/infer")
+                    .uri("/rpc/infer")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"jsonrpc":"2.0","id":3,"method":"tts_synthesize","params":{"model_id":"indextts-1.5-onnx","text":"hello","reference_audio":{"path":"./ref.wav","mime":"audio/wav"}}}"#,
@@ -453,7 +497,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/mcp/infer")
+                    .uri("/rpc/infer")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"jsonrpc":"2.0","id":4,"method":"tts_synthesize","params":{"model":"indextts-1.5-onnx","text":"hello","reference_path":"./ref.wav"}}"#,

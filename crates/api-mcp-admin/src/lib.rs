@@ -30,7 +30,7 @@ pub struct AdminApiState {
 
 pub fn router(state: AdminApiState) -> Router {
     Router::new()
-        .route("/mcp/admin", post(handle_json_rpc))
+        .route("/rpc/admin", post(handle_json_rpc))
         .with_state(state)
 }
 
@@ -137,4 +137,130 @@ fn required_id(params: &Value) -> &str {
         .and_then(Value::as_str)
         .or_else(|| params.get("model_id").and_then(Value::as_str))
         .unwrap_or("")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tower::ServiceExt;
+
+    #[derive(Default)]
+    struct RecordingAdminApi {
+        list_models_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl AdminApi for RecordingAdminApi {
+        async fn list_models(&self) -> Result<Vec<ModelSpec>> {
+            self.list_models_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+
+        async fn get_model(&self, id: &str) -> Result<ModelSpec> {
+            Err(lcoal_error::InfraError::Unsupported(format!(
+                "unexpected get_model in test: {id}"
+            )))
+        }
+
+        async fn upsert_model(&self, _spec: ModelSpec) -> Result<ModelSpec> {
+            Err(lcoal_error::InfraError::Unsupported(
+                "unexpected upsert_model in test".to_string(),
+            ))
+        }
+
+        async fn download_model(&self, id: &str) -> Result<Vec<DownloadStatus>> {
+            Err(lcoal_error::InfraError::Unsupported(format!(
+                "unexpected download_model in test: {id}"
+            )))
+        }
+
+        async fn enable_model(&self, id: &str) -> Result<ModelSpec> {
+            Err(lcoal_error::InfraError::Unsupported(format!(
+                "unexpected enable_model in test: {id}"
+            )))
+        }
+
+        async fn disable_model(&self, id: &str) -> Result<ModelSpec> {
+            Err(lcoal_error::InfraError::Unsupported(format!(
+                "unexpected disable_model in test: {id}"
+            )))
+        }
+
+        async fn list_nodes(&self) -> Result<Vec<NodeStatus>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_cluster_status(&self) -> Result<Value> {
+            Ok(json!({ "ok": true }))
+        }
+    }
+
+    async fn post_list_models(app: Router, uri: &str) -> Value {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"list_models","params":{}}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        serde_json::from_slice(&body).expect("json response")
+    }
+
+    #[tokio::test]
+    async fn canonical_rpc_admin_route_handles_json_rpc() {
+        let service = Arc::new(RecordingAdminApi::default());
+        let app = router(AdminApiState {
+            service: service.clone(),
+        });
+
+        let payload = post_list_models(app, "/rpc/admin").await;
+
+        assert!(payload.get("error").is_none(), "{payload:?}");
+        assert_eq!(payload.get("result"), Some(&json!([])));
+        assert_eq!(service.list_models_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn mcp_admin_route_is_not_registered_and_does_not_call_service() {
+        let service = Arc::new(RecordingAdminApi::default());
+        let app = router(AdminApiState {
+            service: service.clone(),
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp/admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"list_models","params":{}}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(service.list_models_calls.load(Ordering::SeqCst), 0);
+    }
 }

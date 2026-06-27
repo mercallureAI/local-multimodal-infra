@@ -103,13 +103,13 @@ fn real_model_smoke_if_env_set() {
     let mut adapter = match QwenAsrAdapter::load(&model_spec(PathBuf::from(model_dir))) {
         Ok(adapter) => adapter,
         Err(err) => {
-            eprintln!("qwen smoke stopped at model load boundary: {err}");
+            eprintln!("Qwen ASR smoke stopped at model load boundary: {err}");
             return;
         }
     };
     match adapter.transcribe(&FileRef::local(wav)) {
         Ok(InferenceOutput::AsrTranscription { text }) => {
-            eprintln!("qwen smoke text: {text:?}")
+            eprintln!("Qwen ASR smoke text: {text:?}")
         }
         Ok(other) => panic!("unexpected output: {other:?}"),
         Err(err) => {
@@ -118,7 +118,7 @@ fn real_model_smoke_if_env_set() {
                 msg.contains("inputs:") && msg.contains("outputs:"),
                 "smoke failure should carry session diagnostics: {msg}"
             );
-            eprintln!("qwen smoke reached expected boundary: {msg}");
+            eprintln!("Qwen ASR smoke reached expected boundary: {msg}");
         }
     }
 }

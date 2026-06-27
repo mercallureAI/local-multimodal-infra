@@ -100,6 +100,20 @@ impl SqliteModelStore {
         Connection::open(&self.database_path).map_err(sql_err)
     }
 
+    pub fn delete_models<const N: usize>(&self, ids: [&str; N]) -> Result<()> {
+        let conn = self.conn()?;
+        for id in ids {
+            conn.execute("DELETE FROM models WHERE id = ?1", params![id])
+                .map_err(sql_err)?;
+            conn.execute(
+                "DELETE FROM artifact_downloads WHERE model_id = ?1",
+                params![id],
+            )
+            .map_err(sql_err)?;
+        }
+        Ok(())
+    }
+
     pub fn seed_models(&self, specs: Vec<ModelSpec>) -> Result<()> {
         for spec in specs {
             self.upsert_model_preserving_enabled(spec)?;

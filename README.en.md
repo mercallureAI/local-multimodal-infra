@@ -11,9 +11,9 @@
 Think of it as:
 
 - **A local toolbox for agents**: agents do not need to know how models are loaded, where files live, or which worker runs a task.
-- **A local MCP Server**: model management, file upload, inference tasks, and result lookup.
+- **A standard MCP Server**: a separate official-SDK Streamable HTTP endpoint.
+- **A legacy JSON-RPC API**: controller-port model management, file upload, inference tasks, and result lookup.
 - **An OpenAI-compatible API Server**: limited OpenAI-style endpoints for existing apps and agent workflows.
-- **A local model runtime layer**: one place to manage YOLO, Qwen ASR, and experimental IndexTTS capabilities.
 
 ## When to use it
 
@@ -27,16 +27,19 @@ Think of it as:
 
 ## How agents use it
 
-The project exposes two main entry points:
+The project exposes three main entry points:
 
 | Entry point | For | Purpose |
 | --- | --- | --- |
-| MCP Server | Agents / tool calls | Model management, file upload, inference tasks, and result lookup. |
+| Legacy JSON-RPC API | Agents / tool calls | Only `POST /rpc/admin` and `POST /rpc/infer`: admin is for model management/download/status/list, infer is for generic tasks, upload URLs, start/wait, and inference results. Old `/mcp/*` JSON-RPC routes are not supported entry points. |
+| Standard MCP Server | Agents / standard MCP clients | `http://127.0.0.1:17892/mcp`, verified only with the official MCP SDK client. |
 | OpenAI-compatible API Server | Apps / OpenAI-style clients | Model listing, speech recognition, speech synthesis, and limited compatibility APIs. |
 
 Default service addresses:
 
-- Controller / MCP Server / API Server: `http://127.0.0.1:17890`
+- Controller / API Server / legacy JSON-RPC: `http://127.0.0.1:17890`
+- Legacy JSON-RPC: only `POST /rpc/admin`, `POST /rpc/infer`
+- Standard MCP Streamable HTTP: `http://127.0.0.1:17892/mcp`
 - Worker: `http://127.0.0.1:17891`
 
 External agents should generally create a task, upload files, and wait for the result. This avoids sharing host file paths with the agent.
@@ -63,7 +66,7 @@ docker compose up --build
 
 With Docker Compose you get:
 
-- A controller that exposes the MCP Server and OpenAI-compatible API Server.
+- A controller that exposes legacy JSON-RPC, the standard MCP Server, and the OpenAI-compatible API Server.
 - A worker that loads models and runs local inference.
 - A local `./workdir` directory for models, data, uploads, and logs.
 
@@ -72,6 +75,21 @@ Real models are not baked into the image. After the first startup, download the 
 ## Local development
 
 Without Docker, run the controller and worker directly. See [AGENTS.md](AGENTS.md) and [Implementation notes](docs/implementation-notes.md) for commands, service rules, and smoke harness details.
+
+Common smoke harness aliases:
+
+- `mcp`: runs the standard MCP SDK group through `http://127.0.0.1:17892/mcp` with the official Python `mcp` SDK: tool listing, admin/catalog/assets, generic task flow, and direct inference when local resources are available. It never treats `/rpc/*` as MCP.
+- `all`: expands both `rpc` and `mcp`, while still honoring skip flags such as `--skip-yolo`, `--skip-qwen-asr`, and `--skip-indextts`.
+- `mcp_standard`: validates standard MCP tool listing, admin/catalog/assets, and generic/direct tool calls with the official Python MCP SDK, not by pretending `/rpc/*` is MCP.
+
+
+Examples:
+
+```bash
+python -m scripts.lcoal.smoke --tests rpc --workdir ./workdir --model-dir ./workdir/models
+python -m scripts.lcoal.smoke --tests mcp --workdir ./workdir --model-dir ./workdir/models
+python -m scripts.lcoal.smoke --tests all --workdir ./workdir --model-dir ./workdir/models
+```
 
 Common configuration entry points:
 
@@ -89,8 +107,7 @@ Common configuration entry points:
 
 ## Roadmap
 
-- [ ] Improve the MCP implementation
-- [ ] More local model capabilities (OCR/image reading/video reading/vectors/ranking)
+- [ ] Improve the standard MCP implementation while keeping the legacy JSON-RPC boundary clear
 - [ ] More mature API Server
 - [ ] Stronger runtime management
 - [ ] IndexTTS local capability recovery
@@ -104,3 +121,11 @@ Common configuration entry points:
 - [Dockerfile](Dockerfile)
 - [docker-compose.yml](docker-compose.yml)
 - [.env.example](.env.example)
+
+Release smoke examples:
+
+```bash
+cargo build --release --bins
+python -m scripts.lcoal.smoke --skip-build --release --tests mcp --workdir ./workdir --model-dir ./workdir/models --ready-timeout 60 --request-timeout 600
+python -m scripts.lcoal.smoke --skip-build --release --tests rpc --workdir ./workdir --model-dir ./workdir/models --ready-timeout 60 --request-timeout 600
+```

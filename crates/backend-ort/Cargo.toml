@@ -12,7 +12,8 @@ ort-runtime = []
 
 [dependencies]
 lcoal-error = { path = "../error" }
-ort = { workspace = true, features = ["std", "tracing", "download-binaries", "copy-dylibs", "tls-rustls", "api-24"] }
+half.workspace = true
+ort = { workspace = true, features = ["std", "tracing", "download-binaries", "copy-dylibs", "tls-rustls", "api-24", "half"] }
 serde.workspace = true
 tracing.workspace = true
 

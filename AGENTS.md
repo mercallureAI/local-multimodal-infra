@@ -7,17 +7,19 @@ Repo-specific instructions for future OpenCode agents. Higher-priority user inst
 - Rust Cargo workspace. Service bins `controller` and `worker` live in `crates/cli`; the `lcoal-multimodal-infra` main only prints a hint.
 - `crates/controller` may depend on API/files/model-store/registry/scheduler, but must not depend on runtime/backend-ort/adapters. It schedules/forwards and does not load models.
 - `crates/worker` registers, heartbeats, and exposes protected `/internal/infer`.
-- `crates/runtime` owns lazy model loading, idle unload, and dispatch to `adapter-yolo`, `adapter-qwen-asr`, and `adapter-index-tts` through the ORT backend.
+
+## Naming rules
+
+- Avoid generic capability-only names and broad family-only names when the adapter is task-specific.
 
 ## Config, routes, and storage
 
 - Default configs: `configs/controller.yaml`, `configs/worker.yaml`; model specs: `configs/models.d/*.yaml`.
-- Default addresses: controller legacy HTTP API `127.0.0.1:17890`, worker `127.0.0.1:17891`, standard MCP Streamable HTTP `127.0.0.1:17892/mcp`.
+- Default addresses: controller HTTP API and legacy JSON-RPC `127.0.0.1:17890`, worker `127.0.0.1:17891`, standard MCP Streamable HTTP `127.0.0.1:17892/mcp`.
 - Standard MCP exposes admin and mutating tools; keep it loopback-only by default. Do not use `--mcp-bind 0.0.0.0:17892` or otherwise expose it on a shared network unless a future admin-token/ACL layer is implemented and enabled.
 - Start services with explicit storage args: `--workdir ./workdir --model-dir ./workdir/models`.
 - Runtime artifacts: real models only in `workdir/models`; data/logs/uploads/generated/temp only in `workdir/data`; SQLite default `workdir/data/lcoal.db`. Do not commit or delete `workdir/`; do not commit `target/`.
-- Checked-in model specs currently enable yolo11n ONNX and qwen3-asr ONNX; `indextts-1.5-onnx` is disabled/local-only under `workdir/models/indextts-1.5-onnx`.
-- Controller routes worth remembering: `/health`, `/assets`, `/assets/sign`, `/files/upload/...`, admin MCP-like JSON-RPC `POST /mcp/admin`, infer MCP-like JSON-RPC `POST /mcp/infer`, standard MCP Streamable HTTP on the separate bind `127.0.0.1:17892/mcp`, OpenAI `GET /v1/models`, `POST /v1/audio/transcriptions`, `POST /v1/audio/speech`. Worker routes: `/health`, protected `/internal/infer`.
+- Controller routes worth remembering: `/health`, `/assets`, `/assets/sign`, `/files/upload/...`, legacy JSON-RPC only at `POST /rpc/admin` and `POST /rpc/infer` (old JSON-RPC `/mcp/admin` and `/mcp/infer` compatibility aliases are removed), standard MCP Streamable HTTP only on the separate bind `127.0.0.1:17892/mcp` (verify only with official MCP SDK / rmcp client semantics, not raw HTTP JSON-RPC), OpenAI `GET /v1/models`, `POST /v1/audio/transcriptions`, `POST /v1/audio/speech`. Worker routes: `/health`, protected `/internal/infer`.
 
 ## Service execution rules
 
@@ -28,32 +30,42 @@ Repo-specific instructions for future OpenCode agents. Higher-priority user inst
 
 ## Smoke harness
 
-- Prefer the harness over one-off scripts/curl for service/API/MCP smoke. Primary local smoke: `python -m scripts.lcoal.smoke --tests yolo,qwen,indextts --workdir ./workdir --model-dir ./workdir/models`.
+- Prefer the harness over one-off scripts/curl for service/API/MCP smoke. Primary local smoke: `python -m scripts.lcoal.smoke --tests yolo,qwen-asr,indextts --workdir ./workdir --model-dir ./workdir/models`.
 - Other useful harness commands:
-  - `python -m scripts.lcoal.smoke --tests assets,yolo,qwen,indextts --workdir ./workdir --model-dir ./workdir/models`
+  - `python -m scripts.lcoal.smoke --tests mcp --workdir ./workdir --model-dir ./workdir/models` (standard MCP SDK group on `127.0.0.1:17892/mcp`: tool listing, admin/catalog/assets, generic task flow, direct inference where resources/artifacts are available)
+  - `python -m scripts.lcoal.smoke --tests all --workdir ./workdir --model-dir ./workdir/models` (both groups; skip flags still apply)
+  - `python -m scripts.lcoal.smoke --tests assets,yolo,qwen-asr,indextts --workdir ./workdir --model-dir ./workdir/models`
   - `python -m scripts.lcoal.smoke --tests indextts_asr --indextts-frontend auto --workdir ./workdir --model-dir ./workdir/models`
-  - `python scripts/smoke_api_mcp.py --tests yolo,qwen --workdir ./workdir --model-dir ./workdir/models`
+  - `python scripts/smoke_api_mcp.py --tests yolo,qwen-asr --workdir ./workdir --model-dir ./workdir/models`
   - `python -m scripts.lcoal.smoke --tests mcp_standard --workdir ./workdir --model-dir ./workdir/models`
 - Use `--skip-build` only when existing `target/debug/controller(.exe)` and `target/debug/worker(.exe)` are valid.
 - `scripts/smoke_api_mcp.py` is a thin compatibility entrypoint; implementation is under `scripts/lcoal/` (`smoke.py`, `processes.py`, `http_client.py`, `paths.py`). The harness builds via `cargo build --bins` unless skipped, starts services with Python `subprocess.Popen`, prints PIDs, writes `workdir/data/*.{stdout,stderr}.log`, waits for `/health`, and cleans up.
 - Harness defaults: controller URL `http://127.0.0.1:17890`, standard MCP URL `http://127.0.0.1:17892/mcp`, worker URL `http://127.0.0.1:17891`, smoke registration/admin env tokens, ready timeout 30s, request timeout 15s, build timeout 600s, cleanup port wait 8s.
-- Update `scripts/lcoal/smoke.py` when endpoints, MCP methods, OpenAI APIs, task upload, or assets behavior changes.
+- Update `scripts/lcoal/smoke.py` when endpoints, legacy RPC methods, standard MCP tools, OpenAI APIs, task upload, or assets behavior changes.
 
 ## Tokens, uploads, and task flow
 
 - Controller and worker must share a registration token: controller `--worker-registration-token`, worker `--registration-token`, or `LCOAL_WORKER_REGISTRATION_TOKEN`.
 - Upload URLs derive from `--public-base-url` / `public_base_url` / `LCOAL_PUBLIC_BASE_URL`; local default is `http://127.0.0.1:17890`.
 - Signed upload HMAC uses `--upload-signing-secret` / `upload_signing_secret` / `LCOAL_UPLOAD_SIGNING_SECRET`; if absent, a random per-process secret makes old upload URLs fail after restart.
-- Generic MCP upload flow: `create_task` -> raw-byte `POST /files/upload/<task_id>/<slot>?expires=...&sig=...` -> `start_task` / `wait_task`.
+- Generic legacy RPC upload flow: `create_task` via `/rpc/infer` -> raw-byte `POST /files/upload/<task_id>/<slot>?expires=...&sig=...` -> `start_task` / `wait_task`.
+- Standard MCP upload flow uses MCP tools (`create_task`, `start_task`, `wait_task`, `get_task`) through the official SDK; raw HTTP is acceptable only for data transfer to signed `upload_url` / `download_url`, not for MCP protocol calls.
 
 ## Verification commands
 
 - Cheap/default Rust checks: `cargo check --workspace --all-targets`, `cargo build --bins`, `cargo test --workspace`.
-- Focused tests: `cargo test -p lcoal-controller`, `cargo test -p lcoal-api-mcp-infer`, `cargo test -p lcoal-api-openai`, `cargo test -p lcoal-adapter-index-tts`, `cargo test -p lcoal-adapter-qwen-asr`.
 - Opt-in real Qwen artifact test: `LCOAL_QWEN_ASR_MODEL_DIR=workdir/models/qwen3-asr-0.6b-onnx cargo test -p lcoal-adapter-qwen-asr real_model_smoke_if_env_set -- --nocapture` (do not use PowerShell if the user forbids it).
 
 ## Script entrypoints
 
 - Help: `python -m scripts.lcoal.smoke --help`, `python -m scripts.lcoal.indextts_export --help`, `python scripts/indextts_export.py --help`.
-- Standard MCP validation client: `python -m scripts.lcoal.mcp_standard_client --url http://127.0.0.1:17892/mcp` (requires the official Python `mcp` SDK in that interpreter).
+- Standard MCP validation client: `python -m scripts.lcoal.mcp_standard_client --url http://127.0.0.1:17892/mcp --full` (requires the official Python `mcp` SDK in that interpreter).
 - IndexTTS export top-level entrypoint `scripts/indextts_export.py` delegates to `scripts.lcoal.indextts_export`; do not use old `tools/indextts` paths.
+
+Release smoke examples:
+
+```bash
+cargo build --release --bins
+python -m scripts.lcoal.smoke --skip-build --release --tests mcp --workdir ./workdir --model-dir ./workdir/models --ready-timeout 60 --request-timeout 600
+python -m scripts.lcoal.smoke --skip-build --release --tests rpc --workdir ./workdir --model-dir ./workdir/models --ready-timeout 60 --request-timeout 600
+```
