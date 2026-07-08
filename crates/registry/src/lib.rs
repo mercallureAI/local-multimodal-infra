@@ -180,26 +180,26 @@ fn index_tts_default(model_dir: &Path) -> ModelSpec {
     metadata.insert("precision".to_string(), json!("cpu-fp32"));
     metadata.insert(
         "artifact_note".to_string(),
-        json!("Local-only FP32. Export IndexTTS_A.onnx through IndexTTS_F.onnx plus bpe.model and manifest.yaml at the artifact root; no Hugging Face auto-download is configured."),
+        json!("FP32 artifacts are materialized from ModaLeap/indextts-1.5-onnx or an equivalent artifact root. Runtime expects IndexTTS_A.onnx through IndexTTS_F.onnx plus bpe.model and manifest.yaml/json at the artifact root."),
     );
     metadata.insert(
         "mvp_status".to_string(),
-        json!("Adapter validates local FP32 artifacts, loads root A-F ORT sessions, and uses a lightweight Rust text normalizer plus bpe.model SentencePiece tokenization; local FP32 artifact smoke is still required. q4cpu/fp16gpu paths have been withdrawn."),
+        json!("Adapter validates FP32 artifacts materialized from Hugging Face or an equivalent artifact root, loads root A-F ORT sessions, and uses a lightweight Rust text normalizer plus bpe.model SentencePiece tokenization; FP32 artifact smoke is still required. q4cpu/fp16gpu paths have been withdrawn."),
     );
     ModelSpec {
         id: id.to_string(),
-        name: "IndexTTS 1.5 ONNX (experimental, local)".to_string(),
+        name: "IndexTTS 1.5 ONNX (experimental)".to_string(),
         enabled: false,
         task_kinds: vec![TaskKind::TtsSynthesize],
         adapter: AdapterKind::IndexTts,
         backend: BackendKind::Ort,
         artifacts: vec![ModelArtifact {
-            kind: ArtifactKind::Local,
+            kind: ArtifactKind::HuggingFace,
             path: root,
             source_path: None,
             sha256: None,
             url: None,
-            repo_id: None,
+            repo_id: Some("ModaLeap/indextts-1.5-onnx".to_string()),
             revision: None,
             files: [
                 "IndexTTS_A.onnx",
@@ -209,6 +209,7 @@ fn index_tts_default(model_dir: &Path) -> ModelSpec {
                 "IndexTTS_E.onnx",
                 "IndexTTS_F.onnx",
                 "bpe.model",
+                "manifest.json",
                 "manifest.yaml",
             ]
             .iter()
@@ -412,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn default_catalog_keeps_tts_disabled_and_local_only() {
+    fn default_catalog_keeps_tts_disabled_and_hugging_face() {
         let dir = tempfile::tempdir().expect("tempdir");
         let specs = default_catalog(dir.path());
 
@@ -430,7 +431,12 @@ mod tests {
                 assert!(spec
                     .artifacts
                     .iter()
-                    .all(|artifact| artifact.kind == ArtifactKind::Local));
+                    .all(|artifact| artifact.kind == ArtifactKind::HuggingFace));
+                assert!(spec
+                    .artifacts
+                    .iter()
+                    .all(|artifact| artifact.repo_id.as_deref()
+                        == Some("ModaLeap/indextts-1.5-onnx")));
             }
         }
     }
@@ -454,7 +460,12 @@ mod tests {
                 assert!(spec
                     .artifacts
                     .iter()
-                    .all(|artifact| artifact.kind == ArtifactKind::Local));
+                    .all(|artifact| artifact.kind == ArtifactKind::HuggingFace));
+                assert!(spec
+                    .artifacts
+                    .iter()
+                    .all(|artifact| artifact.repo_id.as_deref()
+                        == Some("ModaLeap/indextts-1.5-onnx")));
             }
         }
     }

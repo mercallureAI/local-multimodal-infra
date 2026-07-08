@@ -1,14 +1,14 @@
 id: indextts-1.5-onnx
-name: IndexTTS 1.5 ONNX (experimental, local)
+name: IndexTTS 1.5 ONNX (experimental)
 enabled: false
 task_kinds:
   - tts.synthesize
 adapter: index_tts
 backend: ort
 artifacts:
-  - type: local
-    # Local-only layout. Export or copy artifacts here; no automatic HF download is configured.
-    path: workdir/models/indextts-1.5-onnx
+  - type: hugging_face
+    repo_id: ModaLeap/indextts-1.5-onnx
+    # path omitted: startup materializes to <model_dir>/indextts-1.5-onnx
     files:
       - IndexTTS_A.onnx
       - IndexTTS_B.onnx
@@ -17,6 +17,7 @@ artifacts:
       - IndexTTS_E.onnx
       - IndexTTS_F.onnx
       - bpe.model
+      - manifest.json
       - manifest.yaml
 runtime:
   provider_order: [cpu]
@@ -36,5 +37,4 @@ metadata:
   experimental: true
   precision: cpu-fp32
   artifact_layout: IndexTTS_A.onnx through IndexTTS_F.onnx plus bpe.model and manifest.yaml/json at the artifact root; FP32-only. Existing q4/ or fp16/ cache directories are ignored and no longer documented as supported runtime targets.
-  no_hf_download: true
-  mvp_status: Adapter validates local FP32 artifacts, loads root A-F ORT sessions, uses a lightweight Rust text normalizer plus bpe.model SentencePiece tokenization, and requires local FP32 artifact smoke. q4cpu/fp16gpu paths have been withdrawn.
+  mvp_status: Adapter validates FP32 artifacts materialized from Hugging Face or an equivalent artifact root, loads root A-F ORT sessions, uses a lightweight Rust text normalizer plus bpe.model SentencePiece tokenization, and requires FP32 artifact smoke. q4cpu/fp16gpu paths have been withdrawn.

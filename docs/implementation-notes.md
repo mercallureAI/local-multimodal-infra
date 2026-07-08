@@ -26,7 +26,7 @@ The adapter validates the known `qwen3-asr-0.6b-onnx` artifact layout and establ
 
 ## IndexTTS FP32 and text normalization boundary
 
-IndexTTS ONNX support is FP32-only. Export/package tooling writes and manifests the root `IndexTTS_A.onnx` through `IndexTTS_F.onnx` layout under `workdir/models/indextts-1.5-onnx`; runtime validation loads that root directly and no longer auto-selects `fp16/` for CUDA or `q4/` for CPU. Existing `q4/` or `fp16/` model caches may remain on disk but are ignored by current code and docs.
+IndexTTS ONNX support is FP32-only. The default catalog downloads the explicit `IndexTTS_A.onnx` through `IndexTTS_F.onnx`, `bpe.model`, and manifest files from `ModaLeap/indextts-1.5-onnx` into `workdir/models/indextts-1.5-onnx`; export/package tooling can also write the same root layout. Runtime validation loads that root directly and no longer auto-selects `fp16/` for CUDA or `q4/` for CPU. Existing `q4/` or `fp16/` model caches may remain on disk but are ignored by current code and docs.
 
 The official IndexTTS 1.5 frontend (`workdir/models/index-tts-v1.5/indextts/utils/front.py` and `common.py`) uses WeTextProcessing/pynini TN when available, but its tokenizer path does **not** convert arbitrary Hanzi to pinyin. It protects explicit tone-number pinyin and Chinese-name placeholders around TN, expands a small English `'s` contraction pattern, applies a punctuation replacement map, then calls `tokenize_by_CJK_char`, which splits each CJK character and uppercases non-CJK segments before SentencePiece.
 
@@ -117,7 +117,7 @@ The controller depends on the store for metadata/status only. It still does not 
 
 - ASR: `andrewleech/qwen3-asr-0.6b-onnx` at revision `4fc24a1402e74db89c4d2ef256875e71680128c4`; enabled because it is ONNX/ORT. The int4 file subset is downloaded into `<model_dir>/qwen3-asr-0.6b-onnx`. The real CPU ORT encoder/decoder/tokenizer path is implemented; real INT4 execution still depends on ORT contrib `MatMulNBits` support and should be verified with the `LCOAL_QWEN_ASR_MODEL_DIR`-gated smoke test.
 - Object detection: `aaurelions/yolo11n.onnx` at revision `f46d9b72aa9a0f02bc00484446e2310b1a549bce`; enabled. The model file downloads to `<model_dir>/yolo11n.onnx/yolo11n.onnx`. COCO labels are a separate URL artifact from Ultralytics raw GitHub because the HF repository does not provide labels.
-- TTS/IndexTTS: `indextts-1.5-onnx` remains disabled/local-only.
+- TTS/IndexTTS: `ModaLeap/indextts-1.5-onnx`; disabled by default while the FP32 ORT adapter remains experimental. The explicit A-F ONNX, `bpe.model`, `manifest.yaml`, and `manifest.json` subset downloads to `<model_dir>/indextts-1.5-onnx`.
 
 Remote downloads use Hugging Face resolve URLs or direct URLs. `HF_TOKEN`/`HUGGINGFACE_HUB_TOKEN` is used for Hugging Face metadata and file requests when present. Explicit HF `files` remain supported; `allow_patterns` are expanded by reading HF model metadata siblings and matching simple `*`/`?` globs. SHA-256 is verified only when configured; otherwise status explicitly records that verification was skipped. No Candle/Python/C++/sidecar path is implemented.
 
