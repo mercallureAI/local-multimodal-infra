@@ -1,5 +1,5 @@
 [package]
-name = "lcoal-error"
+name = "local-error"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true

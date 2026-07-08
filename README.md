@@ -1,4 +1,4 @@
-# lcoal-multimodal-infra
+# local-multimodal-infra
 
 > 把本地算力变成 Agent 可调用的多模态服务。它提供本地 MCP Server 和 OpenAI-compatible API Server，让 Agent 能使用本地图片理解、语音识别、语音合成等能力。
 
@@ -6,7 +6,7 @@
 
 ## 项目介绍
 
-`lcoal-multimodal-infra` 是一个本地多模态算力网关。它的目标很简单：**把你本机或内网机器上的算力，转换成可轻易部署的模型能力，以最少配置暴露给 Agent**。
+`local-multimodal-infra` 是一个本地多模态算力网关。它的目标很简单：**把你本机或内网机器上的算力，转换成可轻易部署的模型能力，以最少配置暴露给 Agent**。
 
 你可以把它理解为：
 
@@ -86,9 +86,9 @@ Smoke harness 常用别名：
 示例：
 
 ```bash
-python -m scripts.lcoal.smoke --tests rpc --workdir ./workdir --model-dir ./workdir/models
-python -m scripts.lcoal.smoke --tests mcp --workdir ./workdir --model-dir ./workdir/models
-python -m scripts.lcoal.smoke --tests all --workdir ./workdir --model-dir ./workdir/models
+python -m scripts.local.smoke --tests rpc --workdir ./workdir --model-dir ./workdir/models
+python -m scripts.local.smoke --tests mcp --workdir ./workdir --model-dir ./workdir/models
+python -m scripts.local.smoke --tests all --workdir ./workdir --model-dir ./workdir/models
 ```
 
 常用配置入口：
@@ -102,7 +102,7 @@ python -m scripts.lcoal.smoke --tests all --workdir ./workdir --model-dir ./work
 - `workdir/models`：真实模型工件。
 - `workdir/data`：SQLite、上传文件、日志和生成结果。
 - `docker-compose.yml` / `Dockerfile`：可选的容器化启动入口。
-- `scripts/lcoal/smoke.py`：本地 smoke harness。
+- `scripts/local/smoke.py`：本地 smoke harness。
 - `docs/implementation-notes.md`：更多实现细节。
 
 ## 路线图
@@ -126,6 +126,6 @@ Release smoke examples:
 
 ```bash
 cargo build --release --bins
-python -m scripts.lcoal.smoke --skip-build --release --tests mcp --workdir ./workdir --model-dir ./workdir/models --ready-timeout 60 --request-timeout 600
-python -m scripts.lcoal.smoke --skip-build --release --tests rpc --workdir ./workdir --model-dir ./workdir/models --ready-timeout 60 --request-timeout 600
+python -m scripts.local.smoke --skip-build --release --tests mcp --workdir ./workdir --model-dir ./workdir/models --ready-timeout 60 --request-timeout 600
+python -m scripts.local.smoke --skip-build --release --tests rpc --workdir ./workdir --model-dir ./workdir/models --ready-timeout 60 --request-timeout 600
 ```

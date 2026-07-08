@@ -1,25 +1,25 @@
 [package]
-name = "lcoal-cli"
+name = "local-cli"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
 [features]
 default = []
-cuda = ["lcoal-runtime/cuda"]
-directml = ["lcoal-runtime/directml"]
-tensorrt = ["lcoal-runtime/tensorrt"]
+cuda = ["local-runtime/cuda"]
+directml = ["local-runtime/directml"]
+tensorrt = ["local-runtime/tensorrt"]
 
 [dependencies]
 axum.workspace = true
-lcoal-config = { path = "../config" }
-lcoal-controller = { path = "../controller" }
-lcoal-error = { path = "../error" }
-lcoal-model-store = { path = "../model-store" }
-lcoal-registry = { path = "../registry" }
-lcoal-runtime = { path = "../runtime" }
-lcoal-telemetry = { path = "../telemetry" }
-lcoal-worker = { path = "../worker" }
+local-config = { path = "../config" }
+local-controller = { path = "../controller" }
+local-error = { path = "../error" }
+local-model-store = { path = "../model-store" }
+local-registry = { path = "../registry" }
+local-runtime = { path = "../runtime" }
+local-telemetry = { path = "../telemetry" }
+local-worker = { path = "../worker" }
 tokio.workspace = true
 tracing.workspace = true
 
@@ -32,5 +32,5 @@ name = "worker"
 path = "src/bin/worker.rs"
 
 [[bin]]
-name = "lcoal-multimodal-infra"
+name = "local-multimodal-infra"
 path = "src/main.rs"

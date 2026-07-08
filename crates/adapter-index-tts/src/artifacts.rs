@@ -60,7 +60,7 @@ pub struct IndexTtsArtifacts {
 
 impl IndexTtsArtifacts {
     pub fn resolve(spec: &ModelSpec) -> PathBuf {
-        if let Some(path) = env::var_os("LCOAL_INDEXTTS_MODEL_DIR") {
+        if let Some(path) = env::var_os("LOCAL_INDEXTTS_MODEL_DIR") {
             return PathBuf::from(path);
         }
         spec.artifacts
@@ -76,7 +76,7 @@ impl IndexTtsArtifacts {
             return Err(InfraError::ModelNotConfigured {
                 model_id: "index-tts".to_string(),
                 reason: format!(
-                    "IndexTTS artifact root is not a directory: {} (set LCOAL_INDEXTTS_MODEL_DIR or export to workdir/models/indextts-1.5-onnx)",
+                    "IndexTTS artifact root is not a directory: {} (set LOCAL_INDEXTTS_MODEL_DIR or export to workdir/models/indextts-1.5-onnx)",
                     root.display()
                 ),
             });

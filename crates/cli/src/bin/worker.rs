@@ -1,9 +1,9 @@
-use lcoal_config::WorkerConfig;
-use lcoal_error::{InfraError, Result};
-use lcoal_model_store::SqliteModelStore;
-use lcoal_registry::ModelRegistry;
-use lcoal_runtime::RuntimeManagerConfig;
-use lcoal_worker::WorkerState;
+use local_config::WorkerConfig;
+use local_error::{InfraError, Result};
+use local_model_store::SqliteModelStore;
+use local_registry::ModelRegistry;
+use local_runtime::RuntimeManagerConfig;
+use local_worker::WorkerState;
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 #[derive(Debug, Default)]
@@ -16,7 +16,7 @@ struct CliArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    lcoal_telemetry::init("worker");
+    local_telemetry::init("worker");
     let args = parse_args();
     let config_path = args
         .config_path
@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
     if let Some(model_dir) = args.model_dir {
         config.model_dir = Some(model_dir);
     }
-    if let Ok(token) = std::env::var("LCOAL_WORKER_REGISTRATION_TOKEN") {
+    if let Ok(token) = std::env::var("LOCAL_WORKER_REGISTRATION_TOKEN") {
         config.registration_token = Some(token);
     }
     if let Some(token) = args.registration_token {
@@ -36,8 +36,8 @@ async fn main() -> Result<()> {
     }
     let layout = config.layout();
     let store = SqliteModelStore::new(&layout.database_path, &layout.model_dir)?;
-    store.seed_models(lcoal_registry::default_catalog(&layout.model_dir))?;
-    store.seed_models(lcoal_registry::load_yaml_specs(&layout.models_conf_dir)?)?;
+    store.seed_models(local_registry::default_catalog(&layout.model_dir))?;
+    store.seed_models(local_registry::load_yaml_specs(&layout.models_conf_dir)?)?;
     let registry = ModelRegistry::from_models(store.list_models()?);
     let runtime_config = RuntimeManagerConfig {
         idle_ttl: Duration::from_secs(config.runtime.idle_ttl_sec),

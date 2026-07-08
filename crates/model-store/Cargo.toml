@@ -1,13 +1,13 @@
 [package]
-name = "lcoal-model-store"
+name = "local-model-store"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
 [dependencies]
 chrono.workspace = true
-lcoal-core = { path = "../core" }
-lcoal-error = { path = "../error" }
+local-core = { path = "../core" }
+local-error = { path = "../error" }
 reqwest.workspace = true
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde.workspace = true

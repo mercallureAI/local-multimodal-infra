@@ -6,8 +6,8 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use lcoal_core::{FileRef, InferenceInput, InferenceOutput, InferenceTask, ModelSpec, TaskKind};
-use lcoal_error::Result;
+use local_core::{FileRef, InferenceInput, InferenceOutput, InferenceTask, ModelSpec, TaskKind};
+use local_error::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
@@ -174,7 +174,7 @@ mod tests {
         body::{to_bytes, Body},
         http::{Request, StatusCode},
     };
-    use lcoal_core::{
+    use local_core::{
         AdapterKind, BackendKind, LoadPolicy, ResourceRequirement, RuntimePolicy, TaskKind,
     };
     use std::{collections::BTreeMap, sync::Mutex};

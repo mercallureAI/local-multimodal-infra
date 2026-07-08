@@ -1,8 +1,8 @@
-use lcoal_core::{
+use local_core::{
     AdapterKind, ArtifactKind, BackendKind, LoadPolicy, ModelArtifact, ModelSpec,
     ResourceRequirement, RuntimePolicy, TaskKind,
 };
-use lcoal_error::{InfraError, Result};
+use local_error::{InfraError, Result};
 use serde_json::json;
 use std::{collections::BTreeMap, fs, path::Path, sync::Arc};
 use tokio::sync::RwLock;
@@ -274,7 +274,7 @@ fn qwen_asr_default(model_dir: &Path) -> ModelSpec {
     );
     metadata.insert(
         "mvp_status".to_string(),
-        json!("Real CPU ORT encoder/decoder/tokenizer path is implemented; real INT4 execution depends on ORT contrib MatMulNBits support and should be verified with the LCOAL_QWEN_ASR_MODEL_DIR-gated smoke test"),
+        json!("Real CPU ORT encoder/decoder/tokenizer path is implemented; real INT4 execution depends on ORT contrib MatMulNBits support and should be verified with the LOCAL_QWEN_ASR_MODEL_DIR-gated smoke test"),
     );
     ModelSpec {
         id: id.to_string(),

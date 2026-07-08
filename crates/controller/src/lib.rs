@@ -9,21 +9,21 @@ use axum::{
 };
 use chrono::Utc;
 use hmac::{Hmac, Mac};
-use lcoal_api_mcp_admin::{AdminApi, AdminApiState};
-use lcoal_api_mcp_infer::{InferenceApi, InferenceApiState};
-use lcoal_api_openai::{OpenAiApi, OpenAiApiState};
-use lcoal_core::{
+use local_api_mcp_admin::{AdminApi, AdminApiState};
+use local_api_mcp_infer::{InferenceApi, InferenceApiState};
+use local_api_openai::{OpenAiApi, OpenAiApiState};
+use local_core::{
     AssetKind, AssetListQuery, AssetRecord, AssetSignItem, AssetSignRequest, AssetSignResponse,
     AssetSignedUrl, AssetUrlOperation, CreateTaskRequest, DownloadStatus, FileRef,
     GenericTaskResult, GenericTaskState, InferenceInput, InferenceOutput, InferenceTask, JobState,
     ModelSpec, NodeStatus, StartTaskRequest, TaskStatus, TaskUploadSlot, WaitTaskRequest,
     WorkerHeartbeat, WorkerRegistration, WorkerRegistrationResponse,
 };
-use lcoal_error::{InfraError, Result};
-use lcoal_files::{asset_uri, normalize_asset_path, parse_asset_uri, AssetsStore};
-use lcoal_model_store::SqliteModelStore;
-use lcoal_registry::ModelRegistry;
-use lcoal_scheduler::Scheduler;
+use local_error::{InfraError, Result};
+use local_files::{asset_uri, normalize_asset_path, parse_asset_uri, AssetsStore};
+use local_model_store::SqliteModelStore;
+use local_registry::ModelRegistry;
+use local_scheduler::Scheduler;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -35,7 +35,7 @@ mod standard_mcp;
 
 type HmacSha256 = Hmac<Sha256>;
 
-const WORKER_TOKEN_HEADER: &str = "x-lcoal-worker-token";
+const WORKER_TOKEN_HEADER: &str = "x-local-worker-token";
 const DEFAULT_UPLOAD_URL_TTL_SECS: i64 = 900;
 const DEFAULT_ASSET_URL_TTL_SECS: i64 = 600;
 const DEFAULT_MATERIAL_ASSET_TTL_SECS: i64 = 10 * 60;
@@ -130,13 +130,13 @@ impl ControllerState {
         let admin_service: Arc<dyn AdminApi> = Arc::new(self.clone());
         let infer_service: Arc<dyn InferenceApi> = Arc::new(self.clone());
         let openai_service: Arc<dyn OpenAiApi> = Arc::new(self.clone());
-        let admin = lcoal_api_mcp_admin::router(AdminApiState {
+        let admin = local_api_mcp_admin::router(AdminApiState {
             service: admin_service,
         });
-        let infer = lcoal_api_mcp_infer::router(InferenceApiState {
+        let infer = local_api_mcp_infer::router(InferenceApiState {
             service: infer_service,
         });
-        let openai = lcoal_api_openai::router(OpenAiApiState {
+        let openai = local_api_openai::router(OpenAiApiState {
             service: openai_service,
         });
         Router::new()
@@ -872,7 +872,7 @@ impl ControllerState {
         let first_file = || status.uploads.iter().find(|upload| upload.uploaded);
         let to_ref = |upload: &TaskUploadSlot| self.file_ref_from_upload(upload);
         let input = match status.task_kind {
-            lcoal_core::TaskKind::ObjectDetect => InferenceInput::ObjectDetect {
+            local_core::TaskKind::ObjectDetect => InferenceInput::ObjectDetect {
                 image: uploaded("image")
                     .or_else(first_file)
                     .ok_or_else(|| {
@@ -880,7 +880,7 @@ impl ControllerState {
                     })
                     .and_then(to_ref)?,
             },
-            lcoal_core::TaskKind::AsrTranscribe => InferenceInput::AsrTranscribe {
+            local_core::TaskKind::AsrTranscribe => InferenceInput::AsrTranscribe {
                 audio: uploaded("audio")
                     .or_else(first_file)
                     .ok_or_else(|| {
@@ -890,7 +890,7 @@ impl ControllerState {
                     })
                     .and_then(to_ref)?,
             },
-            lcoal_core::TaskKind::TtsSynthesize => {
+            local_core::TaskKind::TtsSynthesize => {
                 let text = status
                     .params
                     .get("text")
@@ -1317,7 +1317,7 @@ impl ControllerState {
             ));
         };
         let provided = headers
-            .get("x-lcoal-admin-token")
+            .get("x-local-admin-token")
             .and_then(|value| value.to_str().ok())
             .or_else(|| {
                 headers
@@ -1496,7 +1496,7 @@ impl AdminApi for ControllerState {
             json!({ "models_total": models.len(), "models_enabled": models.iter().filter(|m| m.enabled).count(), "nodes_total": nodes.len(), "nodes": nodes.values().collect::<Vec<_>>() }),
         )
     }
-    async fn list_assets(&self, query: AssetListQuery) -> Result<lcoal_core::AssetListResponse> {
+    async fn list_assets(&self, query: AssetListQuery) -> Result<local_core::AssetListResponse> {
         let mut response = self.assets.list(&query)?;
         for record in &mut response.assets {
             self.decorate_asset(record);

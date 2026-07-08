@@ -1,5 +1,5 @@
 use super::*;
-use lcoal_core::{
+use local_core::{
     AdapterKind, ArtifactKind, BackendKind, FileRef, InferenceOutput, ModelArtifact, ModelSpec,
     ResourceRequirement, RuntimePolicy,
 };
@@ -523,10 +523,10 @@ fn concatenate_hidden_states_flattens_batch_token_hidden() {
 
 #[test]
 fn real_model_smoke_if_env_set() {
-    let Ok(model_dir) = std::env::var("LCOAL_INDEXTTS_MODEL_DIR") else {
+    let Ok(model_dir) = std::env::var("LOCAL_INDEXTTS_MODEL_DIR") else {
         return;
     };
-    let reference_audio = std::env::var_os("LCOAL_INDEXTTS_TEST_AUDIO")
+    let reference_audio = std::env::var_os("LOCAL_INDEXTTS_TEST_AUDIO")
         .map(PathBuf::from)
         .filter(|path| path.exists())
         .or_else(|| {
@@ -599,7 +599,7 @@ fn tensor_meta(name: &str, element_type: TensorElement, shape: Vec<i64>) -> Tens
 }
 
 fn provider_order_from_env() -> Vec<String> {
-    std::env::var("LCOAL_TEST_PROVIDER_ORDER")
+    std::env::var("LOCAL_TEST_PROVIDER_ORDER")
         .ok()
         .map(|value| {
             value

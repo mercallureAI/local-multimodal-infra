@@ -1,5 +1,5 @@
 [package]
-name = "lcoal-controller"
+name = "local-controller"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
@@ -9,15 +9,15 @@ async-trait.workspace = true
 axum.workspace = true
 chrono.workspace = true
 hmac.workspace = true
-lcoal-api-mcp-admin = { path = "../api-mcp-admin" }
-lcoal-api-mcp-infer = { path = "../api-mcp-infer" }
-lcoal-api-openai = { path = "../api-openai" }
-lcoal-core = { path = "../core" }
-lcoal-error = { path = "../error" }
-lcoal-files = { path = "../files" }
-lcoal-model-store = { path = "../model-store" }
-lcoal-registry = { path = "../registry" }
-lcoal-scheduler = { path = "../scheduler" }
+local-api-mcp-admin = { path = "../api-mcp-admin" }
+local-api-mcp-infer = { path = "../api-mcp-infer" }
+local-api-openai = { path = "../api-openai" }
+local-core = { path = "../core" }
+local-error = { path = "../error" }
+local-files = { path = "../files" }
+local-model-store = { path = "../model-store" }
+local-registry = { path = "../registry" }
+local-scheduler = { path = "../scheduler" }
 reqwest.workspace = true
 rmcp.workspace = true
 serde.workspace = true

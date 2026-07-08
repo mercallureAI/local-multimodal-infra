@@ -1,6 +1,6 @@
 use super::*;
 use axum::{body::Bytes, http::HeaderMap, routing::post, Router};
-use lcoal_core::{
+use local_core::{
     AdapterKind, BackendKind, DeviceSpec, FileRef, InferenceInput, LoadPolicy, ResourceRequirement,
     ResourceSnapshot, RuntimePolicy, TaskKind,
 };
@@ -50,7 +50,7 @@ async fn mcp_dispatch_forwards_to_registered_worker_internal_infer() {
             image: FileRef::local("image.jpg"),
         },
     );
-    let output = lcoal_api_mcp_infer::InferenceApi::dispatch(&controller, task.clone())
+    let output = local_api_mcp_infer::InferenceApi::dispatch(&controller, task.clone())
         .await
         .expect("dispatch");
 
@@ -73,7 +73,7 @@ async fn dispatch_without_worker_returns_explicit_controller_error() {
         },
     );
 
-    let err = lcoal_api_mcp_infer::InferenceApi::dispatch(&controller, task)
+    let err = local_api_mcp_infer::InferenceApi::dispatch(&controller, task)
         .await
         .expect_err("controller should not load models locally");
 
@@ -164,7 +164,7 @@ async fn optional_unuploaded_tts_reference_audio_is_not_used_as_input() {
             worker_registration_token: None,
             public_base_url: "http://127.0.0.1:17890".to_string(),
             data_dir: std::env::temp_dir().join(format!(
-                "lcoal-controller-test-{}",
+                "local-controller-test-{}",
                 Uuid::new_v4().as_simple()
             )),
             upload_signing_secret: Some("test-upload-secret".to_string()),
@@ -194,7 +194,7 @@ async fn optional_unuploaded_tts_reference_audio_is_not_used_as_input() {
             task_kind: TaskKind::TtsSynthesize,
             model: Some("indextts-1.5-onnx".to_string()),
             model_id: None,
-            files: vec![lcoal_core::TaskFileRequirement {
+            files: vec![local_core::TaskFileRequirement {
                 name: "optional-reference.wav".to_string(),
                 mime: Some("audio/wav".to_string()),
                 role: Some("reference_audio".to_string()),
@@ -383,7 +383,7 @@ async fn create_task_existing_required_asset_uri_is_ready_and_new_material_ttl_i
             task_kind: TaskKind::AsrTranscribe,
             model: None,
             model_id: None,
-            files: vec![lcoal_core::TaskFileRequirement {
+            files: vec![local_core::TaskFileRequirement {
                 name: "audio.wav".to_string(),
                 mime: Some("audio/wav".to_string()),
                 role: Some("audio".to_string()),
@@ -405,7 +405,7 @@ async fn create_task_existing_required_asset_uri_is_ready_and_new_material_ttl_i
             task_kind: TaskKind::AsrTranscribe,
             model: None,
             model_id: None,
-            files: vec![lcoal_core::TaskFileRequirement {
+            files: vec![local_core::TaskFileRequirement {
                 name: "fresh.wav".to_string(),
                 mime: Some("audio/wav".to_string()),
                 role: Some("audio".to_string()),
@@ -488,10 +488,10 @@ fn controller_manifest_has_no_runtime_backend_or_adapter_deps() {
     .expect("read controller manifest");
 
     for forbidden in [
-        "lcoal-runtime",
-        "lcoal-backend-ort",
-        "lcoal-adapter-yolo",
-        "lcoal-adapter-qwen-asr",
+        "local-runtime",
+        "local-backend-ort",
+        "local-adapter-yolo",
+        "local-adapter-qwen-asr",
     ] {
         assert!(
             !manifest.contains(forbidden),
@@ -569,7 +569,7 @@ fn test_registration(token: Option<&str>) -> WorkerRegistration {
 
 fn test_controller_with_temp_data_dir() -> ControllerState {
     let data_dir = std::env::temp_dir().join(format!(
-        "lcoal-controller-test-{}",
+        "local-controller-test-{}",
         Uuid::new_v4().as_simple()
     ));
     ControllerState::new_with_options(
@@ -590,7 +590,7 @@ fn cleanup_test_controller(controller: &ControllerState) {
         .data_dir
         .file_name()
         .and_then(|value| value.to_str())
-        .is_some_and(|value| value.starts_with("lcoal-controller-test-"))
+        .is_some_and(|value| value.starts_with("local-controller-test-"))
     {
         let _ = std::fs::remove_dir_all(&controller.data_dir);
     }

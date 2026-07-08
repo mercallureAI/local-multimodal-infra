@@ -1,5 +1,5 @@
 use super::*;
-use lcoal_core::{AdapterKind, BackendKind, RuntimePolicy, TaskKind};
+use local_core::{AdapterKind, BackendKind, RuntimePolicy, TaskKind};
 use std::collections::BTreeMap;
 
 fn base_spec(id: &str, artifacts: Vec<ModelArtifact>) -> ModelSpec {
@@ -40,7 +40,7 @@ fn test_spec(id: &str, path: PathBuf) -> ModelSpec {
 #[test]
 fn persists_models_and_enabled_state() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let store = SqliteModelStore::new(dir.path().join("data/lcoal.db"), dir.path().join("models"))
+    let store = SqliteModelStore::new(dir.path().join("data/local.db"), dir.path().join("models"))
         .expect("store");
     let spec = test_spec("m", dir.path().join("model.onnx"));
     store.seed_models(vec![spec]).expect("seed");
@@ -65,7 +65,7 @@ async fn records_local_download_status() {
     let dir = tempfile::tempdir().expect("tempdir");
     let artifact = dir.path().join("model.onnx");
     fs::write(&artifact, b"onnx").expect("write artifact");
-    let store = SqliteModelStore::new(dir.path().join("data/lcoal.db"), dir.path().join("models"))
+    let store = SqliteModelStore::new(dir.path().join("data/local.db"), dir.path().join("models"))
         .expect("store");
     let spec = test_spec("m", artifact);
     let statuses = store.download_model(&spec).await.expect("download");
@@ -79,7 +79,7 @@ fn normalizes_local_absolute_source_to_stable_path() {
     let source = dir.path().join("outside/source.onnx");
     fs::create_dir_all(source.parent().unwrap()).expect("mkdir");
     fs::write(&source, b"onnx").expect("write");
-    let store = SqliteModelStore::new(dir.path().join("data/lcoal.db"), dir.path().join("models"))
+    let store = SqliteModelStore::new(dir.path().join("data/local.db"), dir.path().join("models"))
         .expect("store");
     let saved = store
         .upsert_model(test_spec("m", source.clone()))
@@ -94,7 +94,7 @@ fn normalizes_local_absolute_source_to_stable_path() {
 #[test]
 fn normalizes_url_relative_path_under_model_dir() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let store = SqliteModelStore::new(dir.path().join("data/lcoal.db"), dir.path().join("models"))
+    let store = SqliteModelStore::new(dir.path().join("data/local.db"), dir.path().join("models"))
         .expect("store");
     let mut url = artifact(ArtifactKind::Url, PathBuf::from("labels/coco.yaml"));
     url.url = Some("https://example.test/not-used.yaml".to_string());
@@ -111,7 +111,7 @@ fn normalizes_url_relative_path_under_model_dir() {
 #[test]
 fn rejects_already_stable_local_path_with_parent_traversal() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let store = SqliteModelStore::new(dir.path().join("data/lcoal.db"), dir.path().join("models"))
+    let store = SqliteModelStore::new(dir.path().join("data/local.db"), dir.path().join("models"))
         .expect("store");
     let escaping = dir.path().join("models/m/../escape.onnx");
     let err = store.upsert_model(test_spec("m", escaping)).unwrap_err();
@@ -121,7 +121,7 @@ fn rejects_already_stable_local_path_with_parent_traversal() {
 #[test]
 fn rejects_already_stable_url_path_with_parent_traversal() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let store = SqliteModelStore::new(dir.path().join("data/lcoal.db"), dir.path().join("models"))
+    let store = SqliteModelStore::new(dir.path().join("data/local.db"), dir.path().join("models"))
         .expect("store");
     let mut url = artifact(
         ArtifactKind::Url,
@@ -135,7 +135,7 @@ fn rejects_already_stable_url_path_with_parent_traversal() {
 #[test]
 fn rejects_url_stable_model_root_without_file_suffix() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let store = SqliteModelStore::new(dir.path().join("data/lcoal.db"), dir.path().join("models"))
+    let store = SqliteModelStore::new(dir.path().join("data/local.db"), dir.path().join("models"))
         .expect("store");
     let mut url = artifact(ArtifactKind::Url, dir.path().join("models/m"));
     url.url = Some("https://example.test/labels.yaml".to_string());
@@ -148,7 +148,7 @@ fn rejects_url_stable_model_root_without_file_suffix() {
 #[test]
 fn rejects_url_absolute_destination_path() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let store = SqliteModelStore::new(dir.path().join("data/lcoal.db"), dir.path().join("models"))
+    let store = SqliteModelStore::new(dir.path().join("data/local.db"), dir.path().join("models"))
         .expect("store");
     let mut url = artifact(ArtifactKind::Url, dir.path().join("outside.yaml"));
     url.url = Some("https://example.test/outside.yaml".to_string());
@@ -159,7 +159,7 @@ fn rejects_url_absolute_destination_path() {
 #[test]
 fn normalizes_hf_prefilled_absolute_path_to_stable_file() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let store = SqliteModelStore::new(dir.path().join("data/lcoal.db"), dir.path().join("models"))
+    let store = SqliteModelStore::new(dir.path().join("data/local.db"), dir.path().join("models"))
         .expect("store");
     let mut hf = artifact(
         ArtifactKind::HuggingFace,
@@ -179,7 +179,7 @@ fn normalizes_hf_prefilled_absolute_path_to_stable_file() {
 #[test]
 fn rejects_hf_file_path_traversal() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let store = SqliteModelStore::new(dir.path().join("data/lcoal.db"), dir.path().join("models"))
+    let store = SqliteModelStore::new(dir.path().join("data/local.db"), dir.path().join("models"))
         .expect("store");
     let mut hf = artifact(ArtifactKind::HuggingFace, PathBuf::new());
     hf.repo_id = Some("owner/repo".to_string());
@@ -191,7 +191,7 @@ fn rejects_hf_file_path_traversal() {
 #[test]
 fn hf_single_file_without_extension_targets_normalized_path() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let store = SqliteModelStore::new(dir.path().join("data/lcoal.db"), dir.path().join("models"))
+    let store = SqliteModelStore::new(dir.path().join("data/local.db"), dir.path().join("models"))
         .expect("store");
     let mut hf = artifact(ArtifactKind::HuggingFace, PathBuf::new());
     hf.repo_id = Some("owner/repo".to_string());

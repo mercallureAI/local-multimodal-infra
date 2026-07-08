@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use axum::{extract::State, routing::post, Json, Router};
-use lcoal_core::{
+use local_core::{
     AssetSignRequest, AssetSignResponse, CreateTaskRequest, FileRef, GenericTaskResult,
     InferenceInput, InferenceOutput, InferenceTask, StartTaskRequest, TaskKind, TaskStatus,
     WaitTaskRequest,
 };
-use lcoal_error::{InfraError, Result};
+use local_error::{InfraError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -277,7 +277,7 @@ mod tests {
         body::{to_bytes, Body},
         http::{Request, StatusCode},
     };
-    use lcoal_core::{InferenceOutput, TaskKind};
+    use local_core::{InferenceOutput, TaskKind};
     use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
 

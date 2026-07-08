@@ -4,12 +4,12 @@
 //! - This crate is rewritten/adapted inside this project for ONNX inference and does not
 //!   directly depend on or vendor the upstream project.
 
-use lcoal_backend_ort::{
+use local_backend_ort::{
     OrtBackend, OrtOutput, OrtSession, OrtTensorData, OrtTensorInput, OrtTensorOutput,
     ProviderSelection, SessionMetadata, SessionProviderReport, TensorMetadata,
 };
-use lcoal_core::{FileRef, InferenceOutput, ModelSpec};
-use lcoal_error::{InfraError, Result};
+use local_core::{FileRef, InferenceOutput, ModelSpec};
+use local_error::{InfraError, Result};
 use serde_json::Value;
 use std::{
     fs,
@@ -170,7 +170,7 @@ impl QwenAsrAdapter {
     }
 
     pub fn transcribe(&mut self, audio: &FileRef) -> Result<InferenceOutput> {
-        let path = lcoal_files::local_path(audio)?;
+        let path = local_files::local_path(audio)?;
         let samples = audio::read_wav_mono_f32(&path)?;
         let features = features::log_mel_128(&samples, 16_000)?;
         let audio_features = self.run_encoder(&features)?;
@@ -200,7 +200,7 @@ impl QwenAsrAdapter {
         require_input(&self.encoder, "mel", "encoder")?;
         let outputs = self
             .encoder
-            .run_f32(&[lcoal_backend_ort::OrtInput {
+            .run_f32(&[local_backend_ort::OrtInput {
                 name: "mel".to_string(),
                 shape: vec![1, features.bins, features.frames],
                 data: features.data.clone(),

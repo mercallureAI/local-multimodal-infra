@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use axum::{extract::State, routing::post, Json, Router};
-use lcoal_core::{AssetListQuery, AssetListResponse, DownloadStatus, ModelSpec, NodeStatus};
-use lcoal_error::Result;
+use local_core::{AssetListQuery, AssetListResponse, DownloadStatus, ModelSpec, NodeStatus};
+use local_error::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -17,7 +17,7 @@ pub trait AdminApi: Send + Sync + 'static {
     async fn list_nodes(&self) -> Result<Vec<NodeStatus>>;
     async fn get_cluster_status(&self) -> Result<Value>;
     async fn list_assets(&self, _query: AssetListQuery) -> Result<AssetListResponse> {
-        Err(lcoal_error::InfraError::Unsupported(
+        Err(local_error::InfraError::Unsupported(
             "asset listing is not implemented by this admin service".to_string(),
         ))
     }
@@ -97,10 +97,10 @@ async fn handle_json_rpc(
         "list_assets" | "search_assets" => {
             match serde_json::from_value::<AssetListQuery>(req.params.clone()) {
                 Ok(query) => state.service.list_assets(query).await.map(|v| json!(v)),
-                Err(err) => Err(lcoal_error::InfraError::from(err)),
+                Err(err) => Err(local_error::InfraError::from(err)),
             }
         }
-        other => Err(lcoal_error::InfraError::BadRequest(format!(
+        other => Err(local_error::InfraError::BadRequest(format!(
             "unknown admin method `{other}`"
         ))),
     };
@@ -165,31 +165,31 @@ mod tests {
         }
 
         async fn get_model(&self, id: &str) -> Result<ModelSpec> {
-            Err(lcoal_error::InfraError::Unsupported(format!(
+            Err(local_error::InfraError::Unsupported(format!(
                 "unexpected get_model in test: {id}"
             )))
         }
 
         async fn upsert_model(&self, _spec: ModelSpec) -> Result<ModelSpec> {
-            Err(lcoal_error::InfraError::Unsupported(
+            Err(local_error::InfraError::Unsupported(
                 "unexpected upsert_model in test".to_string(),
             ))
         }
 
         async fn download_model(&self, id: &str) -> Result<Vec<DownloadStatus>> {
-            Err(lcoal_error::InfraError::Unsupported(format!(
+            Err(local_error::InfraError::Unsupported(format!(
                 "unexpected download_model in test: {id}"
             )))
         }
 
         async fn enable_model(&self, id: &str) -> Result<ModelSpec> {
-            Err(lcoal_error::InfraError::Unsupported(format!(
+            Err(local_error::InfraError::Unsupported(format!(
                 "unexpected enable_model in test: {id}"
             )))
         }
 
         async fn disable_model(&self, id: &str) -> Result<ModelSpec> {
-            Err(lcoal_error::InfraError::Unsupported(format!(
+            Err(local_error::InfraError::Unsupported(format!(
                 "unexpected disable_model in test: {id}"
             )))
         }

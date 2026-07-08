@@ -1,4 +1,4 @@
-use lcoal_error::{InfraError, Result};
+use local_error::{InfraError, Result};
 #[cfg(any(
     feature = "cuda",
     all(feature = "directml", target_os = "windows"),
@@ -532,7 +532,7 @@ impl RealSession {
         {
             let _ = model_path;
             Err(InfraError::Unsupported(format!(
-                "CUDA ORT execution provider support is not compiled into lcoal-backend-ort (requested device {:?}); falling back to CPU if configured",
+                "CUDA ORT execution provider support is not compiled into local-backend-ort (requested device {:?}); falling back to CPU if configured",
                 provider.device_id
             )))
         }
@@ -563,7 +563,7 @@ impl RealSession {
         {
             let _ = model_path;
             Err(InfraError::Unsupported(format!(
-                "DirectML ORT execution provider support is not compiled into lcoal-backend-ort for this target (requested device {:?}); falling back to CPU if configured",
+                "DirectML ORT execution provider support is not compiled into local-backend-ort for this target (requested device {:?}); falling back to CPU if configured",
                 provider.device_id
             )))
         }
@@ -575,13 +575,13 @@ impl RealSession {
             let trt = ort::ep::TensorRT::default();
             if !trt.supported_by_platform() {
                 return Err(InfraError::Unsupported(format!(
-                    "TensorRT ORT execution provider is not supported on this target by the active ort build (requested device {:?}); lcoal-backend-ort does not yet model a same-session TensorRT+CUDA stack, so prefer provider_order [trt, cuda, cpu] across whole-session retries when available",
+                    "TensorRT ORT execution provider is not supported on this target by the active ort build (requested device {:?}); local-backend-ort does not yet model a same-session TensorRT+CUDA stack, so prefer provider_order [trt, cuda, cpu] across whole-session retries when available",
                     provider.device_id
                 )));
             }
             if !trt.is_available().map_err(map_ort_err)? {
                 return Err(InfraError::Unsupported(format!(
-                    "TensorRT ORT execution provider is not available in the active ONNX Runtime binary (requested device {:?}); lcoal-backend-ort does not yet model a same-session TensorRT+CUDA stack, so prefer provider_order [trt, cuda, cpu] and fall back to CPU if configured",
+                    "TensorRT ORT execution provider is not available in the active ONNX Runtime binary (requested device {:?}); local-backend-ort does not yet model a same-session TensorRT+CUDA stack, so prefer provider_order [trt, cuda, cpu] and fall back to CPU if configured",
                     provider.device_id
                 )));
             }
@@ -600,7 +600,7 @@ impl RealSession {
         {
             let _ = model_path;
             Err(InfraError::Unsupported(format!(
-                "TensorRT ORT execution provider support is not compiled into lcoal-backend-ort (requested device {:?}); lcoal-backend-ort does not yet model a same-session TensorRT+CUDA stack, so typical provider_order is [trt, cuda, cpu] only in builds that enable both features",
+                "TensorRT ORT execution provider support is not compiled into local-backend-ort (requested device {:?}); local-backend-ort does not yet model a same-session TensorRT+CUDA stack, so typical provider_order is [trt, cuda, cpu] only in builds that enable both features",
                 provider.device_id
             )))
         }
@@ -1085,7 +1085,7 @@ mod tests {
         });
         message(|model| {
             varint_field(model, 1, 8);
-            string_field(model, 2, "lcoal-backend-ort-test");
+            string_field(model, 2, "local-backend-ort-test");
             bytes_field(model, 7, &graph);
             bytes_field(model, 8, &opset);
         })

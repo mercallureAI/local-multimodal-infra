@@ -32,7 +32,7 @@ impl IndexTtsAdapter {
         validate_sessions([&a, &b, &c, &d, &e, &f])?;
         let tokenizer = SentencePieceTokenizer::load(&artifacts.bpe_model)?;
         let config = IndexTtsModelConfig::load(&artifacts, spec)?;
-        let output_dir = env::var_os("LCOAL_DATA_DIR")
+        let output_dir = env::var_os("LOCAL_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("workdir/data"));
         Ok(Self {
@@ -67,7 +67,7 @@ impl IndexTtsAdapter {
         let reference_audio = reference_audio.ok_or_else(|| {
             InfraError::BadRequest("IndexTTS synthesis requires reference_audio".to_string())
         })?;
-        let reference_path = lcoal_files::local_path(reference_audio)?;
+        let reference_path = local_files::local_path(reference_audio)?;
         let reference = audio::read_wav_mono_i16_24k(&reference_path)?;
         let text_ids = match explicit_text_token_ids_from_params(params)? {
             Some(ids) => ids,

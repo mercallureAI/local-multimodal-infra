@@ -22,7 +22,7 @@ pub enum IndexTtsTextFrontendMode {
 
 impl IndexTtsTextFrontendMode {
     pub(crate) fn from_env() -> Self {
-        match env::var("LCOAL_INDEXTTS_TEXT_FRONTEND") {
+        match env::var("LOCAL_INDEXTTS_TEXT_FRONTEND") {
             Ok(value) if value.eq_ignore_ascii_case("pinyin_explicit") => Self::PinyinExplicit,
             Ok(value) if value.eq_ignore_ascii_case("pinyin-explicit") => Self::PinyinExplicit,
             Ok(value) if value.eq_ignore_ascii_case("official_like") => Self::OfficialLike,
@@ -30,7 +30,7 @@ impl IndexTtsTextFrontendMode {
             Ok(value) => {
                 tracing::warn!(
                     value,
-                    "unknown LCOAL_INDEXTTS_TEXT_FRONTEND; using official_like"
+                    "unknown LOCAL_INDEXTTS_TEXT_FRONTEND; using official_like"
                 );
                 Self::OfficialLike
             }

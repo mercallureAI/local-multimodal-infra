@@ -6,12 +6,12 @@
 //! - This crate is rewritten/adapted inside this project for its `backend-ort` runtime and does
 //!   not directly depend on or vendor the upstream projects.
 
-use lcoal_backend_ort::{
+use local_backend_ort::{
     OrtBackend, OrtSession, OrtTensorData, OrtTensorInput, OrtTensorOutput, ProviderSelection,
     SessionMetadata, SessionProviderReport, TensorElement, TensorMetadata,
 };
-use lcoal_core::{FileRef, InferenceOutput, ModelSpec};
-use lcoal_error::{InfraError, Result};
+use local_core::{FileRef, InferenceOutput, ModelSpec};
+use local_error::{InfraError, Result};
 use pinyin::ToPinyin;
 use sentencepiece_rs::SentencePieceProcessor;
 use serde::{Deserialize, Serialize};

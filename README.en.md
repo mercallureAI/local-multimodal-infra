@@ -1,4 +1,4 @@
-# lcoal-multimodal-infra
+# local-multimodal-infra
 
 > Turn local compute into a multimodal service for agents. It exposes a local MCP Server and an OpenAI-compatible API Server so agents can use local vision, speech recognition, speech synthesis, and related capabilities.
 
@@ -6,7 +6,7 @@
 
 ## Project overview
 
-`lcoal-multimodal-infra` is a local multimodal compute gateway. Its goal is simple: **turn compute on your machine or private network into easily deployable model capabilities and expose them to agents with minimal setup**.
+`local-multimodal-infra` is a local multimodal compute gateway. Its goal is simple: **turn compute on your machine or private network into easily deployable model capabilities and expose them to agents with minimal setup**.
 
 Think of it as:
 
@@ -86,9 +86,9 @@ Common smoke harness aliases:
 Examples:
 
 ```bash
-python -m scripts.lcoal.smoke --tests rpc --workdir ./workdir --model-dir ./workdir/models
-python -m scripts.lcoal.smoke --tests mcp --workdir ./workdir --model-dir ./workdir/models
-python -m scripts.lcoal.smoke --tests all --workdir ./workdir --model-dir ./workdir/models
+python -m scripts.local.smoke --tests rpc --workdir ./workdir --model-dir ./workdir/models
+python -m scripts.local.smoke --tests mcp --workdir ./workdir --model-dir ./workdir/models
+python -m scripts.local.smoke --tests all --workdir ./workdir --model-dir ./workdir/models
 ```
 
 Common configuration entry points:
@@ -102,7 +102,7 @@ Common configuration entry points:
 - `workdir/models`: real model artifacts.
 - `workdir/data`: SQLite, uploads, logs, and generated outputs.
 - `docker-compose.yml` / `Dockerfile`: optional container startup path.
-- `scripts/lcoal/smoke.py`: local smoke harness.
+- `scripts/local/smoke.py`: local smoke harness.
 - `docs/implementation-notes.md`: implementation details.
 
 ## Roadmap
@@ -126,6 +126,6 @@ Release smoke examples:
 
 ```bash
 cargo build --release --bins
-python -m scripts.lcoal.smoke --skip-build --release --tests mcp --workdir ./workdir --model-dir ./workdir/models --ready-timeout 60 --request-timeout 600
-python -m scripts.lcoal.smoke --skip-build --release --tests rpc --workdir ./workdir --model-dir ./workdir/models --ready-timeout 60 --request-timeout 600
+python -m scripts.local.smoke --skip-build --release --tests mcp --workdir ./workdir --model-dir ./workdir/models --ready-timeout 60 --request-timeout 600
+python -m scripts.local.smoke --skip-build --release --tests rpc --workdir ./workdir --model-dir ./workdir/models --ready-timeout 60 --request-timeout 600
 ```

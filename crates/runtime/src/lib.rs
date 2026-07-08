@@ -1,11 +1,11 @@
-use lcoal_adapter_index_tts::IndexTtsAdapter;
-use lcoal_adapter_qwen_asr::QwenAsrAdapter;
-use lcoal_adapter_yolo::YoloAdapter;
-use lcoal_backend_ort::probe_runtime_execution_provider_availability;
-use lcoal_core::{
+use local_adapter_index_tts::IndexTtsAdapter;
+use local_adapter_qwen_asr::QwenAsrAdapter;
+use local_adapter_yolo::YoloAdapter;
+use local_backend_ort::probe_runtime_execution_provider_availability;
+use local_core::{
     AdapterKind, InferenceInput, InferenceOutput, InferenceTask, ModelSpec, ModelState, TaskKind,
 };
-use lcoal_error::{InfraError, Result};
+use local_error::{InfraError, Result};
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
@@ -279,7 +279,7 @@ impl LoadedModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lcoal_core::{
+    use local_core::{
         ArtifactKind, BackendKind, FileRef, LoadPolicy, ModelArtifact, ResourceRequirement,
         RuntimePolicy,
     };

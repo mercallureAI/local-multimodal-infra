@@ -1,5 +1,5 @@
-use lcoal_core::StorageLayout;
-use lcoal_error::{InfraError, Result};
+use local_core::StorageLayout;
+use local_error::{InfraError, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,

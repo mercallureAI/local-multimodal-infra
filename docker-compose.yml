@@ -1,21 +1,21 @@
-x-lcoal-service: &lcoal-service
+x-local-service: &local-service
   build:
     context: .
     dockerfile: Dockerfile
-  image: lcoal-multimodal-infra:local
+  image: local-multimodal-infra:local
   volumes:
     # Persists runtime data/db/uploads and the explicit model artifact directory.
     - ./workdir:/app/workdir
 
 services:
   controller:
-    <<: *lcoal-service
+    <<: *local-service
     environment:
       # Values are resolved by Docker Compose from the local .env file.
-      LCOAL_WORKER_REGISTRATION_TOKEN: ${LCOAL_WORKER_REGISTRATION_TOKEN:?set in .env}
-      LCOAL_UPLOAD_SIGNING_SECRET: ${LCOAL_UPLOAD_SIGNING_SECRET:?set in .env}
-      LCOAL_ADMIN_TOKEN: ${LCOAL_ADMIN_TOKEN:?set in .env}
-      LCOAL_PUBLIC_BASE_URL: ${LCOAL_PUBLIC_BASE_URL:?set in .env}
+      LOCAL_WORKER_REGISTRATION_TOKEN: ${LOCAL_WORKER_REGISTRATION_TOKEN:?set in .env}
+      LOCAL_UPLOAD_SIGNING_SECRET: ${LOCAL_UPLOAD_SIGNING_SECRET:?set in .env}
+      LOCAL_ADMIN_TOKEN: ${LOCAL_ADMIN_TOKEN:?set in .env}
+      LOCAL_PUBLIC_BASE_URL: ${LOCAL_PUBLIC_BASE_URL:?set in .env}
     command:
       - /usr/local/bin/controller
       - configs/docker-controller.yaml
@@ -28,10 +28,10 @@ services:
       - "17890:17890"
 
   worker:
-    <<: *lcoal-service
+    <<: *local-service
     environment:
       # Worker only needs the shared registration token; do not pass controller secrets.
-      LCOAL_WORKER_REGISTRATION_TOKEN: ${LCOAL_WORKER_REGISTRATION_TOKEN:?set in .env}
+      LOCAL_WORKER_REGISTRATION_TOKEN: ${LOCAL_WORKER_REGISTRATION_TOKEN:?set in .env}
     depends_on:
       - controller
     command:

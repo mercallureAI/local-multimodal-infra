@@ -1,5 +1,5 @@
 [package]
-name = "lcoal-core"
+name = "local-core"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true

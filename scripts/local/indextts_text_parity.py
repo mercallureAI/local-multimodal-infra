@@ -245,7 +245,7 @@ def run_rust_frontend(texts: list[str], bpe_model: Path | None, timeout: float) 
         "run",
         "--quiet",
         "-p",
-        "lcoal-adapter-index-tts",
+        "local-adapter-index-tts",
         "--bin",
         "indextts_text_frontend",
         "--",

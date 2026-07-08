@@ -1,10 +1,10 @@
 [package]
-name = "lcoal-hardware"
+name = "local-hardware"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
 [dependencies]
 chrono.workspace = true
-lcoal-core = { path = "../core" }
+local-core = { path = "../core" }
 sysinfo.workspace = true

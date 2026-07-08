@@ -1,5 +1,5 @@
 [package]
-name = "lcoal-telemetry"
+name = "local-telemetry"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true

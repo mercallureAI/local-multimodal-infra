@@ -5,18 +5,18 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use lcoal_core::{
+use local_core::{
     AdapterKind, BackendKind, InferenceTask, WorkerHeartbeat, WorkerRegistration,
     WorkerRegistrationResponse,
 };
-use lcoal_error::{InfraError, Result};
-use lcoal_registry::ModelRegistry;
-use lcoal_runtime::{RuntimeManager, RuntimeManagerConfig};
+use local_error::{InfraError, Result};
+use local_registry::ModelRegistry;
+use local_runtime::{RuntimeManager, RuntimeManagerConfig};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
-const WORKER_TOKEN_HEADER: &str = "x-lcoal-worker-token";
+const WORKER_TOKEN_HEADER: &str = "x-local-worker-token";
 
 #[derive(Clone)]
 pub struct WorkerState {
@@ -65,14 +65,14 @@ impl WorkerState {
                 AdapterKind::QwenAsr,
                 AdapterKind::IndexTts,
             ],
-            resources: lcoal_hardware::snapshot(),
+            resources: local_hardware::snapshot(),
         }
     }
 
     pub async fn heartbeat(&self) -> WorkerHeartbeat {
         WorkerHeartbeat {
             node_id: self.node_id.clone(),
-            resources: lcoal_hardware::snapshot(),
+            resources: local_hardware::snapshot(),
             loaded_models: self.runtime.loaded_models().await,
             queued_jobs: 0,
         }
@@ -197,11 +197,11 @@ async fn infer(
 mod tests {
     use super::*;
     use axum::body::to_bytes;
-    use lcoal_core::{
+    use local_core::{
         FileRef, InferenceInput, LoadPolicy, ModelSpec, ResourceRequirement, RuntimePolicy,
         TaskKind,
     };
-    use lcoal_runtime::RuntimeManagerConfig;
+    use local_runtime::RuntimeManagerConfig;
 
     #[tokio::test]
     async fn internal_infer_routes_into_runtime_and_returns_explicit_error() {

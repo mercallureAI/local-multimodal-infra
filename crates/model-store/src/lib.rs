@@ -1,9 +1,9 @@
 use chrono::Utc;
-use lcoal_core::{
+use local_core::{
     ArtifactKind, DownloadState, DownloadStatus, InferenceOutput, InferenceTask, JobState,
     ModelArtifact, ModelSpec, NodeStatus, TaskStatus,
 };
-use lcoal_error::{InfraError, Result};
+use local_error::{InfraError, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};

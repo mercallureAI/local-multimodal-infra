@@ -1,5 +1,5 @@
 use chrono::{Duration, Utc};
-use lcoal_core::{ModelSpec, NodeStatus};
+use local_core::{ModelSpec, NodeStatus};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Scheduler;
@@ -51,7 +51,7 @@ fn score_node(model: &ModelSpec, node: &NodeStatus) -> i64 {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use lcoal_core::*;
+    use local_core::*;
 
     #[test]
     fn prefers_warm_model() {

@@ -1,5 +1,5 @@
 use super::*;
-use lcoal_core::{
+use local_core::{
     AdapterKind, ArtifactKind, BackendKind, ModelArtifact, ResourceRequirement, RuntimePolicy,
 };
 use std::{
@@ -98,7 +98,7 @@ fn f16_embedding_lookup_converts_single_row() {
 
 #[test]
 fn real_model_smoke_if_env_set() {
-    let Ok(model_dir) = std::env::var("LCOAL_QWEN_ASR_MODEL_DIR") else {
+    let Ok(model_dir) = std::env::var("LOCAL_QWEN_ASR_MODEL_DIR") else {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
@@ -144,7 +144,7 @@ fn real_model_smoke_if_env_set() {
 }
 
 fn resolve_qwen_smoke_audio(dir: &tempfile::TempDir) -> PathBuf {
-    let explicit = std::env::var_os("LCOAL_QWEN_ASR_TEST_AUDIO")
+    let explicit = std::env::var_os("LOCAL_QWEN_ASR_TEST_AUDIO")
         .map(PathBuf::from)
         .filter(|path| path.exists());
     if let Some(path) = explicit {
@@ -166,7 +166,7 @@ fn resolve_qwen_smoke_audio(dir: &tempfile::TempDir) -> PathBuf {
 }
 
 fn provider_order_from_env() -> Vec<String> {
-    std::env::var("LCOAL_TEST_PROVIDER_ORDER")
+    std::env::var("LOCAL_TEST_PROVIDER_ORDER")
         .ok()
         .map(|value| {
             value

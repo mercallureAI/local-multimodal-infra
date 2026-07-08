@@ -1,5 +1,5 @@
 # Docker Compose binds all interfaces so the host port mapping can reach it.
-# Secrets and public URLs are supplied from .env via LCOAL_* environment vars.
+# Secrets and public URLs are supplied from .env via LOCAL_* environment vars.
 bind: 0.0.0.0:17890
 # Persistent runtime root for data/db/uploads; compose also passes --model-dir.
 workdir: /app/workdir

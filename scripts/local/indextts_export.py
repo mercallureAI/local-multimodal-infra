@@ -1,4 +1,4 @@
-"""Export/package IndexTTS ONNX artifacts for LCOAL.
+"""Export/package IndexTTS ONNX artifacts for LOCAL.
 
 This module keeps the public ``scripts/indextts_export.py`` entrypoint thin while
 providing two preparation paths:
@@ -72,7 +72,7 @@ class DependencyError(RuntimeError):
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Prepare LCOAL IndexTTS A-F ONNX artifacts")
+    parser = argparse.ArgumentParser(description="Prepare LOCAL IndexTTS A-F ONNX artifacts")
     parser.add_argument(
         "--index-tts-project",
         required=True,
@@ -1148,7 +1148,7 @@ def build_manifest(args: argparse.Namespace, status: str, notes: list[str]) -> d
         "optional_files": optional,
         "artifacts": artifacts,
         "export_provenance": {
-            "script": "scripts/lcoal/indextts_export.py",
+            "script": "scripts/local/indextts_export.py",
             "entrypoint": "scripts/indextts_export.py",
             "mode": args.mode,
             "opset": args.opset,

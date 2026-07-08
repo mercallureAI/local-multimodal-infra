@@ -44,7 +44,7 @@ REQUIRED_TOOLS = {
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate lcoal standard MCP Streamable HTTP endpoint.")
+    parser = argparse.ArgumentParser(description="Validate local standard MCP Streamable HTTP endpoint.")
     parser.add_argument("--url", default=DEFAULT_URL, help=f"MCP URL (default: {DEFAULT_URL})")
     parser.add_argument(
         "--full",
@@ -608,7 +608,7 @@ def resolve_tts_audio_for_asr(payload: Any, timeout: float) -> tuple[Path | None
         downloaded = download_bytes(audio_url, timeout)
         if not downloaded:
             raise RuntimeError("MCP direct tts_synthesize returned an empty downloadable audio file")
-        with tempfile.NamedTemporaryFile(prefix="lcoal-mcp-tts-", suffix=".wav", delete=False) as handle:
+        with tempfile.NamedTemporaryFile(prefix="local-mcp-tts-", suffix=".wav", delete=False) as handle:
             handle.write(downloaded)
             return Path(handle.name), Path(handle.name)
     return None, None

@@ -1,12 +1,12 @@
 [package]
-name = "lcoal-registry"
+name = "local-registry"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
 [dependencies]
-lcoal-core = { path = "../core" }
-lcoal-error = { path = "../error" }
+local-core = { path = "../core" }
+local-error = { path = "../error" }
 serde_json.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true

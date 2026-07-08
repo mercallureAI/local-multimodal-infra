@@ -10,11 +10,11 @@
 //!   vendor Ultralytics.
 
 use image::{imageops, Rgb, RgbImage};
-use lcoal_backend_ort::{
+use local_backend_ort::{
     OrtBackend, OrtInput, OrtOutput, OrtSession, ProviderSelection, SessionProviderReport,
 };
-use lcoal_core::{BoundingBox, DetectedObject, FileRef, InferenceOutput, ModelSpec};
-use lcoal_error::{InfraError, Result};
+use local_core::{BoundingBox, DetectedObject, FileRef, InferenceOutput, ModelSpec};
+use local_error::{InfraError, Result};
 use serde_yaml::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -74,7 +74,7 @@ impl YoloAdapter {
     }
 
     pub fn object_detect(&mut self, image: &FileRef) -> Result<InferenceOutput> {
-        let image_path = lcoal_files::local_path(image)?;
+        let image_path = local_files::local_path(image)?;
         let preprocessed = preprocess_image(
             &image_path,
             self.config.input_width,
@@ -599,7 +599,7 @@ fn coco_labels() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lcoal_core::{
+    use local_core::{
         AdapterKind, ArtifactKind, BackendKind, FileRef, ModelArtifact, ModelSpec,
         ResourceRequirement, RuntimePolicy,
     };
@@ -786,17 +786,17 @@ names:
 
     fn temp_image_path(file_name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "lcoal-adapter-yolo-{}-{file_name}",
+            "local-adapter-yolo-{}-{file_name}",
             std::process::id()
         ))
     }
 
     #[test]
     fn real_model_smoke_if_env_set() {
-        let Ok(model_dir) = std::env::var("LCOAL_YOLO_MODEL_DIR") else {
+        let Ok(model_dir) = std::env::var("LOCAL_YOLO_MODEL_DIR") else {
             return;
         };
-        let image_path = std::env::var_os("LCOAL_YOLO_TEST_IMAGE")
+        let image_path = std::env::var_os("LOCAL_YOLO_TEST_IMAGE")
             .map(PathBuf::from)
             .filter(|path| path.exists())
             .or_else(|| {
@@ -846,7 +846,7 @@ names:
     }
 
     fn provider_order_override_from_env() -> Option<Vec<String>> {
-        std::env::var("LCOAL_TEST_PROVIDER_ORDER")
+        std::env::var("LOCAL_TEST_PROVIDER_ORDER")
             .ok()
             .map(|value| {
                 value

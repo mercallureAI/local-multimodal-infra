@@ -34,15 +34,15 @@ impl ServerHandler for StandardMcpServer {
             protocol_version: ProtocolVersion::default(),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation {
-                name: "lcoal-controller-standard-mcp".to_string(),
-                title: Some("lcoal Controller Standard MCP".to_string()),
+                name: "local-controller-standard-mcp".to_string(),
+                title: Some("local Controller Standard MCP".to_string()),
                 version: env!("CARGO_PKG_VERSION").to_string(),
-                description: Some("Standard MCP adapter for the lcoal controller".to_string()),
+                description: Some("Standard MCP adapter for the local controller".to_string()),
                 icons: None,
                 website_url: None,
             },
             instructions: Some(
-                "Standard MCP tools for the lcoal controller. Results preserve the legacy JSON-RPC payloads where possible."
+                "Standard MCP tools for the local controller. Results preserve the legacy JSON-RPC payloads where possible."
                     .to_string(),
             ),
         }
@@ -176,7 +176,7 @@ fn task_from_method(method: &str, params: &Value) -> Result<InferenceTask> {
         "asr_transcribe" => {
             let audio = direct_file_ref(params, "audio", "audio_path", "asr_transcribe")?;
             Ok(InferenceTask::new(
-                lcoal_core::TaskKind::AsrTranscribe,
+                local_core::TaskKind::AsrTranscribe,
                 model_id,
                 InferenceInput::AsrTranscribe { audio },
             ))
@@ -184,7 +184,7 @@ fn task_from_method(method: &str, params: &Value) -> Result<InferenceTask> {
         "object_detect" => {
             let image = direct_file_ref(params, "image", "image_path", "object_detect")?;
             Ok(InferenceTask::new(
-                lcoal_core::TaskKind::ObjectDetect,
+                local_core::TaskKind::ObjectDetect,
                 model_id,
                 InferenceInput::ObjectDetect { image },
             ))
@@ -201,7 +201,7 @@ fn task_from_method(method: &str, params: &Value) -> Result<InferenceTask> {
                 .or_else(|| path_file_ref(params.get("reference_audio_path")))
                 .or_else(|| path_file_ref(params.get("reference_path")));
             let mut task = InferenceTask::new(
-                lcoal_core::TaskKind::TtsSynthesize,
+                local_core::TaskKind::TtsSynthesize,
                 model_id,
                 InferenceInput::TtsSynthesize {
                     text,

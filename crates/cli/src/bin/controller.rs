@@ -1,8 +1,8 @@
-use lcoal_config::ControllerConfig;
-use lcoal_controller::{ControllerOptions, ControllerState};
-use lcoal_error::{InfraError, Result};
-use lcoal_model_store::SqliteModelStore;
-use lcoal_registry::ModelRegistry;
+use local_config::ControllerConfig;
+use local_controller::{ControllerOptions, ControllerState};
+use local_error::{InfraError, Result};
+use local_model_store::SqliteModelStore;
+use local_registry::ModelRegistry;
 use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Debug, Default)]
@@ -19,7 +19,7 @@ struct CliArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    lcoal_telemetry::init("controller");
+    local_telemetry::init("controller");
     let args = parse_args();
     let config_path = args
         .config_path
@@ -31,19 +31,19 @@ async fn main() -> Result<()> {
     if let Some(model_dir) = args.model_dir {
         config.model_dir = Some(model_dir);
     }
-    if let Ok(token) = std::env::var("LCOAL_WORKER_REGISTRATION_TOKEN") {
+    if let Ok(token) = std::env::var("LOCAL_WORKER_REGISTRATION_TOKEN") {
         config.worker_registration_token = Some(token);
     }
-    if let Ok(url) = std::env::var("LCOAL_PUBLIC_BASE_URL") {
+    if let Ok(url) = std::env::var("LOCAL_PUBLIC_BASE_URL") {
         config.public_base_url = Some(url);
     }
-    if let Ok(secret) = std::env::var("LCOAL_UPLOAD_SIGNING_SECRET") {
+    if let Ok(secret) = std::env::var("LOCAL_UPLOAD_SIGNING_SECRET") {
         config.upload_signing_secret = Some(secret);
     }
-    if let Ok(token) = std::env::var("LCOAL_ADMIN_TOKEN") {
+    if let Ok(token) = std::env::var("LOCAL_ADMIN_TOKEN") {
         config.admin_token = Some(token);
     }
-    let mut mcp_bind = std::env::var("LCOAL_MCP_BIND")
+    let mut mcp_bind = std::env::var("LOCAL_MCP_BIND")
         .ok()
         .unwrap_or_else(|| "127.0.0.1:17892".to_string());
     if let Some(token) = args.worker_registration_token {
@@ -64,8 +64,8 @@ async fn main() -> Result<()> {
     let layout = config.layout();
     let store = SqliteModelStore::new(&layout.database_path, &layout.model_dir)?;
     store.delete_models(["glm-ocr-onnx-q4f16", "glm-ocr-onnx-fp16"])?;
-    store.seed_models(lcoal_registry::default_catalog(&layout.model_dir))?;
-    store.seed_models(lcoal_registry::load_yaml_specs(&layout.models_conf_dir)?)?;
+    store.seed_models(local_registry::default_catalog(&layout.model_dir))?;
+    store.seed_models(local_registry::load_yaml_specs(&layout.models_conf_dir)?)?;
     let registry = ModelRegistry::from_models(store.list_models()?);
     let state = ControllerState::with_store_options(
         registry,

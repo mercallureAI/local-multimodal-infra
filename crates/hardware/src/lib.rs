@@ -1,5 +1,5 @@
 use chrono::Utc;
-use lcoal_core::{DeviceSpec, ResourceSnapshot};
+use local_core::{DeviceSpec, ResourceSnapshot};
 use sysinfo::System;
 
 pub fn snapshot() -> ResourceSnapshot {

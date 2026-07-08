@@ -1,4 +1,4 @@
-"""Path helpers for LCOAL scripts."""
+"""Path helpers for LOCAL scripts."""
 
 from __future__ import annotations
 

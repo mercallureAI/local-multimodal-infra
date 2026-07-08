@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.lcoal.indextts_text_parity import main
+from scripts.local.indextts_text_parity import main
 
 
 if __name__ == "__main__":

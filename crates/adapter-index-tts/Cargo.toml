@@ -1,21 +1,21 @@
 [package]
-name = "lcoal-adapter-index-tts"
+name = "local-adapter-index-tts"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
 [features]
 default = []
-cuda = ["lcoal-backend-ort/cuda"]
-directml = ["lcoal-backend-ort/directml"]
-tensorrt = ["lcoal-backend-ort/tensorrt"]
+cuda = ["local-backend-ort/cuda"]
+directml = ["local-backend-ort/directml"]
+tensorrt = ["local-backend-ort/tensorrt"]
 
 [dependencies]
 hound.workspace = true
-lcoal-backend-ort = { path = "../backend-ort" }
-lcoal-core = { path = "../core" }
-lcoal-error = { path = "../error" }
-lcoal-files = { path = "../files" }
+local-backend-ort = { path = "../backend-ort" }
+local-core = { path = "../core" }
+local-error = { path = "../error" }
+local-files = { path = "../files" }
 pinyin = { version = "0.11.0", default-features = false, features = ["with_tone_num_end"] }
 sentencepiece-rs = "0.2.2"
 serde.workspace = true

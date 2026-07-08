@@ -1024,278 +1024,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
-name = "lcoal-adapter-index-tts"
-version = "0.1.0"
-dependencies = [
- "hound",
- "lcoal-backend-ort",
- "lcoal-core",
- "lcoal-error",
- "lcoal-files",
- "pinyin",
- "sentencepiece-rs",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "lcoal-adapter-qwen-asr"
-version = "0.1.0"
-dependencies = [
- "half",
- "hound",
- "lcoal-backend-ort",
- "lcoal-core",
- "lcoal-error",
- "lcoal-files",
- "rustfft",
- "serde",
- "serde_json",
- "tempfile",
- "tokenizers",
-]
-
-[[package]]
-name = "lcoal-adapter-yolo"
-version = "0.1.0"
-dependencies = [
- "image",
- "lcoal-backend-ort",
- "lcoal-core",
- "lcoal-error",
- "lcoal-files",
- "serde_yaml",
-]
-
-[[package]]
-name = "lcoal-api-mcp-admin"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "lcoal-core",
- "lcoal-error",
- "serde",
- "serde_json",
- "tokio",
- "tower",
-]
-
-[[package]]
-name = "lcoal-api-mcp-infer"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "lcoal-core",
- "lcoal-error",
- "serde",
- "serde_json",
- "tokio",
- "tower",
- "uuid",
-]
-
-[[package]]
-name = "lcoal-api-openai"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "lcoal-core",
- "lcoal-error",
- "serde",
- "serde_json",
- "tokio",
- "tower",
-]
-
-[[package]]
-name = "lcoal-backend-ort"
-version = "0.1.0"
-dependencies = [
- "half",
- "lcoal-error",
- "ort",
- "serde",
- "tempfile",
- "tracing",
-]
-
-[[package]]
-name = "lcoal-cli"
-version = "0.1.0"
-dependencies = [
- "axum",
- "lcoal-config",
- "lcoal-controller",
- "lcoal-error",
- "lcoal-model-store",
- "lcoal-registry",
- "lcoal-runtime",
- "lcoal-telemetry",
- "lcoal-worker",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lcoal-config"
-version = "0.1.0"
-dependencies = [
- "lcoal-core",
- "lcoal-error",
- "serde",
- "serde_yaml",
-]
-
-[[package]]
-name = "lcoal-controller"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "chrono",
- "hmac",
- "lcoal-api-mcp-admin",
- "lcoal-api-mcp-infer",
- "lcoal-api-openai",
- "lcoal-core",
- "lcoal-error",
- "lcoal-files",
- "lcoal-model-store",
- "lcoal-registry",
- "lcoal-scheduler",
- "reqwest",
- "rmcp",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "lcoal-core"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "lcoal-error"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "serde_yaml",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "lcoal-files"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "lcoal-core",
- "lcoal-error",
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "lcoal-hardware"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "lcoal-core",
- "sysinfo",
-]
-
-[[package]]
-name = "lcoal-model-store"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "lcoal-core",
- "lcoal-error",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "lcoal-registry"
-version = "0.1.0"
-dependencies = [
- "lcoal-core",
- "lcoal-error",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lcoal-runtime"
-version = "0.1.0"
-dependencies = [
- "lcoal-adapter-index-tts",
- "lcoal-adapter-qwen-asr",
- "lcoal-adapter-yolo",
- "lcoal-backend-ort",
- "lcoal-core",
- "lcoal-error",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lcoal-scheduler"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "lcoal-core",
-]
-
-[[package]]
-name = "lcoal-telemetry"
-version = "0.1.0"
-dependencies = [
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "lcoal-worker"
-version = "0.1.0"
-dependencies = [
- "axum",
- "lcoal-core",
- "lcoal-error",
- "lcoal-hardware",
- "lcoal-registry",
- "lcoal-runtime",
- "reqwest",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1323,6 +1051,278 @@ name = "litemap"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
+
+[[package]]
+name = "local-adapter-index-tts"
+version = "0.1.0"
+dependencies = [
+ "hound",
+ "local-backend-ort",
+ "local-core",
+ "local-error",
+ "local-files",
+ "pinyin",
+ "sentencepiece-rs",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "local-adapter-qwen-asr"
+version = "0.1.0"
+dependencies = [
+ "half",
+ "hound",
+ "local-backend-ort",
+ "local-core",
+ "local-error",
+ "local-files",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokenizers",
+]
+
+[[package]]
+name = "local-adapter-yolo"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "local-backend-ort",
+ "local-core",
+ "local-error",
+ "local-files",
+ "serde_yaml",
+]
+
+[[package]]
+name = "local-api-mcp-admin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "local-core",
+ "local-error",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "local-api-mcp-infer"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "local-core",
+ "local-error",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "uuid",
+]
+
+[[package]]
+name = "local-api-openai"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "local-core",
+ "local-error",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "local-backend-ort"
+version = "0.1.0"
+dependencies = [
+ "half",
+ "local-error",
+ "ort",
+ "serde",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "local-cli"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "local-config",
+ "local-controller",
+ "local-error",
+ "local-model-store",
+ "local-registry",
+ "local-runtime",
+ "local-telemetry",
+ "local-worker",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "local-config"
+version = "0.1.0"
+dependencies = [
+ "local-core",
+ "local-error",
+ "serde",
+ "serde_yaml",
+]
+
+[[package]]
+name = "local-controller"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
+ "hmac",
+ "local-api-mcp-admin",
+ "local-api-mcp-infer",
+ "local-api-openai",
+ "local-core",
+ "local-error",
+ "local-files",
+ "local-model-store",
+ "local-registry",
+ "local-scheduler",
+ "reqwest",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "local-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "local-error"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "serde_yaml",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "local-files"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "local-core",
+ "local-error",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "local-hardware"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "local-core",
+ "sysinfo",
+]
+
+[[package]]
+name = "local-model-store"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "local-core",
+ "local-error",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "local-registry"
+version = "0.1.0"
+dependencies = [
+ "local-core",
+ "local-error",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "local-runtime"
+version = "0.1.0"
+dependencies = [
+ "local-adapter-index-tts",
+ "local-adapter-qwen-asr",
+ "local-adapter-yolo",
+ "local-backend-ort",
+ "local-core",
+ "local-error",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "local-scheduler"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "local-core",
+]
+
+[[package]]
+name = "local-telemetry"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "local-worker"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "local-core",
+ "local-error",
+ "local-hardware",
+ "local-registry",
+ "local-runtime",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "log"

@@ -1,5 +1,5 @@
 [package]
-name = "lcoal-backend-ort"
+name = "local-backend-ort"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
@@ -12,7 +12,7 @@ tensorrt = ["ort/tensorrt"]
 ort-runtime = []
 
 [dependencies]
-lcoal-error = { path = "../error" }
+local-error = { path = "../error" }
 half.workspace = true
 ort = { workspace = true, features = ["std", "tracing", "download-binaries", "copy-dylibs", "tls-rustls", "api-24", "half"] }
 serde.workspace = true

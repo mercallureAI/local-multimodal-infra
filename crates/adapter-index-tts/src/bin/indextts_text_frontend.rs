@@ -1,4 +1,4 @@
-use lcoal_adapter_index_tts::{dump_text_frontend, SentencePieceTokenizer};
+use local_adapter_index_tts::{dump_text_frontend, SentencePieceTokenizer};
 use serde::Serialize;
 use serde_json::Value;
 use std::{env, io::Read, path::PathBuf};

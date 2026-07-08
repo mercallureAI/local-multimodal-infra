@@ -26,7 +26,7 @@ from .processes import ManagedProcess, cleanup_processes, locate_bin, run_build,
 
 CONTROLLER_URL = "http://127.0.0.1:17890"
 WORKER_URL = "http://127.0.0.1:17891"
-REGISTRATION_TOKEN = "lcoal-smoke-registration-token"
+REGISTRATION_TOKEN = "local-smoke-registration-token"
 MCP_STANDARD_URL = "http://127.0.0.1:17892/mcp"
 PORTS = (17890, 17891, 17892)
 ASSET_DIR = repo_root() / "scripts" / "assets"
@@ -46,7 +46,7 @@ TEST_ALIASES = {
 RPC_TESTS = {"assets", "yolo", "qwen-asr", "indextts", "indextts_asr"}
 MCP_TESTS = {"mcp_standard"}
 INDEXTTS_MODEL_ID = "indextts-1.5-onnx"
-ADMIN_TOKEN = "lcoal-smoke-admin-token"
+ADMIN_TOKEN = "local-smoke-admin-token"
 INDEXTTS_REQUIRED = [
     "IndexTTS_A.onnx",
     "IndexTTS_B.onnx",
@@ -96,18 +96,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[smoke] requested_tests={','.join(sorted(requested_tests)) or '<none>'}")
 
         env = os.environ.copy()
-        env["LCOAL_DATA_DIR"] = str(data_dir)
-        env["LCOAL_WORKER_REGISTRATION_TOKEN"] = REGISTRATION_TOKEN
-        env["LCOAL_ADMIN_TOKEN"] = ADMIN_TOKEN
-        if "LCOAL_INDEXTTS_MODEL_DIR" not in env:
-            env["LCOAL_INDEXTTS_MODEL_DIR"] = str(model_dir / INDEXTTS_MODEL_ID)
+        env["LOCAL_DATA_DIR"] = str(data_dir)
+        env["LOCAL_WORKER_REGISTRATION_TOKEN"] = REGISTRATION_TOKEN
+        env["LOCAL_ADMIN_TOKEN"] = ADMIN_TOKEN
+        if "LOCAL_INDEXTTS_MODEL_DIR" not in env:
+            env["LOCAL_INDEXTTS_MODEL_DIR"] = str(model_dir / INDEXTTS_MODEL_ID)
         # Smoke runs must be deterministic even if the caller has an experimental
         # frontend in their shell (notably pinyin_explicit).  official-python
         # mode injects oracle token ids, but keep service env official_like too
         # so any diagnostics/fallbacks are not misleading.
-        env["LCOAL_INDEXTTS_TEXT_FRONTEND"] = "official_like"
+        env["LOCAL_INDEXTTS_TEXT_FRONTEND"] = "official_like"
         if {"indextts", "indextts_asr"} & requested_tests:
-            print("[smoke] LCOAL_INDEXTTS_TEXT_FRONTEND=official_like (forced by smoke harness)")
+            print("[smoke] LOCAL_INDEXTTS_TEXT_FRONTEND=official_like (forced by smoke harness)")
 
         controller_args = [
             str(controller_bin),
@@ -444,7 +444,7 @@ def run_mcp_standard(
     cmd = [
         sys.executable,
         "-m",
-        "scripts.lcoal.mcp_standard_client",
+        "scripts.local.mcp_standard_client",
         "--url",
         MCP_STANDARD_URL,
         "--full",
@@ -542,7 +542,7 @@ def run_assets(data_dir: Path, timestamp: str, timeout: float) -> None:
         "DELETE",
         f"{CONTROLLER_URL}/assets/material/{path}",
         None,
-        {"x-lcoal-admin-token": ADMIN_TOKEN},
+        {"x-local-admin-token": ADMIN_TOKEN},
         timeout,
     )
     if status != 200 or not delete_payload.get("deleted"):
@@ -639,7 +639,7 @@ def run_qwen_asr(audio: Path, data_dir: Path, timestamp: str, timeout: float) ->
 
 
 def post_openai_transcription_multipart(audio: Path, timeout: float) -> tuple[int, dict]:
-    boundary = f"----lcoal-smoke-{int(time.time() * 1000)}"
+    boundary = f"----local-smoke-{int(time.time() * 1000)}"
     body = encode_multipart(
         boundary,
         fields={"model": "qwen3-asr-0.6b-onnx"},
@@ -653,13 +653,13 @@ def post_openai_transcription_multipart(audio: Path, timeout: float) -> tuple[in
 
 
 def inspect_indextts_artifacts(model_dir: Path) -> dict:
-    env_root = os.environ.get("LCOAL_INDEXTTS_MODEL_DIR")
+    env_root = os.environ.get("LOCAL_INDEXTTS_MODEL_DIR")
     root = Path(env_root).resolve() if env_root else (model_dir / INDEXTTS_MODEL_ID).resolve()
     missing = [str(root / name) for name in INDEXTTS_REQUIRED if not (root / name).exists()]
     return {
         "ready": not missing,
         "root": str(root),
-        "source": "LCOAL_INDEXTTS_MODEL_DIR" if env_root else "--model-dir/default",
+        "source": "LOCAL_INDEXTTS_MODEL_DIR" if env_root else "--model-dir/default",
         "required": INDEXTTS_REQUIRED,
         "missing": missing,
     }

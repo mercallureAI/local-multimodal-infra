@@ -311,7 +311,7 @@ impl StorageLayout {
     ) -> Self {
         let workdir = workdir.into();
         let data_dir = data_dir.unwrap_or_else(|| workdir.join("data"));
-        let database_path = database_path.unwrap_or_else(|| data_dir.join("lcoal.db"));
+        let database_path = database_path.unwrap_or_else(|| data_dir.join("local.db"));
         let model_dir = model_dir.unwrap_or_else(|| workdir.join("models"));
         Self {
             workdir,
