@@ -1256,6 +1256,7 @@ dependencies = [
  "lcoal-adapter-index-tts",
  "lcoal-adapter-qwen-asr",
  "lcoal-adapter-yolo",
+ "lcoal-backend-ort",
  "lcoal-core",
  "lcoal-error",
  "tokio",

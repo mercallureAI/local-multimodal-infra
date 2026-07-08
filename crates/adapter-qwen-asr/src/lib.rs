@@ -6,7 +6,7 @@
 
 use lcoal_backend_ort::{
     OrtBackend, OrtOutput, OrtSession, OrtTensorData, OrtTensorInput, OrtTensorOutput,
-    ProviderSelection, SessionMetadata, TensorMetadata,
+    ProviderSelection, SessionMetadata, SessionProviderReport, TensorMetadata,
 };
 use lcoal_core::{FileRef, InferenceOutput, ModelSpec};
 use lcoal_error::{InfraError, Result};
@@ -130,6 +130,13 @@ pub struct QwenAsrAdapter {
     embeddings: EmbedTokens,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QwenAsrProviderReport {
+    pub encoder: SessionProviderReport,
+    pub decoder_init: SessionProviderReport,
+    pub decoder_step: SessionProviderReport,
+}
+
 impl QwenAsrAdapter {
     pub fn load(spec: &ModelSpec) -> Result<Self> {
         let root = spec
@@ -179,6 +186,14 @@ impl QwenAsrAdapter {
     }
     pub fn artifacts(&self) -> &QwenAsrArtifacts {
         &self.artifacts
+    }
+
+    pub fn provider_report(&self) -> QwenAsrProviderReport {
+        QwenAsrProviderReport {
+            encoder: self.encoder.provider_report(),
+            decoder_init: self.decoder_init.provider_report(),
+            decoder_step: self.decoder_step.provider_report(),
+        }
     }
 
     fn run_encoder(&mut self, features: &features::MelFeatures) -> Result<OrtOutput> {

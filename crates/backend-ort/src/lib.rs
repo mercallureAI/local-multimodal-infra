@@ -1,5 +1,9 @@
 use lcoal_error::{InfraError, Result};
-#[cfg(any(feature = "cuda", all(feature = "directml", target_os = "windows")))]
+#[cfg(any(
+    feature = "cuda",
+    all(feature = "directml", target_os = "windows"),
+    feature = "tensorrt"
+))]
 use ort::ep::ExecutionProvider;
 use ort::{
     session::{builder::GraphOptimizationLevel, Session},
@@ -18,6 +22,7 @@ pub enum ProviderKind {
     Cpu,
     Cuda,
     Dml,
+    Trt,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +51,12 @@ impl ProviderOptions {
             device_id,
         }
     }
+    pub fn trt(device_id: Option<u32>) -> Self {
+        Self {
+            kind: ProviderKind::Trt,
+            device_id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +64,108 @@ pub struct ProviderSelection {
     pub order: Vec<ProviderOptions>,
     #[serde(default = "default_true")]
     pub fallback_to_cpu: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RuntimeExecutionProviderAvailability {
+    pub cpu: bool,
+    pub cuda: bool,
+    pub dml: bool,
+    pub trt: bool,
+}
+
+impl RuntimeExecutionProviderAvailability {
+    pub fn is_available(self, provider: ProviderKind) -> bool {
+        match provider {
+            ProviderKind::Cpu => self.cpu,
+            ProviderKind::Cuda => self.cuda,
+            ProviderKind::Dml => self.dml,
+            ProviderKind::Trt => self.trt,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SessionProviderReport {
+    pub provider: ProviderKind,
+    pub cpu_fallback_used: bool,
+}
+
+/// Probe actual ONNX Runtime execution-provider availability in the active
+/// process/binary rather than relying on compile-time cargo features alone.
+///
+/// CPU is always reported as available. Optional GPU providers are reported as
+/// `false` whenever support is not compiled in, the current target is
+/// unsupported, ORT reports the provider unavailable, or the availability probe
+/// itself errors.
+pub fn probe_runtime_execution_provider_availability() -> RuntimeExecutionProviderAvailability {
+    RuntimeExecutionProviderAvailability {
+        cpu: true,
+        cuda: probe_cuda_runtime_availability(),
+        dml: probe_dml_runtime_availability(),
+        trt: probe_trt_runtime_availability(),
+    }
+}
+
+fn probe_cuda_runtime_availability() -> bool {
+    #[cfg(feature = "cuda")]
+    {
+        match ort::ep::CUDA::default().is_available() {
+            Ok(available) => available,
+            Err(err) => {
+                let err = map_ort_err(err);
+                tracing::warn!(error = %err, "failed to probe CUDA ORT execution provider availability");
+                false
+            }
+        }
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    {
+        false
+    }
+}
+
+fn probe_dml_runtime_availability() -> bool {
+    #[cfg(all(feature = "directml", target_os = "windows"))]
+    {
+        match ort::ep::DirectML::default().is_available() {
+            Ok(available) => available,
+            Err(err) => {
+                let err = map_ort_err(err);
+                tracing::warn!(error = %err, "failed to probe DirectML ORT execution provider availability");
+                false
+            }
+        }
+    }
+
+    #[cfg(not(all(feature = "directml", target_os = "windows")))]
+    {
+        false
+    }
+}
+
+fn probe_trt_runtime_availability() -> bool {
+    #[cfg(feature = "tensorrt")]
+    {
+        let trt = ort::ep::TensorRT::default();
+        if !trt.supported_by_platform() {
+            return false;
+        }
+        match trt.is_available() {
+            Ok(available) => available,
+            Err(err) => {
+                let err = map_ort_err(err);
+                tracing::warn!(error = %err, "failed to probe TensorRT ORT execution provider availability");
+                false
+            }
+        }
+    }
+
+    #[cfg(not(feature = "tensorrt"))]
+    {
+        false
+    }
 }
 
 impl Default for ProviderSelection {
@@ -76,6 +189,7 @@ impl ProviderSelection {
                 "cpu" => Some(ProviderOptions::cpu()),
                 "cuda" => Some(ProviderOptions::cuda(None)),
                 "dml" | "directml" => Some(ProviderOptions::dml(None)),
+                "trt" | "tensorrt" => Some(ProviderOptions::trt(None)),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -232,6 +346,7 @@ impl OrtBackend {
 pub struct OrtSession {
     model_path: PathBuf,
     provider: ProviderKind,
+    cpu_fallback_used: bool,
     real: RealSession,
 }
 
@@ -256,6 +371,7 @@ impl OrtSession {
                             return Ok(Self {
                                 model_path: model_path.to_path_buf(),
                                 provider: ProviderKind::Cpu,
+                                cpu_fallback_used: !errors.is_empty(),
                                 real,
                             });
                         }
@@ -267,6 +383,7 @@ impl OrtSession {
                         return Ok(Self {
                             model_path: model_path.to_path_buf(),
                             provider: ProviderKind::Cuda,
+                            cpu_fallback_used: false,
                             real,
                         });
                     }
@@ -280,12 +397,27 @@ impl OrtSession {
                         return Ok(Self {
                             model_path: model_path.to_path_buf(),
                             provider: ProviderKind::Dml,
+                            cpu_fallback_used: false,
                             real,
                         });
                     }
                     Err(err) => {
                         tracing::warn!(error = %err, "DML provider was requested but was not selected");
                         errors.push(format!("dml: {err}"));
+                    }
+                },
+                ProviderKind::Trt => match RealSession::load_trt(model_path, provider) {
+                    Ok(real) => {
+                        return Ok(Self {
+                            model_path: model_path.to_path_buf(),
+                            provider: ProviderKind::Trt,
+                            cpu_fallback_used: false,
+                            real,
+                        });
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "TensorRT provider was requested but was not selected");
+                        errors.push(format!("tensorrt: {err}"));
                     }
                 },
             }
@@ -298,6 +430,7 @@ impl OrtSession {
                     return Ok(Self {
                         model_path: model_path.to_path_buf(),
                         provider: ProviderKind::Cpu,
+                        cpu_fallback_used: true,
                         real,
                     });
                 }
@@ -314,6 +447,15 @@ impl OrtSession {
 
     pub fn provider(&self) -> ProviderKind {
         self.provider
+    }
+    pub fn cpu_fallback_used(&self) -> bool {
+        self.cpu_fallback_used
+    }
+    pub fn provider_report(&self) -> SessionProviderReport {
+        SessionProviderReport {
+            provider: self.provider(),
+            cpu_fallback_used: self.cpu_fallback_used(),
+        }
     }
     pub fn model_path(&self) -> &Path {
         &self.model_path
@@ -422,6 +564,43 @@ impl RealSession {
             let _ = model_path;
             Err(InfraError::Unsupported(format!(
                 "DirectML ORT execution provider support is not compiled into lcoal-backend-ort for this target (requested device {:?}); falling back to CPU if configured",
+                provider.device_id
+            )))
+        }
+    }
+
+    fn load_trt(model_path: &Path, provider: &ProviderOptions) -> Result<Self> {
+        #[cfg(feature = "tensorrt")]
+        {
+            let trt = ort::ep::TensorRT::default();
+            if !trt.supported_by_platform() {
+                return Err(InfraError::Unsupported(format!(
+                    "TensorRT ORT execution provider is not supported on this target by the active ort build (requested device {:?}); lcoal-backend-ort does not yet model a same-session TensorRT+CUDA stack, so prefer provider_order [trt, cuda, cpu] across whole-session retries when available",
+                    provider.device_id
+                )));
+            }
+            if !trt.is_available().map_err(map_ort_err)? {
+                return Err(InfraError::Unsupported(format!(
+                    "TensorRT ORT execution provider is not available in the active ONNX Runtime binary (requested device {:?}); lcoal-backend-ort does not yet model a same-session TensorRT+CUDA stack, so prefer provider_order [trt, cuda, cpu] and fall back to CPU if configured",
+                    provider.device_id
+                )));
+            }
+            let mut trt = trt;
+            if let Some(device_id) = provider.device_id {
+                trt = trt.with_device_id(device_id as i32);
+            }
+            let builder = Session::builder()
+                .map_err(map_ort_err)?
+                .with_execution_providers([trt.build().error_on_failure()])
+                .map_err(map_ort_err)?;
+            return Self::load_with_builder(builder, model_path);
+        }
+
+        #[cfg(not(feature = "tensorrt"))]
+        {
+            let _ = model_path;
+            Err(InfraError::Unsupported(format!(
+                "TensorRT ORT execution provider support is not compiled into lcoal-backend-ort (requested device {:?}); lcoal-backend-ort does not yet model a same-session TensorRT+CUDA stack, so typical provider_order is [trt, cuda, cpu] only in builds that enable both features",
                 provider.device_id
             )))
         }
@@ -698,6 +877,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_tensorrt_aliases() {
+        let selection =
+            ProviderSelection::from_strings(&["trt".into(), "tensorrt".into(), "cpu".into()]);
+        assert_eq!(selection.order[0].kind, ProviderKind::Trt);
+        assert_eq!(selection.order[1].kind, ProviderKind::Trt);
+        assert_eq!(selection.order[2].kind, ProviderKind::Cpu);
+    }
+
+    #[test]
     fn missing_model_reports_path() {
         let dir = tempfile::tempdir().expect("tempdir");
         let err = OrtSession::load(
@@ -709,7 +897,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_f32_identity_runs_on_cpu() {
+    fn generated_f32_identity_prefers_cuda_then_cpu() {
         let dir = tempfile::tempdir().expect("tempdir");
         let model_path = dir.path().join("identity_f32.onnx");
         fs::write(&model_path, identity_model(1)).expect("write model");
@@ -723,7 +911,7 @@ mod tests {
         )
         .expect("load identity model");
 
-        assert_eq!(session.provider(), ProviderKind::Cpu);
+        assert_requested_provider_or_cpu_fallback(&session, ProviderKind::Cuda);
         assert_eq!(session.inputs()[0].name, "x");
         assert_eq!(session.inputs()[0].shape, vec![2]);
         assert_eq!(session.inputs()[0].element_type, TensorElement::F32);
@@ -740,6 +928,24 @@ mod tests {
         assert_eq!(outputs[0].name, "y");
         assert_eq!(outputs[0].shape, vec![2]);
         assert_eq!(outputs[0].data, vec![1.5, -2.0]);
+    }
+
+    #[test]
+    fn tensorrt_then_cpu_uses_first_usable_provider() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model_path = dir.path().join("identity_f32.onnx");
+        fs::write(&model_path, identity_model(1)).expect("write model");
+
+        let session = OrtSession::load(
+            &model_path,
+            ProviderSelection {
+                order: vec![ProviderOptions::trt(Some(0)), ProviderOptions::cpu()],
+                fallback_to_cpu: true,
+            },
+        )
+        .expect("load identity model");
+
+        assert_requested_provider_or_cpu_fallback(&session, ProviderKind::Trt);
     }
 
     #[test]
@@ -785,6 +991,30 @@ mod tests {
 
         assert_eq!(outputs[0].name, "y");
         assert_eq!(outputs[0].data, OrtTensorData::F16(data));
+    }
+
+    fn assert_requested_provider_or_cpu_fallback(session: &OrtSession, requested: ProviderKind) {
+        let availability = probe_runtime_execution_provider_availability();
+        let selected = session.provider();
+        if availability.is_available(requested) {
+            assert_eq!(
+                selected, requested,
+                "runtime probe reported {requested:?} available, but session selected {selected:?}"
+            );
+            assert!(
+                !session.cpu_fallback_used(),
+                "runtime probe reported {requested:?} available, so CPU fallback should not be used"
+            );
+        } else {
+            assert_eq!(
+                selected, ProviderKind::Cpu,
+                "runtime probe reported {requested:?} unavailable, so session should fall back to CPU"
+            );
+            assert!(
+                session.cpu_fallback_used(),
+                "runtime probe reported {requested:?} unavailable, so CPU fallback should be recorded"
+            );
+        }
     }
 
     #[test]

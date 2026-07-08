@@ -10,7 +10,9 @@
 //!   vendor Ultralytics.
 
 use image::{imageops, Rgb, RgbImage};
-use lcoal_backend_ort::{OrtBackend, OrtInput, OrtOutput, OrtSession, ProviderSelection};
+use lcoal_backend_ort::{
+    OrtBackend, OrtInput, OrtOutput, OrtSession, ProviderSelection, SessionProviderReport,
+};
 use lcoal_core::{BoundingBox, DetectedObject, FileRef, InferenceOutput, ModelSpec};
 use lcoal_error::{InfraError, Result};
 use serde_yaml::Value;
@@ -102,6 +104,10 @@ impl YoloAdapter {
 
     pub fn model_id(&self) -> &str {
         &self.model_id
+    }
+
+    pub fn provider_report(&self) -> SessionProviderReport {
+        self.session.provider_report()
     }
 }
 
@@ -593,6 +599,10 @@ fn coco_labels() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lcoal_core::{
+        AdapterKind, ArtifactKind, BackendKind, FileRef, ModelArtifact, ModelSpec,
+        ResourceRequirement, RuntimePolicy,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -779,5 +789,117 @@ names:
             "lcoal-adapter-yolo-{}-{file_name}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn real_model_smoke_if_env_set() {
+        let Ok(model_dir) = std::env::var("LCOAL_YOLO_MODEL_DIR") else {
+            return;
+        };
+        let image_path = std::env::var_os("LCOAL_YOLO_TEST_IMAGE")
+            .map(PathBuf::from)
+            .filter(|path| path.exists())
+            .or_else(|| {
+                let default = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../scripts/assets/yolo-input.jpg");
+                default.exists().then_some(default)
+            });
+        let Some(image_path) = image_path else {
+            eprintln!("YOLO smoke skipped: no test image found");
+            return;
+        };
+
+        let mut adapter = match YoloAdapter::load(&model_spec(
+            PathBuf::from(model_dir),
+            provider_order_from_env(),
+        )) {
+            Ok(adapter) => adapter,
+            Err(err) => {
+                eprintln!("YOLO smoke stopped at model load boundary: {err}");
+                return;
+            }
+        };
+        let report = adapter.provider_report();
+        eprintln!(
+            "YOLO provider report: provider={:?} cpu_fallback={}",
+            report.provider, report.cpu_fallback_used
+        );
+        match adapter.object_detect(&FileRef::local(&image_path)) {
+            Ok(InferenceOutput::ObjectDetections { objects }) => {
+                eprintln!(
+                    "YOLO smoke detections: count={}, first={:?}",
+                    objects.len(),
+                    objects.first()
+                );
+                assert!(
+                    objects.iter().all(|obj| obj.confidence.is_finite()),
+                    "YOLO smoke returned non-finite confidences"
+                );
+            }
+            Ok(other) => panic!("unexpected output: {other:?}"),
+            Err(err) => eprintln!("YOLO smoke stopped after load/run boundary: {err}"),
+        }
+    }
+
+    fn provider_order_from_env() -> Vec<String> {
+        provider_order_override_from_env().unwrap_or_else(|| vec!["cpu".to_string()])
+    }
+
+    fn provider_order_override_from_env() -> Option<Vec<String>> {
+        std::env::var("LCOAL_TEST_PROVIDER_ORDER")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|part| !part.is_empty())
+                    .map(|part| part.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|parts| !parts.is_empty())
+    }
+
+    fn model_spec(path: PathBuf, provider_order: Vec<String>) -> ModelSpec {
+        ModelSpec {
+            id: "yolo11n.onnx".to_string(),
+            name: "YOLO Test".to_string(),
+            enabled: true,
+            task_kinds: Vec::new(),
+            adapter: AdapterKind::Yolo,
+            backend: BackendKind::Ort,
+            artifacts: vec![
+                ModelArtifact {
+                    kind: ArtifactKind::Local,
+                    path: path.join("yolo11n.onnx"),
+                    source_path: None,
+                    sha256: None,
+                    url: None,
+                    repo_id: None,
+                    revision: None,
+                    files: Vec::new(),
+                    allow_patterns: Vec::new(),
+                    metadata: Default::default(),
+                },
+                ModelArtifact {
+                    kind: ArtifactKind::Local,
+                    path: path.join("coco.yaml"),
+                    source_path: None,
+                    sha256: None,
+                    url: None,
+                    repo_id: None,
+                    revision: None,
+                    files: Vec::new(),
+                    allow_patterns: Vec::new(),
+                    metadata: Default::default(),
+                },
+            ],
+            runtime: RuntimePolicy {
+                provider_order,
+                ..Default::default()
+            },
+            resources: ResourceRequirement::default(),
+            load_policy: Default::default(),
+            metadata: Default::default(),
+        }
     }
 }

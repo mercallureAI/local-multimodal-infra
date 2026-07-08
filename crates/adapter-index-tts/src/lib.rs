@@ -8,7 +8,7 @@
 
 use lcoal_backend_ort::{
     OrtBackend, OrtSession, OrtTensorData, OrtTensorInput, OrtTensorOutput, ProviderSelection,
-    SessionMetadata, TensorElement, TensorMetadata,
+    SessionMetadata, SessionProviderReport, TensorElement, TensorMetadata,
 };
 use lcoal_core::{FileRef, InferenceOutput, ModelSpec};
 use lcoal_error::{InfraError, Result};
@@ -33,6 +33,16 @@ pub const DEFAULT_REPEAT_PENALTY: f32 = 0.9;
 pub const DEFAULT_REPEAT_WINDOW: usize = 16;
 pub const DEFAULT_MEL_CODE_SIZE: usize = 8194;
 pub const MAX_TEXT_TOKEN_ID: i64 = 1_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexTtsProviderReport {
+    pub a: SessionProviderReport,
+    pub b: SessionProviderReport,
+    pub c: SessionProviderReport,
+    pub d: SessionProviderReport,
+    pub e: SessionProviderReport,
+    pub f: SessionProviderReport,
+}
 
 mod artifacts;
 pub mod audio;

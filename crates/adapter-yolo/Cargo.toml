@@ -4,6 +4,12 @@ edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+cuda = ["lcoal-backend-ort/cuda"]
+directml = ["lcoal-backend-ort/directml"]
+tensorrt = ["lcoal-backend-ort/tensorrt"]
+
 [dependencies]
 image.workspace = true
 lcoal-backend-ort = { path = "../backend-ort" }

@@ -86,6 +86,17 @@ impl IndexTtsAdapter {
         &self.artifacts
     }
 
+    pub fn provider_report(&self) -> IndexTtsProviderReport {
+        IndexTtsProviderReport {
+            a: self.a.provider_report(),
+            b: self.b.provider_report(),
+            c: self.c.provider_report(),
+            d: self.d.provider_report(),
+            e: self.e.provider_report(),
+            f: self.f.provider_report(),
+        }
+    }
+
     fn run_af(&mut self, reference_audio: &[i16], text_ids: &[i32]) -> Result<Vec<i16>> {
         let reference_state = self.run_a(reference_audio)?;
         let text_hidden = self.run_b(text_ids)?;

@@ -4,6 +4,12 @@ edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+cuda = ["lcoal-runtime/cuda"]
+directml = ["lcoal-runtime/directml"]
+tensorrt = ["lcoal-runtime/tensorrt"]
+
 [dependencies]
 axum.workspace = true
 lcoal-config = { path = "../config" }

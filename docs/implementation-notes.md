@@ -7,15 +7,16 @@ This MVP intentionally implements only the ORT backend seam. Candle, Python, C++
 The `ort` crate is configured with downloaded/copied CPU binaries so build/check does not require a system-wide ONNX Runtime install. The backend remains ORT-specific at the API/config layer; CUDA/DML provider features are opt-in and must be validated against the local ORT execution providers before use.
 
 
-## Providers: CPU, CUDA, DML
+## Providers: CPU, CUDA, DML, TensorRT
 
-`backend-ort` exposes `ProviderKind::{Cpu,Cuda,Dml}`, `ProviderOptions`, and `ProviderSelection`.
+`backend-ort` exposes `ProviderKind::{Cpu,Cuda,Dml,Trt}`, `ProviderOptions`, and `ProviderSelection`.
 
 - CPU: supported as the default and primary provider in built-in and checked-in YAML model specs.
 - CUDA: configurable only as an opt-in provider after building the backend feature and validating ORT CUDA EP availability. CUDA failures return an explicit reason and fall back to CPU only when CPU fallback is configured.
-- DML: enum/config placeholder only. It is not claimed complete in this MVP.
+- DML: configurable as an opt-in provider on Windows builds with the backend feature enabled. Failures return an explicit reason and can fall back to CPU when configured.
+- TensorRT: optional behind a backend cargo feature. Parser spellings `trt` and `tensorrt` are accepted. Session loading mirrors CUDA/DML in the ORT backend, but the runtime does **not** yet model a same-session TensorRT+CUDA stack, so provider order should usually be `[trt, cuda, cpu]` rather than expecting both EPs to coexist within one session registration.
 
-Model/provider differences are handled by model config `runtime.provider_order`. The checked-in Qwen ASR and YOLO specs use `[cpu]`; CUDA must be added manually after provider validation.
+Model/provider differences are handled by model config `runtime.provider_order`. The checked-in Qwen ASR, YOLO, and IndexTTS specs keep `[cpu]` on disk by policy. At runtime, the executor may derive an effective provider order for those known integrated model ids when the stored order is exactly `[cpu]`: it prefers only providers that are both conservatively validated for that model in this repo and actually available in the active ORT runtime process (not merely enabled by cargo features), while leaving the stored spec/YAML unchanged and preserving any explicit non-default order.
 
 
 ## Qwen ASR limitations

@@ -4,10 +4,29 @@ edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+cuda = [
+    "lcoal-adapter-index-tts/cuda",
+    "lcoal-adapter-qwen-asr/cuda",
+    "lcoal-adapter-yolo/cuda",
+]
+directml = [
+    "lcoal-adapter-index-tts/directml",
+    "lcoal-adapter-qwen-asr/directml",
+    "lcoal-adapter-yolo/directml",
+]
+tensorrt = [
+    "lcoal-adapter-index-tts/tensorrt",
+    "lcoal-adapter-qwen-asr/tensorrt",
+    "lcoal-adapter-yolo/tensorrt",
+]
+
 [dependencies]
 lcoal-adapter-index-tts = { path = "../adapter-index-tts" }
 lcoal-adapter-qwen-asr = { path = "../adapter-qwen-asr" }
 lcoal-adapter-yolo = { path = "../adapter-yolo" }
+lcoal-backend-ort = { path = "../backend-ort" }
 lcoal-core = { path = "../core" }
 lcoal-error = { path = "../error" }
 tokio.workspace = true

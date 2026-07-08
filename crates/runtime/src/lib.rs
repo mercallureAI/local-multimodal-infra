@@ -1,6 +1,7 @@
 use lcoal_adapter_index_tts::IndexTtsAdapter;
 use lcoal_adapter_qwen_asr::QwenAsrAdapter;
 use lcoal_adapter_yolo::YoloAdapter;
+use lcoal_backend_ort::probe_runtime_execution_provider_availability;
 use lcoal_core::{
     AdapterKind, InferenceInput, InferenceOutput, InferenceTask, ModelSpec, ModelState, TaskKind,
 };
@@ -10,6 +11,24 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeProviderAvailability {
+    cuda: bool,
+    directml: bool,
+    tensorrt: bool,
+}
+
+impl RuntimeProviderAvailability {
+    fn current() -> Self {
+        let availability = probe_runtime_execution_provider_availability();
+        Self {
+            cuda: availability.cuda,
+            directml: availability.dml,
+            tensorrt: availability.trt,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RuntimeManagerConfig {
@@ -139,11 +158,17 @@ struct LoadedEntry {
 
 impl LoadedEntry {
     fn load(spec: &ModelSpec) -> Result<Self> {
-        tracing::info!(model_id = spec.id, adapter = ?spec.adapter, "lazy loading model");
+        let spec = effective_load_spec(spec);
+        tracing::info!(
+            model_id = spec.id,
+            adapter = ?spec.adapter,
+            provider_order = ?spec.runtime.provider_order,
+            "lazy loading model"
+        );
         let model = match spec.adapter {
-            AdapterKind::Yolo => LoadedModel::Yolo(YoloAdapter::load(spec)?),
-            AdapterKind::QwenAsr => LoadedModel::QwenAsr(QwenAsrAdapter::load(spec)?),
-            AdapterKind::IndexTts => LoadedModel::IndexTts(IndexTtsAdapter::load(spec)?),
+            AdapterKind::Yolo => LoadedModel::Yolo(YoloAdapter::load(&spec)?),
+            AdapterKind::QwenAsr => LoadedModel::QwenAsr(QwenAsrAdapter::load(&spec)?),
+            AdapterKind::IndexTts => LoadedModel::IndexTts(IndexTtsAdapter::load(&spec)?),
         };
         let now = Instant::now();
         Ok(Self {
@@ -152,6 +177,67 @@ impl LoadedEntry {
             last_used: now,
             state: ModelState::Warm,
         })
+    }
+}
+
+fn effective_load_spec(spec: &ModelSpec) -> ModelSpec {
+    effective_load_spec_with_availability(spec, RuntimeProviderAvailability::current())
+}
+
+fn effective_load_spec_with_availability(
+    spec: &ModelSpec,
+    availability: RuntimeProviderAvailability,
+) -> ModelSpec {
+    let mut effective = spec.clone();
+    if let Some(provider_order) = effective_provider_order_for_model(
+        &effective.id,
+        &effective.runtime.provider_order,
+        availability,
+    ) {
+        effective.runtime.provider_order = provider_order;
+    }
+    effective
+}
+
+fn effective_provider_order_for_model(
+    model_id: &str,
+    stored_provider_order: &[String],
+    availability: RuntimeProviderAvailability,
+) -> Option<Vec<String>> {
+    if stored_provider_order.len() != 1 || !stored_provider_order[0].eq_ignore_ascii_case("cpu") {
+        return None;
+    }
+
+    let validated = validated_runtime_providers_for_model(model_id)?;
+    let mut effective = Vec::new();
+    for provider in ["trt", "cuda", "dml", "cpu"] {
+        let available = match provider {
+            "trt" => availability.tensorrt,
+            "cuda" => availability.cuda,
+            "dml" => availability.directml,
+            "cpu" => true,
+            _ => false,
+        };
+        if available && validated.iter().any(|candidate| *candidate == provider) {
+            effective.push(provider.to_string());
+        }
+    }
+
+    (effective != stored_provider_order).then_some(effective)
+}
+
+fn validated_runtime_providers_for_model(model_id: &str) -> Option<&'static [&'static str]> {
+    match model_id {
+        // Single-session YOLO loading has the broadest generic ORT profile today,
+        // but TRT is still withheld until a real local validation path exists.
+        "yolo11n.onnx" => Some(&["cuda", "dml", "cpu"]),
+        // Qwen ASR is a multi-session int4-first pipeline; keep this conservative
+        // and only prefer CUDA above CPU until DML/TRT are validated end-to-end.
+        "qwen3-asr-0.6b-onnx" => Some(&["cuda", "cpu"]),
+        // IndexTTS deliberately stays CPU-only for now; q4/fp16 paths were
+        // withdrawn and no GPU runtime path is currently validated.
+        "indextts-1.5-onnx" => Some(&["cpu"]),
+        _ => None,
     }
 }
 
@@ -244,13 +330,106 @@ mod tests {
         );
     }
 
+    #[test]
+    fn effective_provider_order_rewrites_only_runtime_clone_for_known_model() {
+        let spec = test_spec(
+            "yolo11n.onnx",
+            AdapterKind::Yolo,
+            true,
+            PathBuf::from("missing"),
+        );
+
+        let effective = effective_load_spec_with_availability(
+            &spec,
+            RuntimeProviderAvailability {
+                cuda: true,
+                directml: true,
+                tensorrt: true,
+            },
+        );
+
+        assert_eq!(spec.runtime.provider_order, vec!["cpu".to_string()]);
+        assert_eq!(
+            effective.runtime.provider_order,
+            vec!["cuda".to_string(), "dml".to_string(), "cpu".to_string()]
+        );
+    }
+
+    #[test]
+    fn effective_provider_order_preserves_explicit_non_default_order() {
+        let mut spec = test_spec(
+            "qwen3-asr-0.6b-onnx",
+            AdapterKind::QwenAsr,
+            true,
+            PathBuf::from("missing"),
+        );
+        spec.runtime.provider_order = vec!["cuda".to_string(), "cpu".to_string()];
+
+        let effective = effective_load_spec_with_availability(
+            &spec,
+            RuntimeProviderAvailability {
+                cuda: true,
+                directml: true,
+                tensorrt: true,
+            },
+        );
+
+        assert_eq!(
+            effective.runtime.provider_order,
+            spec.runtime.provider_order
+        );
+    }
+
+    #[test]
+    fn effective_provider_order_is_model_specific_and_conservative() {
+        let qwen = test_spec(
+            "qwen3-asr-0.6b-onnx",
+            AdapterKind::QwenAsr,
+            true,
+            PathBuf::from("missing"),
+        );
+        let indextts = test_spec(
+            "indextts-1.5-onnx",
+            AdapterKind::IndexTts,
+            true,
+            PathBuf::from("missing"),
+        );
+        let availability = RuntimeProviderAvailability {
+            cuda: true,
+            directml: true,
+            tensorrt: true,
+        };
+
+        assert_eq!(
+            effective_load_spec_with_availability(&qwen, availability)
+                .runtime
+                .provider_order,
+            vec!["cuda".to_string(), "cpu".to_string()]
+        );
+        assert_eq!(
+            effective_load_spec_with_availability(&indextts, availability)
+                .runtime
+                .provider_order,
+            vec!["cpu".to_string()]
+        );
+    }
+
     fn index_tts_spec(enabled: bool, path: PathBuf) -> ModelSpec {
+        test_spec("indextts-test", AdapterKind::IndexTts, enabled, path)
+    }
+
+    fn test_spec(id: &str, adapter: AdapterKind, enabled: bool, path: PathBuf) -> ModelSpec {
+        let task_kinds = match adapter {
+            AdapterKind::Yolo => vec![TaskKind::ObjectDetect],
+            AdapterKind::QwenAsr => vec![TaskKind::AsrTranscribe],
+            AdapterKind::IndexTts => vec![TaskKind::TtsSynthesize],
+        };
         ModelSpec {
-            id: "indextts-test".to_string(),
-            name: "IndexTTS Test".to_string(),
+            id: id.to_string(),
+            name: format!("{id} Test"),
             enabled,
-            task_kinds: vec![TaskKind::TtsSynthesize],
-            adapter: AdapterKind::IndexTts,
+            task_kinds,
+            adapter,
             backend: BackendKind::Ort,
             artifacts: vec![ModelArtifact {
                 kind: ArtifactKind::Local,

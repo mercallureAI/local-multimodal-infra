@@ -1,4 +1,8 @@
 use super::*;
+use lcoal_core::{
+    AdapterKind, ArtifactKind, BackendKind, FileRef, InferenceOutput, ModelArtifact, ModelSpec,
+    ResourceRequirement, RuntimePolicy,
+};
 use std::sync::Mutex;
 
 fn official_like(text: &str) -> String {
@@ -517,11 +521,124 @@ fn concatenate_hidden_states_flattens_batch_token_hidden() {
     );
 }
 
+#[test]
+fn real_model_smoke_if_env_set() {
+    let Ok(model_dir) = std::env::var("LCOAL_INDEXTTS_MODEL_DIR") else {
+        return;
+    };
+    let reference_audio = std::env::var_os("LCOAL_INDEXTTS_TEST_AUDIO")
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+        .or_else(|| {
+            let default = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../scripts/assets/tts-input-mon3tr.wav");
+            default.exists().then_some(default)
+        });
+    let Some(reference_audio) = reference_audio else {
+        eprintln!("IndexTTS smoke skipped: no reference audio found");
+        return;
+    };
+
+    let mut adapter = match IndexTtsAdapter::load(&model_spec(
+        PathBuf::from(model_dir),
+        provider_order_from_env(),
+    )) {
+        Ok(adapter) => adapter,
+        Err(err) => {
+            eprintln!("IndexTTS smoke stopped at model load boundary: {err}");
+            return;
+        }
+    };
+    let report = adapter.provider_report();
+    eprintln!(
+        "IndexTTS provider report: A={:?}/{} B={:?}/{} C={:?}/{} D={:?}/{} E={:?}/{} F={:?}/{}",
+        report.a.provider,
+        report.a.cpu_fallback_used,
+        report.b.provider,
+        report.b.cpu_fallback_used,
+        report.c.provider,
+        report.c.cpu_fallback_used,
+        report.d.provider,
+        report.d.cpu_fallback_used,
+        report.e.provider,
+        report.e.cpu_fallback_used,
+        report.f.provider,
+        report.f.cpu_fallback_used
+    );
+
+    match adapter.synthesize("MON3TR test.", Some(&FileRef::local(&reference_audio))) {
+        Ok(InferenceOutput::TtsAudio { audio }) => {
+            let wav_path = audio
+                .path
+                .as_ref()
+                .expect("IndexTTS smoke should return a local wav path");
+            let metadata = std::fs::metadata(&wav_path).expect("stat wav");
+            eprintln!(
+                "IndexTTS smoke output: {} ({} bytes)",
+                wav_path.display(),
+                metadata.len()
+            );
+            assert!(metadata.len() > 44, "IndexTTS smoke produced empty wav");
+            assert!(
+                metadata.len() < 20_000_000,
+                "IndexTTS smoke output too large"
+            );
+        }
+        Ok(other) => panic!("unexpected output: {other:?}"),
+        Err(err) => eprintln!("IndexTTS smoke stopped after load/run boundary: {err}"),
+    }
+}
+
 fn tensor_meta(name: &str, element_type: TensorElement, shape: Vec<i64>) -> TensorMetadata {
     TensorMetadata {
         name: name.to_string(),
         element_type,
         dimension_symbols: vec![None; shape.len()],
         shape,
+    }
+}
+
+fn provider_order_from_env() -> Vec<String> {
+    std::env::var("LCOAL_TEST_PROVIDER_ORDER")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(|part| part.to_string())
+                .collect::<Vec<_>>()
+        })
+        .filter(|parts| !parts.is_empty())
+        .unwrap_or_else(|| vec!["cpu".to_string()])
+}
+
+fn model_spec(path: PathBuf, provider_order: Vec<String>) -> ModelSpec {
+    ModelSpec {
+        id: "indextts-1.5-onnx".to_string(),
+        name: "IndexTTS Test".to_string(),
+        enabled: true,
+        task_kinds: Vec::new(),
+        adapter: AdapterKind::IndexTts,
+        backend: BackendKind::Ort,
+        artifacts: vec![ModelArtifact {
+            kind: ArtifactKind::Local,
+            path,
+            source_path: None,
+            sha256: None,
+            url: None,
+            repo_id: None,
+            revision: None,
+            files: Vec::new(),
+            allow_patterns: Vec::new(),
+            metadata: Default::default(),
+        }],
+        runtime: RuntimePolicy {
+            provider_order,
+            ..Default::default()
+        },
+        resources: ResourceRequirement::default(),
+        load_policy: Default::default(),
+        metadata: Default::default(),
     }
 }

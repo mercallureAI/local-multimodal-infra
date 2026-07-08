@@ -2,7 +2,11 @@ use super::*;
 use lcoal_core::{
     AdapterKind, ArtifactKind, BackendKind, ModelArtifact, ResourceRequirement, RuntimePolicy,
 };
-use std::{fs::File, io::Write};
+use std::{
+    fs::File,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 #[test]
 fn validates_int4_artifacts() {
@@ -98,18 +102,34 @@ fn real_model_smoke_if_env_set() {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
-    let wav = dir.path().join("silence.wav");
-    write_silence_wav(&wav, 16_000, 16_000);
-    let mut adapter = match QwenAsrAdapter::load(&model_spec(PathBuf::from(model_dir))) {
+    let wav = resolve_qwen_smoke_audio(&dir);
+    let mut adapter = match QwenAsrAdapter::load(&model_spec(
+        PathBuf::from(model_dir),
+        provider_order_from_env(),
+    )) {
         Ok(adapter) => adapter,
         Err(err) => {
             eprintln!("Qwen ASR smoke stopped at model load boundary: {err}");
             return;
         }
     };
+    let report = adapter.provider_report();
+    eprintln!(
+        "Qwen ASR provider report: encoder={:?}/fallback={}, decoder_init={:?}/fallback={}, decoder_step={:?}/fallback={}",
+        report.encoder.provider,
+        report.encoder.cpu_fallback_used,
+        report.decoder_init.provider,
+        report.decoder_init.cpu_fallback_used,
+        report.decoder_step.provider,
+        report.decoder_step.cpu_fallback_used
+    );
     match adapter.transcribe(&FileRef::local(wav)) {
         Ok(InferenceOutput::AsrTranscription { text }) => {
-            eprintln!("Qwen ASR smoke text: {text:?}")
+            eprintln!("Qwen ASR smoke text: {text:?}");
+            assert!(
+                text.trim().chars().count() <= 2048,
+                "Qwen ASR smoke output is unexpectedly unbounded"
+            );
         }
         Ok(other) => panic!("unexpected output: {other:?}"),
         Err(err) => {
@@ -121,6 +141,43 @@ fn real_model_smoke_if_env_set() {
             eprintln!("Qwen ASR smoke reached expected boundary: {msg}");
         }
     }
+}
+
+fn resolve_qwen_smoke_audio(dir: &tempfile::TempDir) -> PathBuf {
+    let explicit = std::env::var_os("LCOAL_QWEN_ASR_TEST_AUDIO")
+        .map(PathBuf::from)
+        .filter(|path| path.exists());
+    if let Some(path) = explicit {
+        eprintln!("Qwen ASR smoke using explicit audio: {}", path.display());
+        return path;
+    }
+
+    let bundled =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/assets/tts-input-mon3tr.wav");
+    if bundled.exists() {
+        eprintln!("Qwen ASR smoke using bundled audio: {}", bundled.display());
+        return bundled;
+    }
+
+    let wav = dir.path().join("silence.wav");
+    write_silence_wav(&wav, 16_000, 16_000);
+    eprintln!("Qwen ASR smoke using fallback silence: {}", wav.display());
+    wav
+}
+
+fn provider_order_from_env() -> Vec<String> {
+    std::env::var("LCOAL_TEST_PROVIDER_ORDER")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(|part| part.to_string())
+                .collect::<Vec<_>>()
+        })
+        .filter(|parts| !parts.is_empty())
+        .unwrap_or_else(|| vec!["cpu".to_string()])
 }
 
 fn write_silence_wav(path: &Path, samples: usize, sample_rate: u32) {
@@ -137,7 +194,7 @@ fn write_silence_wav(path: &Path, samples: usize, sample_rate: u32) {
     writer.finalize().expect("finalize");
 }
 
-fn model_spec(path: PathBuf) -> ModelSpec {
+fn model_spec(path: PathBuf, provider_order: Vec<String>) -> ModelSpec {
     ModelSpec {
         id: "qwen-asr-test".to_string(),
         name: "Qwen ASR Test".to_string(),
@@ -158,7 +215,7 @@ fn model_spec(path: PathBuf) -> ModelSpec {
             metadata: Default::default(),
         }],
         runtime: RuntimePolicy {
-            provider_order: vec!["cpu".to_string()],
+            provider_order,
             ..Default::default()
         },
         resources: ResourceRequirement::default(),
