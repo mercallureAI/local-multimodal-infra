@@ -40,6 +40,7 @@ const DEFAULT_UPLOAD_URL_TTL_SECS: i64 = 900;
 const DEFAULT_ASSET_URL_TTL_SECS: i64 = 600;
 const DEFAULT_MATERIAL_ASSET_TTL_SECS: i64 = 10 * 60;
 const DEFAULT_ARTIFACT_ASSET_TTL_SECS: i64 = 24 * 60 * 60;
+const DEFAULT_ASSET_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone)]
 pub struct ControllerState {
@@ -65,6 +66,7 @@ pub struct ControllerOptions {
     pub data_dir: PathBuf,
     pub upload_signing_secret: Option<String>,
     pub admin_token: Option<String>,
+    pub asset_cleanup_interval: Option<Duration>,
 }
 
 impl Default for ControllerOptions {
@@ -75,8 +77,28 @@ impl Default for ControllerOptions {
             data_dir: PathBuf::from("workdir/data"),
             upload_signing_secret: None,
             admin_token: None,
+            asset_cleanup_interval: Some(DEFAULT_ASSET_CLEANUP_INTERVAL),
         }
     }
+}
+
+fn start_asset_cleanup_loop(assets: AssetsStore, interval: Duration) {
+    if interval.is_zero() {
+        tracing::warn!("asset cleanup loop disabled because interval is zero");
+        return;
+    }
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        tracing::warn!("asset cleanup loop not started because no Tokio runtime is active");
+        return;
+    };
+    handle.spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            if let Err(err) = assets.cleanup_expired() {
+                tracing::warn!(error = %err, "background asset cleanup failed");
+            }
+        }
+    });
 }
 
 impl ControllerState {
@@ -109,6 +131,12 @@ impl ControllerState {
             )
         });
         let assets = AssetsStore::new(options.data_dir.clone());
+        if let Err(err) = assets.cleanup_expired() {
+            tracing::warn!(error = %err, "initial asset cleanup failed");
+        }
+        if let Some(interval) = options.asset_cleanup_interval {
+            start_asset_cleanup_loop(assets.clone(), interval);
+        }
         Self {
             registry,
             nodes: Arc::new(RwLock::new(BTreeMap::new())),

@@ -93,6 +93,7 @@ async fn worker_registration_requires_shared_token_and_returns_session_token() {
             data_dir: std::env::temp_dir(),
             upload_signing_secret: Some("test-upload-secret".to_string()),
             admin_token: None,
+            asset_cleanup_interval: None,
         },
     );
 
@@ -169,6 +170,7 @@ async fn optional_unuploaded_tts_reference_audio_is_not_used_as_input() {
             )),
             upload_signing_secret: Some("test-upload-secret".to_string()),
             admin_token: None,
+            asset_cleanup_interval: None,
         },
     );
     controller
@@ -452,6 +454,7 @@ fn tts_local_output_is_registered_as_downloadable_artifact_asset() {
     let source = controller.data_dir.join("speech.wav");
     std::fs::write(&source, b"RIFF fake wav").expect("write fake wav");
 
+    let before = Utc::now().timestamp();
     let output = controller
         .register_output_assets(
             "task-output-test",
@@ -464,6 +467,7 @@ fn tts_local_output_is_registered_as_downloadable_artifact_asset() {
             },
         )
         .expect("register output assets");
+    let after = Utc::now().timestamp();
     let InferenceOutput::TtsAudio { audio } = output else {
         panic!("expected TtsAudio output");
     };
@@ -477,6 +481,58 @@ fn tts_local_output_is_registered_as_downloadable_artifact_asset() {
         .as_deref()
         .is_some_and(|url| url.contains("action=download") && url.contains("sig=")));
     assert!(audio.sha256.is_some());
+    let uri = audio.uri.as_deref().expect("artifact URI");
+    let record = controller.assets.get(uri).expect("artifact record");
+    let artifact_expires = record.expires_at.expect("artifact expiration").timestamp();
+    assert!(
+        (before + DEFAULT_ARTIFACT_ASSET_TTL_SECS..=after + DEFAULT_ARTIFACT_ASSET_TTL_SECS)
+            .contains(&artifact_expires),
+        "artifact_expires={artifact_expires} before={before} after={after}"
+    );
+    cleanup_test_controller(&controller);
+}
+
+#[test]
+fn controller_startup_runs_initial_asset_cleanup() {
+    let data_dir = std::env::temp_dir().join(format!(
+        "local-controller-test-{}",
+        Uuid::new_v4().as_simple()
+    ));
+    let store = AssetsStore::new(&data_dir);
+    let expired = store
+        .put(
+            AssetKind::Material,
+            "user/stale.txt",
+            Some("text/plain".to_string()),
+            Some(Utc::now() - chrono::Duration::seconds(1)),
+            b"stale",
+        )
+        .expect("write expired asset");
+
+    let controller = ControllerState::new_with_options(
+        ModelRegistry::from_models(vec![test_model()]),
+        None,
+        ControllerOptions {
+            worker_registration_token: None,
+            public_base_url: "http://127.0.0.1:17890".to_string(),
+            data_dir,
+            upload_signing_secret: Some("test-upload-secret".to_string()),
+            admin_token: None,
+            asset_cleanup_interval: None,
+        },
+    );
+
+    let listed = controller
+        .assets
+        .list(&AssetListQuery {
+            include_expired: true,
+            ..AssetListQuery::default()
+        })
+        .expect("list including expired after startup cleanup");
+    assert!(
+        listed.assets.iter().all(|record| record.uri != expired.uri),
+        "startup cleanup should remove expired asset"
+    );
     cleanup_test_controller(&controller);
 }
 
@@ -581,6 +637,7 @@ fn test_controller_with_temp_data_dir() -> ControllerState {
             data_dir,
             upload_signing_secret: Some("test-upload-secret".to_string()),
             admin_token: None,
+            asset_cleanup_interval: None,
         },
     )
 }

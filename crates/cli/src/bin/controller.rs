@@ -80,6 +80,7 @@ async fn main() -> Result<()> {
             data_dir: layout.data_dir.clone(),
             upload_signing_secret: config.upload_signing_secret.clone(),
             admin_token: config.admin_token.clone(),
+            ..ControllerOptions::default()
         },
     );
     let addr: SocketAddr = config.bind.parse().map_err(|e| {

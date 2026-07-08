@@ -53,7 +53,7 @@ impl AssetsStore {
         expires_at: Option<DateTime<Utc>>,
         bytes: &[u8],
     ) -> Result<AssetRecord> {
-        self.cleanup_expired()?;
+        self.cleanup_expired_before_access("put");
         let relative = normalize_asset_path(path)?;
         let asset_path = self.asset_path(kind, &relative);
         if let Some(parent) = asset_path.parent() {
@@ -82,7 +82,7 @@ impl AssetsStore {
     }
 
     pub fn get(&self, uri_or_kind_path: &str) -> Result<AssetRecord> {
-        self.cleanup_expired()?;
+        self.cleanup_expired_before_access("get");
         let (kind, relative) = parse_asset_ref(uri_or_kind_path)?;
         let record = self.read_record(kind, &relative)?;
         if is_expired(&record) {
@@ -105,19 +105,7 @@ impl AssetsStore {
     }
 
     pub fn list(&self, query: &AssetListQuery) -> Result<AssetListResponse> {
-        self.cleanup_expired()?;
-        let mut assets = Vec::new();
-        let kinds: Vec<AssetKind> = query
-            .kind
-            .map(|kind| vec![kind])
-            .unwrap_or_else(|| vec![AssetKind::Material, AssetKind::Artifact]);
-        for kind in kinds {
-            let meta_root = self.meta_root(kind);
-            if !meta_root.exists() {
-                continue;
-            }
-            self.collect_records(kind, &meta_root, &mut assets)?;
-        }
+        let mut assets = self.list_without_cleanup(query)?.assets;
         assets.retain(|record| {
             (query.include_expired || !is_expired(record))
                 && query
@@ -208,16 +196,20 @@ impl AssetsStore {
         Ok(())
     }
 
+    fn cleanup_expired_before_access(&self, operation: &str) {
+        if let Err(err) = self.cleanup_expired() {
+            tracing::warn!(operation, error = %err, "asset cleanup failed before store access");
+        }
+    }
+
     pub fn cleanup_expired(&self) -> Result<()> {
         let query = AssetListQuery {
             include_expired: true,
             ..AssetListQuery::default()
         };
-        let Ok(response) = self.list_without_cleanup(&query) else {
-            return Ok(());
-        };
+        let response = self.list_without_cleanup(&query)?;
         for record in response.assets.into_iter().filter(is_expired) {
-            let _ = self.delete(&record.uri);
+            self.delete(&record.uri)?;
         }
         Ok(())
     }
@@ -330,6 +322,7 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
 
     #[test]
     fn rejects_escaping_asset_paths() {
@@ -340,5 +333,77 @@ mod tests {
             normalize_asset_path("folder/file.txt").unwrap(),
             "folder/file.txt"
         );
+    }
+
+    #[test]
+    fn list_include_expired_can_observe_records_until_cleanup_runs() {
+        let root = test_data_dir();
+        let store = AssetsStore::new(&root);
+        let expired_at = Utc::now() - Duration::seconds(1);
+        let record = store
+            .put(
+                AssetKind::Material,
+                "user/expired.txt",
+                Some("text/plain".to_string()),
+                Some(expired_at),
+                b"expired",
+            )
+            .expect("put expired asset");
+
+        let default_list = store
+            .list(&AssetListQuery::default())
+            .expect("list non-expired");
+        assert!(default_list.assets.is_empty());
+
+        let include_expired = store
+            .list(&AssetListQuery {
+                include_expired: true,
+                ..AssetListQuery::default()
+            })
+            .expect("list including expired");
+        assert_eq!(include_expired.assets.len(), 1);
+        assert_eq!(include_expired.assets[0].uri, record.uri);
+
+        store.cleanup_expired().expect("cleanup expired assets");
+        let after_cleanup = store
+            .list(&AssetListQuery {
+                include_expired: true,
+                ..AssetListQuery::default()
+            })
+            .expect("list after cleanup");
+        assert!(after_cleanup.assets.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn get_deletes_expired_asset_and_returns_not_found() {
+        let root = test_data_dir();
+        let store = AssetsStore::new(&root);
+        let record = store
+            .put(
+                AssetKind::Artifact,
+                "tasks/task/output.wav",
+                Some("audio/wav".to_string()),
+                Some(Utc::now() - Duration::seconds(1)),
+                b"RIFF",
+            )
+            .expect("put expired artifact");
+
+        let err = store
+            .get(&record.uri)
+            .expect_err("expired asset should not be returned by get");
+        assert!(matches!(err, InfraError::NotFound(_)), "{err}");
+        assert!(!store.asset_path(record.kind, &record.path).exists());
+        assert!(!store.meta_path(record.kind, &record.path).exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn test_data_dir() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "local-files-test-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ))
     }
 }
