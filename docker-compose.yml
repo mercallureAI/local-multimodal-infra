@@ -2,6 +2,16 @@ x-local-service: &local-service
   build:
     context: .
     dockerfile: Dockerfile
+    network: host
+    args:
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      ALL_PROXY: ${ALL_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      all_proxy: ${all_proxy:-}
+      no_proxy: ${no_proxy:-}
   image: local-multimodal-infra:local
   volumes:
     # Persists runtime data/db/uploads and the explicit model artifact directory.

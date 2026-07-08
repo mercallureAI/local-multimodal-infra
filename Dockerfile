@@ -1,4 +1,4 @@
-FROM rust:1-bookworm AS builder
+FROM rust:1-trixie AS builder
 
 WORKDIR /app
 RUN apt-get update \
@@ -6,13 +6,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . .
-RUN cargo build --release --bins
+RUN cargo build --release --bin controller --bin worker
 RUN set -eux; \
     mkdir -p /ort-libs; \
-    find /app/target -name 'libonnxruntime*.so*' -exec cp -Lv {} /ort-libs/ \;; \
-    find /ort-libs -name 'libonnxruntime*.so*' | grep -q .
+    find /app/target -name 'libonnxruntime*.so*' -exec cp -Lv {} /ort-libs/ \;
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 WORKDIR /app
 RUN apt-get update \
