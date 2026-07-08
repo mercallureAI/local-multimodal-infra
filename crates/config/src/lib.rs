@@ -99,7 +99,9 @@ impl Default for WorkerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeManagerConfig {
-    #[serde(default = "default_idle_ttl")]
+    #[serde(default = "default_cache_idle_ttl")]
+    pub cache_idle_ttl_sec: u64,
+    #[serde(default = "default_model_idle_ttl")]
     pub idle_ttl_sec: u64,
     #[serde(default = "default_min_residency")]
     pub min_residency_sec: u64,
@@ -110,7 +112,8 @@ pub struct RuntimeManagerConfig {
 impl Default for RuntimeManagerConfig {
     fn default() -> Self {
         Self {
-            idle_ttl_sec: default_idle_ttl(),
+            cache_idle_ttl_sec: default_cache_idle_ttl(),
+            idle_ttl_sec: default_model_idle_ttl(),
             min_residency_sec: default_min_residency(),
             memory_pressure_threshold: default_memory_pressure(),
         }
@@ -182,12 +185,29 @@ fn default_node_id() -> String {
 fn default_heartbeat_secs() -> u64 {
     5
 }
-fn default_idle_ttl() -> u64 {
-    300
+fn default_cache_idle_ttl() -> u64 {
+    30
+}
+fn default_model_idle_ttl() -> u64 {
+    600
 }
 fn default_min_residency() -> u64 {
-    60
+    0
 }
 fn default_memory_pressure() -> f32 {
     0.85
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_defaults_release_cache_after_30s_and_unload_model_after_10m() {
+        let config = RuntimeManagerConfig::default();
+
+        assert_eq!(config.cache_idle_ttl_sec, 30);
+        assert_eq!(config.idle_ttl_sec, 600);
+        assert_eq!(config.min_residency_sec, 0);
+    }
 }

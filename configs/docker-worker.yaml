@@ -11,6 +11,9 @@ models_conf_dir: configs/models.d
 heartbeat_interval_sec: 5
 registration_token: null
 runtime:
-  idle_ttl_sec: 300
-  min_residency_sec: 60
+  # Release per-model reusable runtime cache after 30s idle; this does not unload the model.
+  cache_idle_ttl_sec: 30
+  # Unload loaded model/adapters/ORT sessions after 10 minutes idle.
+  idle_ttl_sec: 600
+  min_residency_sec: 0
   memory_pressure_threshold: 0.85

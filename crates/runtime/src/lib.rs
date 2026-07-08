@@ -8,9 +8,12 @@ use local_core::{
 use local_error::{InfraError, Result};
 use std::{
     collections::HashMap,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
+
+pub const DEFAULT_IDLE_UNLOAD_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RuntimeProviderAvailability {
@@ -32,7 +35,8 @@ impl RuntimeProviderAvailability {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeManagerConfig {
-    pub idle_ttl: Duration,
+    pub cache_idle_ttl: Duration,
+    pub model_idle_ttl: Duration,
     pub min_residency: Duration,
     pub memory_pressure_threshold: f32,
 }
@@ -40,10 +44,22 @@ pub struct RuntimeManagerConfig {
 impl Default for RuntimeManagerConfig {
     fn default() -> Self {
         Self {
-            idle_ttl: Duration::from_secs(300),
-            min_residency: Duration::from_secs(60),
+            cache_idle_ttl: Duration::from_secs(30),
+            model_idle_ttl: Duration::from_secs(600),
+            min_residency: Duration::from_secs(0),
             memory_pressure_threshold: 0.85,
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct IdleMaintenanceLoopHandle {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for IdleMaintenanceLoopHandle {
+    fn drop(&mut self) {
+        self.handle.abort();
     }
 }
 
@@ -67,7 +83,7 @@ impl RuntimeManager {
     }
 
     pub async fn infer(&self, task: InferenceTask) -> Result<InferenceOutput> {
-        self.unload_idle().await?;
+        self.maintain_idle().await?;
         let spec = self.resolve_spec(&task)?;
         let model_id = spec.id.clone();
         let mut loaded = self.loaded.lock().await;
@@ -81,8 +97,33 @@ impl RuntimeManager {
         entry.state = ModelState::Busy;
         let result = entry.model.infer(&task);
         entry.last_used = Instant::now();
+        entry.last_cache_released_at = None;
         entry.state = ModelState::Idle;
         result
+    }
+
+    pub fn spawn_idle_maintenance_loop(self: Arc<Self>) -> IdleMaintenanceLoopHandle {
+        self.spawn_idle_maintenance_loop_with_interval(DEFAULT_IDLE_UNLOAD_INTERVAL)
+    }
+
+    pub fn spawn_idle_maintenance_loop_with_interval(
+        self: Arc<Self>,
+        interval: Duration,
+    ) -> IdleMaintenanceLoopHandle {
+        let interval = if interval.is_zero() {
+            Duration::from_millis(1)
+        } else {
+            interval
+        };
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                if let Err(err) = self.maintain_idle().await {
+                    tracing::warn!(error = %err, "idle runtime maintenance loop failed");
+                }
+            }
+        });
+        IdleMaintenanceLoopHandle { handle }
     }
 
     pub async fn loaded_models(&self) -> Vec<String> {
@@ -99,16 +140,29 @@ impl RuntimeManager {
     }
 
     pub async fn unload_idle(&self) -> Result<()> {
+        self.maintain_idle().await
+    }
+
+    pub async fn maintain_idle(&self) -> Result<()> {
         let mut loaded = self.loaded.lock().await;
         let now = Instant::now();
         loaded.retain(|id, entry| {
             let can_unload = entry.state == ModelState::Idle
-                && now.duration_since(entry.last_used) >= self.config.idle_ttl
+                && now.duration_since(entry.last_used) >= self.config.model_idle_ttl
                 && now.duration_since(entry.loaded_at) >= self.config.min_residency;
             if can_unload {
                 tracing::info!(model_id = id, "unloading idle model");
+                return false;
             }
-            !can_unload
+
+            let can_release_cache = entry.state == ModelState::Idle
+                && entry.last_cache_released_at.is_none()
+                && now.duration_since(entry.last_used) >= self.config.cache_idle_ttl;
+            if can_release_cache {
+                entry.model.release_idle_cache(id);
+                entry.last_cache_released_at = Some(now);
+            }
+            true
         });
         self.note_memory_pressure_policy();
         Ok(())
@@ -117,7 +171,7 @@ impl RuntimeManager {
     fn note_memory_pressure_policy(&self) {
         tracing::trace!(
             threshold = self.config.memory_pressure_threshold,
-            "memory-pressure eviction policy is configured but passive in this MVP; idle TTL unloading is the active eviction mechanism"
+            "memory-pressure eviction policy is configured but passive in this MVP; idle cache release and model TTL unloading are the active maintenance mechanisms"
         );
     }
 
@@ -153,6 +207,7 @@ struct LoadedEntry {
     model: LoadedModel,
     loaded_at: Instant,
     last_used: Instant,
+    last_cache_released_at: Option<Instant>,
     state: ModelState,
 }
 
@@ -175,6 +230,7 @@ impl LoadedEntry {
             model,
             loaded_at: now,
             last_used: now,
+            last_cache_released_at: None,
             state: ModelState::Warm,
         })
     }
@@ -246,6 +302,10 @@ enum LoadedModel {
     Yolo(YoloAdapter),
     QwenAsr(QwenAsrAdapter),
     IndexTts(IndexTtsAdapter),
+    #[cfg(test)]
+    Test {
+        cache_releases: Arc<std::sync::atomic::AtomicUsize>,
+    },
 }
 
 impl LoadedModel {
@@ -274,6 +334,21 @@ impl LoadedModel {
             ))),
         }
     }
+
+    fn release_idle_cache(&mut self, model_id: &str) {
+        match self {
+            LoadedModel::Yolo(_) | LoadedModel::QwenAsr(_) | LoadedModel::IndexTts(_) => {
+                tracing::debug!(
+                    model_id,
+                    "idle cache release hook reached; adapters currently keep no reusable per-request cache separate from the loaded model/session"
+                );
+            }
+            #[cfg(test)]
+            LoadedModel::Test { cache_releases } => {
+                cache_releases.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -283,7 +358,210 @@ mod tests {
         ArtifactKind, BackendKind, FileRef, LoadPolicy, ModelArtifact, ResourceRequirement,
         RuntimePolicy,
     };
-    use std::{collections::BTreeMap, path::PathBuf};
+    use std::{
+        collections::BTreeMap,
+        path::PathBuf,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
+    use tokio::time::{sleep, timeout};
+
+    #[test]
+    fn default_runtime_config_releases_cache_after_30s_and_unloads_model_after_10m() {
+        let config = RuntimeManagerConfig::default();
+
+        assert_eq!(config.cache_idle_ttl, Duration::from_secs(30));
+        assert_eq!(config.model_idle_ttl, Duration::from_secs(600));
+        assert_eq!(config.min_residency, Duration::from_secs(0));
+    }
+
+    #[tokio::test]
+    async fn cache_release_uses_per_model_last_used_and_does_not_unload_models() {
+        let runtime = RuntimeManager::new(Vec::new(), test_runtime_config(50, 500, 0));
+        let due_model = "cache-due-model".to_string();
+        let fresh_model = "fresh-model".to_string();
+        let now = Instant::now();
+        let due_releases = Arc::new(AtomicUsize::new(0));
+        let fresh_releases = Arc::new(AtomicUsize::new(0));
+        {
+            let mut loaded = runtime.loaded.lock().await;
+            loaded.insert(
+                due_model.clone(),
+                test_loaded_entry_with_state_and_counter(
+                    now - Duration::from_millis(100),
+                    ModelState::Idle,
+                    due_releases.clone(),
+                ),
+            );
+            loaded.insert(
+                fresh_model.clone(),
+                test_loaded_entry_with_state_and_counter(
+                    now,
+                    ModelState::Idle,
+                    fresh_releases.clone(),
+                ),
+            );
+        }
+
+        runtime.maintain_idle().await.expect("maintain idle");
+
+        let loaded = runtime.loaded_models().await;
+        assert!(
+            loaded.contains(&due_model),
+            "30s cache release must not unload model: {loaded:?}"
+        );
+        assert!(
+            loaded.contains(&fresh_model),
+            "fresh model should remain loaded: {loaded:?}"
+        );
+        assert_eq!(due_releases.load(Ordering::SeqCst), 1);
+        assert_eq!(fresh_releases.load(Ordering::SeqCst), 0);
+
+        runtime.maintain_idle().await.expect("maintain idle again");
+        assert_eq!(
+            due_releases.load(Ordering::SeqCst),
+            1,
+            "cache release should only run once until the model is used again"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_unload_uses_per_model_last_used_and_unloads_only_due_models() {
+        let runtime = RuntimeManager::new(Vec::new(), test_runtime_config(50, 100, 0));
+        let old_model = "old-model".to_string();
+        let fresh_model = "fresh-model".to_string();
+        let now = Instant::now();
+        {
+            let mut loaded = runtime.loaded.lock().await;
+            loaded.insert(
+                old_model.clone(),
+                test_loaded_entry_with_state(now - Duration::from_millis(150), ModelState::Idle),
+            );
+            loaded.insert(
+                fresh_model.clone(),
+                test_loaded_entry_with_state(now - Duration::from_millis(75), ModelState::Idle),
+            );
+        }
+
+        runtime.maintain_idle().await.expect("maintain idle");
+
+        let loaded = runtime.loaded_models().await;
+        assert!(
+            !loaded.contains(&old_model),
+            "model past model idle ttl should be unloaded: {loaded:?}"
+        );
+        assert!(
+            loaded.contains(&fresh_model),
+            "model before model idle ttl should remain loaded: {loaded:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_models_do_not_release_cache_or_unload() {
+        let runtime = RuntimeManager::new(Vec::new(), test_runtime_config(50, 100, 0));
+        let busy_model = "busy-model".to_string();
+        let now = Instant::now();
+        let busy_releases = Arc::new(AtomicUsize::new(0));
+        {
+            let mut loaded = runtime.loaded.lock().await;
+            loaded.insert(
+                busy_model.clone(),
+                test_loaded_entry_with_state_and_counter(
+                    now - Duration::from_millis(150),
+                    ModelState::Busy,
+                    busy_releases.clone(),
+                ),
+            );
+        }
+
+        runtime.maintain_idle().await.expect("maintain idle");
+
+        let loaded = runtime.loaded_models().await;
+        assert!(
+            loaded.contains(&busy_model),
+            "busy model must not be unloaded even after both ttls: {loaded:?}"
+        );
+        assert_eq!(
+            busy_releases.load(Ordering::SeqCst),
+            0,
+            "busy model cache must not be released"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_maintenance_loop_releases_cache_without_followup_inference() {
+        let runtime = Arc::new(RuntimeManager::new(
+            Vec::new(),
+            test_runtime_config(20, 200, 0),
+        ));
+        let cache_releases = Arc::new(AtomicUsize::new(0));
+        {
+            let mut loaded = runtime.loaded.lock().await;
+            loaded.insert(
+                "idle-model".to_string(),
+                test_loaded_entry_with_state_and_counter(
+                    Instant::now() - Duration::from_millis(50),
+                    ModelState::Idle,
+                    cache_releases.clone(),
+                ),
+            );
+        }
+        let _loop = runtime
+            .clone()
+            .spawn_idle_maintenance_loop_with_interval(Duration::from_millis(5));
+
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if cache_releases.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("idle maintenance loop should release cache promptly");
+        assert!(
+            runtime
+                .loaded_models()
+                .await
+                .contains(&"idle-model".to_string()),
+            "cache release ttl should not unload model"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_maintenance_loop_unloads_model_without_followup_inference() {
+        let runtime = Arc::new(RuntimeManager::new(
+            Vec::new(),
+            test_runtime_config(20, 40, 0),
+        ));
+        {
+            let mut loaded = runtime.loaded.lock().await;
+            loaded.insert(
+                "idle-model".to_string(),
+                test_loaded_entry_with_state(
+                    Instant::now() - Duration::from_millis(50),
+                    ModelState::Idle,
+                ),
+            );
+        }
+        let _loop = runtime
+            .clone()
+            .spawn_idle_maintenance_loop_with_interval(Duration::from_millis(5));
+
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if runtime.loaded_models().await.is_empty() {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("idle maintenance loop should unload model promptly");
+    }
 
     #[tokio::test]
     async fn disabled_indextts_model_is_gated_before_artifact_loading() {
@@ -416,6 +694,37 @@ mod tests {
 
     fn index_tts_spec(enabled: bool, path: PathBuf) -> ModelSpec {
         test_spec("indextts-test", AdapterKind::IndexTts, enabled, path)
+    }
+
+    fn test_runtime_config(
+        cache_idle_ttl_ms: u64,
+        model_idle_ttl_ms: u64,
+        min_residency_ms: u64,
+    ) -> RuntimeManagerConfig {
+        RuntimeManagerConfig {
+            cache_idle_ttl: Duration::from_millis(cache_idle_ttl_ms),
+            model_idle_ttl: Duration::from_millis(model_idle_ttl_ms),
+            min_residency: Duration::from_millis(min_residency_ms),
+            memory_pressure_threshold: 0.85,
+        }
+    }
+
+    fn test_loaded_entry_with_state(last_used: Instant, state: ModelState) -> LoadedEntry {
+        test_loaded_entry_with_state_and_counter(last_used, state, Arc::new(AtomicUsize::new(0)))
+    }
+
+    fn test_loaded_entry_with_state_and_counter(
+        last_used: Instant,
+        state: ModelState,
+        cache_releases: Arc<AtomicUsize>,
+    ) -> LoadedEntry {
+        LoadedEntry {
+            model: LoadedModel::Test { cache_releases },
+            loaded_at: last_used,
+            last_used,
+            last_cache_released_at: None,
+            state,
+        }
     }
 
     fn test_spec(id: &str, adapter: AdapterKind, enabled: bool, path: PathBuf) -> ModelSpec {

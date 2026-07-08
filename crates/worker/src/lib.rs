@@ -11,7 +11,7 @@ use local_core::{
 };
 use local_error::{InfraError, Result};
 use local_registry::ModelRegistry;
-use local_runtime::{RuntimeManager, RuntimeManagerConfig};
+use local_runtime::{IdleMaintenanceLoopHandle, RuntimeManager, RuntimeManagerConfig};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
@@ -25,6 +25,7 @@ pub struct WorkerState {
     registration_token: Option<String>,
     session_token: Arc<RwLock<Option<String>>>,
     runtime: Arc<RuntimeManager>,
+    _idle_maintenance_loop: Arc<IdleMaintenanceLoopHandle>,
     http: reqwest::Client,
 }
 
@@ -37,12 +38,15 @@ impl WorkerState {
         runtime_config: RuntimeManagerConfig,
     ) -> Self {
         let specs = registry.list().await;
+        let runtime = Arc::new(RuntimeManager::new(specs, runtime_config));
+        let idle_maintenance_loop = Arc::new(runtime.clone().spawn_idle_maintenance_loop());
         Self {
             node_id,
             base_url,
             registration_token,
             session_token: Arc::new(RwLock::new(None)),
-            runtime: Arc::new(RuntimeManager::new(specs, runtime_config)),
+            runtime,
+            _idle_maintenance_loop: idle_maintenance_loop,
             http: reqwest::Client::new(),
         }
     }

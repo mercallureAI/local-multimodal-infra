@@ -40,7 +40,8 @@ async fn main() -> Result<()> {
     store.seed_models(local_registry::load_yaml_specs(&layout.models_conf_dir)?)?;
     let registry = ModelRegistry::from_models(store.list_models()?);
     let runtime_config = RuntimeManagerConfig {
-        idle_ttl: Duration::from_secs(config.runtime.idle_ttl_sec),
+        cache_idle_ttl: Duration::from_secs(config.runtime.cache_idle_ttl_sec),
+        model_idle_ttl: Duration::from_secs(config.runtime.idle_ttl_sec),
         min_residency: Duration::from_secs(config.runtime.min_residency_sec),
         memory_pressure_threshold: config.runtime.memory_pressure_threshold,
     };
