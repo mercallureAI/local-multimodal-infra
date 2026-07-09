@@ -64,9 +64,10 @@ pub use frontend::{
 pub use onnx::{apply_repeat_penalty_token, concatenate_hidden_states, e_loop_control_lengths};
 pub use pipeline::IndexTtsAdapter;
 pub use tokenizer::{
-    dump_text_frontend, explicit_text_token_ids_from_params, index_tts_wav_filename,
-    prepare_text_ids, prepare_text_ids_with_mode, IndexTextTokenizer, IndexTtsTextFrontendDump,
-    SentencePieceTokenizer,
+    dump_text_frontend, ensure_index_tts_text_has_speakable_content,
+    explicit_text_token_ids_from_params, index_tts_text_has_speakable_content,
+    index_tts_wav_filename, prepare_text_ids, prepare_text_ids_with_mode, IndexTextTokenizer,
+    IndexTtsTextFrontendDump, SentencePieceTokenizer,
 };
 
 #[cfg(test)]

@@ -54,6 +54,15 @@ fn normalize_text_collapses_space_and_punctuation() {
 }
 
 #[test]
+fn normalize_text_separates_mapped_chinese_punctuation_from_ascii() {
+    assert_eq!(
+        normalize_text("第一句。Second ？What！Hello，hello、123"),
+        "第一句. Second ? What! Hello, hello,一二三"
+    );
+    assert_eq!(normalize_text("A，hello"), "A, hello");
+}
+
+#[test]
 fn normalize_text_preserves_and_fixes_toned_pinyin() {
     assert_eq!(
         normalize_text("xuan4 ying1 zhong4 shang5 ju4 qu2 xu1 lü4 nü3"),
@@ -196,7 +205,7 @@ fn frontend_corpus_covers_mixed_text_and_lightweight_tn_boundaries() {
         ("联系test@example.com。", "联 系 TEST@EXAMPLE.COM."),
         (
             "第一句。Second sentence! 第三句？",
-            "第 一 句 .SECOND SENTENCE! 第 三 句 ?",
+            "第 一 句 . SECOND SENTENCE! 第 三 句 ?",
         ),
     ];
     for (input, expected) in cases {
@@ -360,6 +369,44 @@ fn prepare_text_ids_uses_preprocessed_text_with_fake_tokenizer() {
         tokenizer.seen.lock().expect("lock").as_slice(),
         &["你 好 WORLD, 再 见 !".to_string()]
     );
+}
+
+#[test]
+fn prepare_text_ids_rejects_non_speakable_text_before_tokenizer() {
+    #[derive(Default)]
+    struct FakeTokenizer {
+        calls: Mutex<usize>,
+    }
+    impl IndexTextTokenizer for FakeTokenizer {
+        fn encode(&self, _text: &str) -> Result<Vec<i32>> {
+            *self.calls.lock().expect("lock") += 1;
+            Ok(vec![10])
+        }
+    }
+
+    for input in ["", "   ", "。", "，", "！？", "……", "--", "''", "（）【】"] {
+        let tokenizer = FakeTokenizer::default();
+        let err =
+            prepare_text_ids_with_mode(&tokenizer, input, IndexTtsTextFrontendMode::OfficialLike)
+                .expect_err("non-speakable text should be rejected");
+        assert!(
+            err.to_string()
+                .contains("IndexTTS text must contain speakable content"),
+            "{input:?}: {err}"
+        );
+        assert_eq!(*tokenizer.calls.lock().expect("lock"), 0, "{input:?}");
+    }
+}
+
+#[test]
+fn speakable_content_guard_accepts_letters_digits_and_hanzi_only() {
+    assert!(index_tts_text_has_speakable_content(&official_like(
+        "你好world，再见！"
+    )));
+    assert!(index_tts_text_has_speakable_content("OPENAI2"));
+    assert!(!index_tts_text_has_speakable_content(&official_like(
+        "！？……--''"
+    )));
 }
 
 #[test]

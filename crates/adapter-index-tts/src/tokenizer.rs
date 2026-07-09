@@ -100,7 +100,26 @@ pub fn prepare_text_ids_with_mode(
     mode: IndexTtsTextFrontendMode,
 ) -> Result<Vec<i32>> {
     let normalized = preprocess_text_for_index_tts_with_mode(text, mode);
+    ensure_index_tts_text_has_speakable_content(&normalized)?;
     tokenizer.encode(&normalized)
+}
+
+pub fn ensure_index_tts_text_has_speakable_content(text: &str) -> Result<()> {
+    if index_tts_text_has_speakable_content(text) {
+        Ok(())
+    } else {
+        Err(InfraError::BadRequest(
+            "IndexTTS text must contain speakable content".to_string(),
+        ))
+    }
+}
+
+pub fn index_tts_text_has_speakable_content(text: &str) -> bool {
+    text.chars().any(is_index_tts_speakable_char)
+}
+
+fn is_index_tts_speakable_char(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, 'ü' | 'Ü')
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

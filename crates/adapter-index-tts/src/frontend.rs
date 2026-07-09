@@ -54,6 +54,7 @@ pub fn normalize_text(text: &str) -> String {
         &CHAR_REP_MAP[..]
     };
     let (text, time_colons) = save_time_colons(&text);
+    let text = separate_zh_punctuation_before_ascii(&text);
     let text = collapse_spaces(&apply_char_rep_map(&text, map));
     restore_time_colons(&text, &time_colons)
 }
@@ -302,6 +303,26 @@ pub(crate) fn restore_time_colons(text: &str, originals: &[String]) -> String {
         transformed = transformed.replace(&time_colon_placeholder(index), original);
     }
     transformed
+}
+
+pub(crate) fn separate_zh_punctuation_before_ascii(text: &str) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut out = String::with_capacity(text.len());
+    for (index, ch) in chars.iter().copied().enumerate() {
+        out.push(ch);
+        if is_zh_sentence_punctuation(ch)
+            && chars
+                .get(index + 1)
+                .is_some_and(|next| next.is_ascii_alphanumeric())
+        {
+            out.push(' ');
+        }
+    }
+    out
+}
+
+pub(crate) fn is_zh_sentence_punctuation(ch: char) -> bool {
+    matches!(ch, '，' | '。' | '！' | '？' | '、')
 }
 
 pub(crate) fn time_colon_placeholder(index: usize) -> String {
