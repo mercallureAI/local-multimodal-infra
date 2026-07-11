@@ -41,6 +41,19 @@ impl SentencePieceTokenizer {
         })
     }
 
+    pub(crate) fn encode_ids_and_pieces(&self, text: &str) -> Result<(Vec<i32>, Vec<String>)> {
+        let pieces = self.encode_pieces(text)?;
+        let ids = self.encode(text)?;
+        if ids.len() != pieces.len() {
+            return Err(InfraError::Adapter(format!(
+                "IndexTTS SentencePiece returned {} ids but {} pieces for one input",
+                ids.len(),
+                pieces.len()
+            )));
+        }
+        Ok((ids, pieces))
+    }
+
     pub fn decode_ids(&self, ids: &[i32], do_lower_case: bool) -> Result<String> {
         let ids = ids
             .iter()

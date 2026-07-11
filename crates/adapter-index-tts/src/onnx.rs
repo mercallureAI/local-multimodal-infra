@@ -563,7 +563,14 @@ pub(crate) fn first_i64_or_i32(output: &OrtTensorOutput, name: &str) -> Result<i
 pub(crate) fn tensor_to_i16_audio(output: &OrtTensorOutput) -> Result<Vec<i16>> {
     let samples = match &output.data {
         OrtTensorData::I16(data) => data.clone(),
-        OrtTensorData::F32(data) => data.iter().map(|v| f32_to_i16(*v)).collect(),
+        OrtTensorData::F32(data) => {
+            if data.iter().any(|value| !value.is_finite()) {
+                return Err(InfraError::Backend(
+                    "generated_wav contains non-finite samples".to_string(),
+                ));
+            }
+            data.iter().map(|v| f32_to_i16(*v)).collect()
+        }
         OrtTensorData::I32(data) => data
             .iter()
             .map(|v| (*v).clamp(i16::MIN as i32, i16::MAX as i32) as i16)

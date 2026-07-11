@@ -7,8 +7,8 @@
 //!   not directly depend on or vendor the upstream projects.
 
 use local_backend_ort::{
-    OrtBackend, OrtSession, OrtTensorData, OrtTensorInput, OrtTensorOutput, ProviderSelection,
-    SessionMetadata, SessionProviderReport, TensorElement, TensorMetadata,
+    CpuSessionOptions, OrtBackend, OrtSession, OrtTensorData, OrtTensorInput, OrtTensorOutput,
+    ProviderSelection, SessionMetadata, SessionProviderReport, TensorElement, TensorMetadata,
 };
 use local_core::{FileRef, InferenceOutput, ModelSpec};
 use local_error::{InfraError, Result};
@@ -27,6 +27,8 @@ pub const TARGET_SAMPLE_RATE: u32 = 24_000;
 pub const START_TOKEN: i32 = 8192;
 pub const STOP_TOKEN: i32 = 8193;
 pub const MAX_GENERATE_LENGTH: usize = 800;
+pub const DEFAULT_MAX_TEXT_TOKENS_PER_SEGMENT: usize = 120;
+pub const DEFAULT_INTER_SEGMENT_SILENCE_MS: u32 = 200;
 /// IndexTTS E graph applies repeat suppression by multiplying logits by
 /// `repeat_penality`, so repeated token columns must be below 1.0.
 pub const DEFAULT_REPEAT_PENALTY: f32 = 0.9;
@@ -75,7 +77,7 @@ pub(crate) use artifacts::MODEL_FILENAMES;
 pub(crate) use frontend::*;
 pub(crate) use normalization_rules::*;
 pub(crate) use onnx::*;
-pub(crate) use pipeline::EStep;
+pub(crate) use pipeline::*;
 
 #[cfg(test)]
 mod tests;

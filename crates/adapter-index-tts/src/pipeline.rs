@@ -20,9 +20,11 @@ impl IndexTtsAdapter {
         let precision = IndexTtsPrecision::from_spec(spec);
         let root = IndexTtsArtifacts::resolve(spec);
         let artifacts = IndexTtsArtifacts::validate(root, precision)?;
+        let cpu_options = index_tts_cpu_session_options_from_env()?;
         let backend = OrtBackend::new(ProviderSelection::from_strings(
             &spec.runtime.provider_order,
-        ));
+        ))
+        .with_cpu_session_options(cpu_options)?;
         let a = backend.load_session(&artifacts.a)?;
         let b = backend.load_session(&artifacts.b)?;
         let c = backend.load_session(&artifacts.c)?;
@@ -69,11 +71,32 @@ impl IndexTtsAdapter {
         })?;
         let reference_path = local_files::local_path(reference_audio)?;
         let reference = audio::read_wav_mono_i16_24k(&reference_path)?;
-        let text_ids = match explicit_text_token_ids_from_params(params)? {
-            Some(ids) => ids,
-            None => prepare_text_ids(&self.tokenizer, text)?,
+        let explicit_ids = explicit_text_token_ids_from_params(params)?;
+        if is_punctuation_only(text) && explicit_ids.is_none() {
+            return Err(InfraError::BadRequest(
+                "IndexTTS text must contain something other than whitespace or punctuation"
+                    .to_string(),
+            ));
+        }
+        let chunks = match explicit_ids {
+            Some(ids) => plan_token_chunks(&ids, None, self.config.max_text_tokens_per_segment)?,
+            None => {
+                let prepared = preprocess_text_for_index_tts(text);
+                let (ids, pieces) = self.tokenizer.encode_ids_and_pieces(&prepared)?;
+                plan_token_chunks(&ids, Some(&pieces), self.config.max_text_tokens_per_segment)?
+            }
         };
-        let generated = self.run_af(&reference, &text_ids)?;
+        let reference_state = self.run_a(&reference)?;
+        let mut segment_audio = Vec::with_capacity(chunks.len());
+        for (chunk_index, text_ids) in chunks.iter().enumerate() {
+            let generated = self.run_bf(&reference_state, text_ids, chunk_index, chunks.len())?;
+            segment_audio.push(generated);
+        }
+        let generated = concatenate_segment_audio(
+            &segment_audio,
+            TARGET_SAMPLE_RATE,
+            self.config.inter_segment_silence_ms,
+        )?;
         let output = self.write_wav(&generated)?;
         Ok(InferenceOutput::TtsAudio { audio: output })
     }
@@ -97,17 +120,35 @@ impl IndexTtsAdapter {
         }
     }
 
-    fn run_af(&mut self, reference_audio: &[i16], text_ids: &[i32]) -> Result<Vec<i16>> {
-        let reference_state = self.run_a(reference_audio)?;
+    fn run_bf(
+        &mut self,
+        reference_state: &ReferenceState,
+        text_ids: &[i32],
+        chunk_index: usize,
+        chunk_count: usize,
+    ) -> Result<Vec<i16>> {
         let text_hidden = self.run_b(text_ids)?;
-        let c_start = self.run_c_token(START_TOKEN, 0)?;
+        let c_start = self.run_c_token(self.config.generation_start_token, 0)?;
         let concat = self.run_d(
             &reference_state.conds_latent,
             &text_hidden,
             &c_start.gpt_hidden_state,
         )?;
+        let concat_len = concat.concat_len;
         let decode = self.run_e_loop(concat, c_start.next_gen_len)?;
-        self.run_f(&reference_state, &decode.save_hidden_state)
+        let wav = self.run_f(reference_state, &decode.save_hidden_state)?;
+        validate_generated_audio(&wav, decode.generated_steps)?;
+        tracing::info!(
+            chunk_index = chunk_index + 1,
+            chunk_count,
+            token_count = text_ids.len(),
+            concat_len,
+            generated_steps = decode.generated_steps,
+            sample_count = wav.len(),
+            stopped = decode.stopped,
+            "IndexTTS synthesized chunk"
+        );
+        Ok(wav)
     }
 
     fn run_a(&mut self, samples: &[i16]) -> Result<ReferenceState> {
@@ -217,7 +258,9 @@ impl IndexTtsAdapter {
         let mut history_len = 0_i64;
         let mut hidden_states = Vec::<OrtTensorOutput>::new();
 
-        for step_index in 0..MAX_GENERATE_LENGTH {
+        let budget = checked_decode_budget(self.config.max_generate_length, concat.concat_len)?;
+        let mut stopped = false;
+        for step_index in 0..budget {
             let mut inputs = Vec::new();
             for idx in 0..layer_count {
                 inputs.push(clone_as_input(&format!("in_key_{idx}"), &keys[idx])?);
@@ -260,7 +303,8 @@ impl IndexTtsAdapter {
             history_len = step.kv_seq_len;
             hidden_states.push(step.last_hidden_state.clone());
             let token = step.max_logit_id;
-            if token == STOP_TOKEN {
+            if token == self.config.generation_stop_token {
+                stopped = true;
                 break;
             }
             apply_repeat_penalty_token(
@@ -274,9 +318,23 @@ impl IndexTtsAdapter {
             gen_len = c_step.next_gen_len;
             hidden_state = c_step.gpt_hidden_state;
         }
+        if !stopped {
+            return Err(InfraError::Backend(format!(
+                "IndexTTS_E exhausted decode budget {budget} without STOP (concat_len {}, max_generate_length {})",
+                concat.concat_len, self.config.max_generate_length
+            )));
+        }
+        if hidden_states.len() < 2 {
+            return Err(InfraError::Backend(format!(
+                "IndexTTS_E stopped too early after {} decode step(s); refusing incomplete/blank synthesis",
+                hidden_states.len()
+            )));
+        }
 
         Ok(DecodeState {
             save_hidden_state: concatenate_hidden_states(&hidden_states)?,
+            generated_steps: hidden_states.len(),
+            stopped,
         })
     }
 
@@ -368,4 +426,234 @@ pub(crate) struct EStep {
 #[derive(Debug, Clone)]
 pub(crate) struct DecodeState {
     pub(crate) save_hidden_state: OrtTensorOutput,
+    pub(crate) generated_steps: usize,
+    pub(crate) stopped: bool,
+}
+
+pub(crate) fn checked_decode_budget(
+    max_generate_length: usize,
+    concat_len: usize,
+) -> Result<usize> {
+    max_generate_length.checked_sub(concat_len).filter(|v| *v > 0).ok_or_else(|| {
+        InfraError::Backend(format!(
+            "IndexTTS has no decode budget: max_generate_length {max_generate_length}, concat_len {concat_len}"
+        ))
+    })
+}
+
+pub(crate) fn plan_token_chunks(
+    ids: &[i32],
+    pieces: Option<&[String]>,
+    max_tokens: usize,
+) -> Result<Vec<Vec<i32>>> {
+    if ids.is_empty() {
+        return Err(InfraError::BadRequest(
+            "IndexTTS text produced zero tokens".to_string(),
+        ));
+    }
+    if max_tokens == 0 {
+        return Err(InfraError::BadRequest(
+            "IndexTTS max text tokens per segment must be greater than zero".to_string(),
+        ));
+    }
+    if pieces.is_some_and(|pieces| pieces.len() != ids.len()) {
+        return Err(InfraError::Backend(
+            "IndexTTS token id/piece counts differ".to_string(),
+        ));
+    }
+    let Some(pieces) = pieces else {
+        return Ok(ids.chunks(max_tokens).map(|chunk| chunk.to_vec()).collect());
+    };
+    if !pieces.iter().any(|piece| piece_has_substantive_text(piece)) {
+        return Err(InfraError::BadRequest(
+            "IndexTTS text tokens contain only punctuation".to_string(),
+        ));
+    }
+
+    // `feasible[start]` records whether the complete suffix can be partitioned
+    // into bounded chunks that each contain substantive content. Computing it
+    // backwards makes reconstruction globally correct without exponential
+    // backtracking: O(token_count * max_tokens) time and O(token_count) space.
+    let mut substantive_prefix = Vec::with_capacity(pieces.len() + 1);
+    substantive_prefix.push(0usize);
+    for piece in pieces {
+        substantive_prefix.push(
+            substantive_prefix.last().copied().unwrap_or(0)
+                + usize::from(piece_has_substantive_text(piece)),
+        );
+    }
+    let mut feasible = vec![false; pieces.len() + 1];
+    feasible[pieces.len()] = true;
+    for start in (0..pieces.len()).rev() {
+        feasible[start] = ((start + 1)..=start.saturating_add(max_tokens).min(pieces.len()))
+            .any(|end| feasible[end] && chunk_has_substantive(&substantive_prefix, start, end));
+    }
+    if !feasible[0] {
+        return Err(InfraError::BadRequest(format!(
+            "IndexTTS punctuation cannot be attached to substantive tokens within max_text_tokens_per_segment={max_tokens}"
+        )));
+    }
+
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    while start < pieces.len() {
+        let candidates = ((start + 1)..=start.saturating_add(max_tokens).min(pieces.len()))
+            .filter(|end| feasible[*end] && chunk_has_substantive(&substantive_prefix, start, *end))
+            .collect::<Vec<_>>();
+        // Correctness is established by `feasible`. Among valid choices,
+        // prefer the furthest punctuation boundary, then the furthest boundary
+        // overall. This keeps chunks full while retaining sentence punctuation
+        // when doing so cannot make the remaining suffix impossible.
+        let end = candidates
+            .iter()
+            .rev()
+            .copied()
+            .find(|end| is_segment_boundary_piece(&pieces[*end - 1]))
+            .or_else(|| candidates.last().copied())
+            .expect("feasible suffix has at least one valid next boundary");
+        chunks.push(ids[start..end].to_vec());
+        start = end;
+    }
+    Ok(chunks)
+}
+
+fn chunk_has_substantive(prefix: &[usize], start: usize, end: usize) -> bool {
+    prefix[end] > prefix[start]
+}
+
+fn piece_has_substantive_text(piece: &str) -> bool {
+    piece.chars().any(|ch| {
+        ch != '▁' && !ch.is_whitespace() && !ch.is_ascii_punctuation() && !is_cjk_punctuation(ch)
+    })
+}
+
+fn is_segment_boundary_piece(piece: &str) -> bool {
+    matches!(
+        piece.trim_start_matches('▁'),
+        "." | "!" | "?" | "…" | "," | ";" | ":"
+    )
+}
+
+pub(crate) fn is_punctuation_only(text: &str) -> bool {
+    !text.trim().is_empty()
+        && text
+            .chars()
+            .all(|ch| ch.is_whitespace() || ch.is_ascii_punctuation() || is_cjk_punctuation(ch))
+}
+
+fn is_cjk_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '，' | '。'
+            | '！'
+            | '？'
+            | '：'
+            | '；'
+            | '、'
+            | '…'
+            | '—'
+            | '～'
+            | '“'
+            | '”'
+            | '‘'
+            | '’'
+            | '（'
+            | '）'
+            | '《'
+            | '》'
+            | '【'
+            | '】'
+            | '「'
+            | '」'
+    )
+}
+
+pub(crate) fn concatenate_segment_audio(
+    segments: &[Vec<i16>],
+    sample_rate: u32,
+    silence_ms: u32,
+) -> Result<Vec<i16>> {
+    if segments.is_empty() || segments.iter().any(Vec::is_empty) {
+        return Err(InfraError::Backend(
+            "IndexTTS cannot concatenate empty segment audio".to_string(),
+        ));
+    }
+    let silence_len_u64 = u64::from(sample_rate)
+        .checked_mul(u64::from(silence_ms))
+        .ok_or_else(|| InfraError::Backend("IndexTTS silence length overflow".to_string()))?
+        / 1000;
+    let silence_len = usize::try_from(silence_len_u64)
+        .map_err(|_| InfraError::Backend("IndexTTS silence length overflow".to_string()))?;
+    let samples_len = segments.iter().try_fold(0usize, |total, segment| {
+        total
+            .checked_add(segment.len())
+            .ok_or_else(|| InfraError::Backend("IndexTTS output length overflow".to_string()))
+    })?;
+    let silence_total = silence_len
+        .checked_mul(segments.len().saturating_sub(1))
+        .ok_or_else(|| InfraError::Backend("IndexTTS output length overflow".to_string()))?;
+    let total = samples_len
+        .checked_add(silence_total)
+        .ok_or_else(|| InfraError::Backend("IndexTTS output length overflow".to_string()))?;
+    let mut output = Vec::with_capacity(total);
+    for (index, segment) in segments.iter().enumerate() {
+        if index > 0 {
+            let target_len = output.len().checked_add(silence_len).ok_or_else(|| {
+                InfraError::Backend("IndexTTS output length overflow".to_string())
+            })?;
+            output.resize(target_len, 0);
+        }
+        output.extend_from_slice(segment);
+    }
+    Ok(output)
+}
+
+pub(crate) fn validate_generated_audio(samples: &[i16], generated_steps: usize) -> Result<()> {
+    if generated_steps < 2 || samples.len() < 24 || samples.iter().all(|sample| *sample == 0) {
+        return Err(InfraError::Backend(format!(
+            "IndexTTS generated incomplete/blank audio (generated_steps {generated_steps}, samples {})",
+            samples.len()
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn index_tts_cpu_session_options_from_values(
+    intra: Option<&str>,
+    inter: Option<&str>,
+    logical_cpus: usize,
+) -> Result<CpuSessionOptions> {
+    fn parse(name: &str, value: Option<&str>, default: usize) -> Result<usize> {
+        match value {
+            None => Ok(default),
+            Some(value) => value
+                .parse::<usize>()
+                .ok()
+                .filter(|v| *v > 0)
+                .ok_or_else(|| {
+                    InfraError::BadRequest(format!(
+                        "{name} must be a positive integer, got `{value}`"
+                    ))
+                }),
+        }
+    }
+    Ok(CpuSessionOptions {
+        intra_threads: parse(
+            "LOCAL_INDEXTTS_ORT_INTRA_THREADS",
+            intra,
+            logical_cpus.clamp(1, 8),
+        )?,
+        inter_threads: parse("LOCAL_INDEXTTS_ORT_INTER_THREADS", inter, 1)?,
+    })
+}
+
+fn index_tts_cpu_session_options_from_env() -> Result<CpuSessionOptions> {
+    let logical_cpus = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    index_tts_cpu_session_options_from_values(
+        env::var("LOCAL_INDEXTTS_ORT_INTRA_THREADS").ok().as_deref(),
+        env::var("LOCAL_INDEXTTS_ORT_INTER_THREADS").ok().as_deref(),
+        logical_cpus,
+    )
 }

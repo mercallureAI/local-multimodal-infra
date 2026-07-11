@@ -330,15 +330,39 @@ impl TryFrom<OrtTensorOutput> for OrtOutput {
 #[derive(Debug, Clone)]
 pub struct OrtBackend {
     selection: ProviderSelection,
+    cpu_session_options: Option<CpuSessionOptions>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuSessionOptions {
+    pub intra_threads: usize,
+    pub inter_threads: usize,
 }
 
 impl OrtBackend {
     pub fn new(selection: ProviderSelection) -> Self {
-        Self { selection }
+        Self {
+            selection,
+            cpu_session_options: None,
+        }
+    }
+
+    pub fn with_cpu_session_options(mut self, options: CpuSessionOptions) -> Result<Self> {
+        if options.intra_threads == 0 || options.inter_threads == 0 {
+            return Err(InfraError::Backend(
+                "ORT CPU thread counts must be greater than zero".to_string(),
+            ));
+        }
+        self.cpu_session_options = Some(options);
+        Ok(self)
     }
 
     pub fn load_session(&self, model_path: impl AsRef<Path>) -> Result<OrtSession> {
-        OrtSession::load(model_path.as_ref(), self.selection.clone())
+        OrtSession::load_with_cpu_options(
+            model_path.as_ref(),
+            self.selection.clone(),
+            self.cpu_session_options,
+        )
     }
 }
 
@@ -352,6 +376,14 @@ pub struct OrtSession {
 
 impl OrtSession {
     pub fn load(model_path: &Path, selection: ProviderSelection) -> Result<Self> {
+        Self::load_with_cpu_options(model_path, selection, None)
+    }
+
+    fn load_with_cpu_options(
+        model_path: &Path,
+        selection: ProviderSelection,
+        cpu_session_options: Option<CpuSessionOptions>,
+    ) -> Result<Self> {
         if !model_path.exists() {
             return Err(InfraError::ModelNotConfigured {
                 model_id: "unknown".to_string(),
@@ -366,7 +398,7 @@ impl OrtSession {
             match provider.kind {
                 ProviderKind::Cpu => {
                     attempted_cpu = true;
-                    match RealSession::load_cpu(model_path) {
+                    match RealSession::load_cpu(model_path, cpu_session_options) {
                         Ok(real) => {
                             return Ok(Self {
                                 model_path: model_path.to_path_buf(),
@@ -425,7 +457,7 @@ impl OrtSession {
 
         if selection.fallback_to_cpu && !attempted_cpu {
             tracing::warn!("falling back to CPU provider after configured providers failed");
-            match RealSession::load_cpu(model_path) {
+            match RealSession::load_cpu(model_path, cpu_session_options) {
                 Ok(real) => {
                     return Ok(Self {
                         model_path: model_path.to_path_buf(),
@@ -498,13 +530,23 @@ struct RealSession {
 }
 
 impl RealSession {
-    fn load_cpu(model_path: &Path) -> Result<Self> {
+    fn load_cpu(model_path: &Path, options: Option<CpuSessionOptions>) -> Result<Self> {
         // The `ort` dependency is configured with `download-binaries` and
         // `copy-dylibs`, so build/check does not depend on a system-wide ORT
         // installation. At runtime, ORT's downloaded CPU dylib is copied beside
         // test/app binaries; deployments can still override with ort-supported
         // environment variables such as ORT_LIB_PATH.
-        Self::load_with_builder(Session::builder().map_err(map_ort_err)?, model_path)
+        let mut builder = Session::builder().map_err(map_ort_err)?;
+        if let Some(options) = options {
+            builder = builder
+                .with_intra_threads(options.intra_threads)
+                .map_err(map_ort_err)?
+                .with_inter_threads(options.inter_threads)
+                .map_err(map_ort_err)?
+                .with_parallel_execution(false)
+                .map_err(map_ort_err)?;
+        }
+        Self::load_with_builder(builder, model_path)
     }
 
     fn load_cuda(model_path: &Path, provider: &ProviderOptions) -> Result<Self> {
@@ -874,6 +916,31 @@ mod tests {
         let selection = ProviderSelection::from_strings(&["cuda".into(), "cpu".into()]);
         assert_eq!(selection.order[0].kind, ProviderKind::Cuda);
         assert!(selection.fallback_to_cpu);
+    }
+
+    #[test]
+    fn backend_defaults_and_scoped_cpu_options_are_distinct() {
+        let default = OrtBackend::new(ProviderSelection::default());
+        assert_eq!(default.cpu_session_options, None);
+        let tuned = OrtBackend::new(ProviderSelection::default())
+            .with_cpu_session_options(CpuSessionOptions {
+                intra_threads: 8,
+                inter_threads: 1,
+            })
+            .expect("valid options");
+        assert_eq!(
+            tuned.cpu_session_options,
+            Some(CpuSessionOptions {
+                intra_threads: 8,
+                inter_threads: 1
+            })
+        );
+        assert!(OrtBackend::new(ProviderSelection::default())
+            .with_cpu_session_options(CpuSessionOptions {
+                intra_threads: 0,
+                inter_threads: 1
+            })
+            .is_err());
     }
 
     #[test]

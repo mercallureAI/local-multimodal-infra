@@ -425,6 +425,7 @@ fn repeat_penalty_width_prefers_manifest_then_static_metadata() {
     let config = IndexTtsModelConfig {
         mel_code_size: Some(8194),
         vocab_size: None,
+        ..Default::default()
     };
     assert_eq!(
         repeat_penalty_width_from_metadata(&meta, &config),
@@ -442,6 +443,354 @@ fn repeat_penalty_width_prefers_manifest_then_static_metadata() {
         repeat_penalty_width_from_metadata(&meta, &IndexTtsModelConfig::default()),
         None
     );
+}
+
+#[test]
+fn long_token_planning_preserves_order_and_hard_splits() {
+    let ids = (0..301).collect::<Vec<i32>>();
+    let chunks = plan_token_chunks(&ids, None, 120).expect("chunks");
+    assert_eq!(
+        chunks.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![120, 120, 61]
+    );
+    assert_eq!(chunks.concat(), ids);
+}
+
+#[test]
+fn punctuation_aware_planning_uses_boundary_without_loss() {
+    let ids = (0..14).collect::<Vec<i32>>();
+    let mut pieces = (0..14).map(|i| format!("T{i}")).collect::<Vec<_>>();
+    pieces[7] = ".".to_string();
+    let chunks = plan_token_chunks(&ids, Some(&pieces), 10).expect("chunks");
+    assert_eq!(chunks.iter().map(Vec::len).collect::<Vec<_>>(), vec![8, 6]);
+    assert_eq!(chunks.concat(), ids);
+}
+
+#[test]
+fn terminal_punctuation_after_full_chunk_is_rebalanced_without_loss() {
+    for (substantive_count, punctuation) in [
+        (120_i32, vec!["."]),
+        (120, vec![".", "!", "?"]),
+        (240, vec![".", "!", "?"]),
+    ] {
+        let punctuation_count = punctuation.len();
+        let ids = (0..substantive_count + punctuation.len() as i32).collect::<Vec<_>>();
+        let mut pieces = (0..substantive_count)
+            .map(|i| format!("T{i}"))
+            .collect::<Vec<_>>();
+        pieces.extend(punctuation.into_iter().map(str::to_string));
+
+        let chunks = plan_token_chunks(&ids, Some(&pieces), 120).expect("rebalanced chunks");
+
+        assert_eq!(chunks.concat(), ids);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= 120));
+        assert!(chunks.iter().all(|chunk| chunk.iter().any(|id| {
+            pieces[*id as usize]
+                .chars()
+                .any(|ch| ch.is_ascii_alphanumeric())
+        })));
+        assert_eq!(
+            chunks.last().expect("last chunk").len(),
+            punctuation_count + 1
+        );
+    }
+}
+
+#[test]
+fn leading_and_boundary_punctuation_runs_attach_to_substantive_chunks() {
+    let pieces = ["!", "?", "A", "B", "C", ".", "!", "D", "E"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let ids = (0..pieces.len() as i32).collect::<Vec<_>>();
+
+    let chunks = plan_token_chunks(&ids, Some(&pieces), 4).expect("chunks");
+
+    assert_eq!(chunks.concat(), ids);
+    assert!(chunks.iter().all(|chunk| chunk.len() <= 4));
+    assert!(chunks.iter().all(|chunk| chunk
+        .iter()
+        .any(|id| pieces[*id as usize].chars().any(char::is_alphanumeric))));
+}
+
+#[test]
+fn planner_backtracks_across_multiple_future_punctuation_runs() {
+    let pieces = ["S", "S", ".", "S", "."]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let ids = (0..pieces.len() as i32).collect::<Vec<_>>();
+
+    let chunks = plan_token_chunks(&ids, Some(&pieces), 2).expect("global partition");
+
+    assert_eq!(chunks, vec![vec![0], vec![1, 2], vec![3, 4]]);
+}
+
+#[test]
+fn planner_handles_default_scaled_backtracking_case() {
+    let mut pieces = vec!["S".to_string(); 120];
+    pieces.push(".".to_string());
+    pieces.push("S".to_string());
+    pieces.extend(std::iter::repeat_n(".".to_string(), 119));
+    let ids = (0..pieces.len() as i32).collect::<Vec<_>>();
+
+    let chunks = plan_token_chunks(&ids, Some(&pieces), 120).expect("global partition");
+
+    assert_eq!(
+        chunks.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![119, 2, 120]
+    );
+    assert_eq!(chunks.concat(), ids);
+    assert!(chunks
+        .iter()
+        .all(|chunk| chunk.iter().any(|id| pieces[*id as usize] == "S")));
+}
+
+#[test]
+fn token_planner_matches_exhaustive_partition_oracle() {
+    for len in 1..=9usize {
+        for mask in 0usize..(1usize << len) {
+            let substantive = (0..len)
+                .map(|index| mask & (1 << index) != 0)
+                .collect::<Vec<_>>();
+            let pieces = substantive
+                .iter()
+                .map(|is_substantive| if *is_substantive { "S" } else { "." }.to_string())
+                .collect::<Vec<_>>();
+            let ids = (0..len as i32).collect::<Vec<_>>();
+            for max_tokens in 1..=4usize {
+                let expected = brute_force_chunk_partition_exists(&substantive, max_tokens, 0);
+                let actual = plan_token_chunks(&ids, Some(&pieces), max_tokens);
+                assert_eq!(
+                    actual.is_ok(),
+                    expected,
+                    "len={len} mask={mask:09b} max={max_tokens}: {actual:?}"
+                );
+                if let Ok(chunks) = actual {
+                    assert_eq!(chunks.concat(), ids);
+                    assert!(chunks.iter().all(|chunk| !chunk.is_empty()
+                        && chunk.len() <= max_tokens
+                        && chunk.iter().any(|id| substantive[*id as usize])));
+                }
+            }
+        }
+    }
+}
+
+fn brute_force_chunk_partition_exists(
+    substantive: &[bool],
+    max_tokens: usize,
+    start: usize,
+) -> bool {
+    if start == substantive.len() {
+        return true;
+    }
+    ((start + 1)..=(start + max_tokens).min(substantive.len())).any(|end| {
+        substantive[start..end].iter().any(|value| *value)
+            && brute_force_chunk_partition_exists(substantive, max_tokens, end)
+    })
+}
+
+#[test]
+fn max_one_is_deterministic_and_rejects_unattachable_punctuation() {
+    let substantive = vec!["A".to_string(), "B".to_string()];
+    assert_eq!(
+        plan_token_chunks(&[1, 2], Some(&substantive), 1).expect("substantive chunks"),
+        vec![vec![1], vec![2]]
+    );
+    assert!(plan_token_chunks(&[1, 2], Some(&["A".to_string(), "!".to_string()]), 1).is_err());
+    assert!(plan_token_chunks(&[1, 2], Some(&["!".to_string(), "A".to_string()]), 1).is_err());
+}
+
+#[test]
+fn exact_boundary_and_explicit_ids_have_no_empty_trailing_chunk() {
+    let ids = (0..240).collect::<Vec<i32>>();
+    let chunks = plan_token_chunks(&ids, None, 120).expect("chunks");
+    assert_eq!(chunks.len(), 2);
+    assert!(chunks.iter().all(|chunk| chunk.len() == 120));
+    assert_eq!(chunks.concat(), ids);
+}
+
+#[test]
+fn punctuation_only_and_zero_tokens_are_rejected() {
+    assert!(is_punctuation_only("，！？ ..."));
+    assert!(!is_punctuation_only("你好！"));
+    assert!(plan_token_chunks(&[], None, 120).is_err());
+    assert!(plan_token_chunks(&[1, 2], Some(&["▁!".to_string(), "。".to_string()]), 120).is_err());
+}
+
+#[test]
+fn segment_audio_inserts_200ms_only_between_chunks() {
+    let output = concatenate_segment_audio(&[vec![1, 2], vec![3, 4]], 24_000, 200).expect("audio");
+    assert_eq!(output.len(), 2 + 4_800 + 2);
+    assert_eq!(&output[..2], &[1, 2]);
+    assert!(output[2..4_802].iter().all(|sample| *sample == 0));
+    assert_eq!(&output[4_802..], &[3, 4]);
+    assert_eq!(output.last(), Some(&4));
+}
+
+#[test]
+fn decode_budget_is_checked_and_blank_audio_rejected() {
+    assert_eq!(checked_decode_budget(800, 125).expect("budget"), 675);
+    assert!(checked_decode_budget(125, 125).is_err());
+    assert!(validate_generated_audio(&[0; 48], 3).is_err());
+    assert!(validate_generated_audio(&[1; 48], 1).is_err());
+    assert!(validate_generated_audio(&[1; 48], 2).is_ok());
+    let non_finite = OrtTensorOutput {
+        name: "generated_wav".to_string(),
+        shape: vec![1],
+        data: OrtTensorData::F32(vec![f32::NAN]),
+    };
+    assert!(tensor_to_i16_audio(&non_finite).is_err());
+}
+
+#[test]
+fn model_config_defaults_remain_backward_compatible() {
+    let config = IndexTtsModelConfig::default();
+    assert_eq!(config.max_generate_length, 800);
+    assert_eq!(config.max_text_tokens_per_segment, 120);
+    assert_eq!(config.inter_segment_silence_ms, 200);
+    assert_eq!(config.generation_start_token, START_TOKEN);
+    assert_eq!(config.generation_stop_token, STOP_TOKEN);
+}
+
+#[test]
+fn model_config_loads_manifest_numbers_strings_and_aliases() {
+    let (dir, artifacts) = config_fixture(
+        r#"
+max_generate_length: "605"
+max_text_tokens: 96
+inter_segment_silence_ms: "175"
+start_token: "7000"
+generation_stop_token: 7001
+mel_code_size: "8194"
+"#,
+    );
+    let spec = model_spec(dir.path().to_path_buf(), vec!["cpu".to_string()]);
+
+    let config = IndexTtsModelConfig::load(&artifacts, &spec).expect("valid manifest config");
+
+    assert_eq!(config.max_generate_length, 605);
+    assert_eq!(config.max_text_tokens_per_segment, 96);
+    assert_eq!(config.inter_segment_silence_ms, 175);
+    assert_eq!(config.generation_start_token, 7000);
+    assert_eq!(config.generation_stop_token, 7001);
+    assert_eq!(config.mel_code_size, Some(8194));
+}
+
+#[test]
+fn model_metadata_intentionally_overrides_manifest() {
+    let (dir, artifacts) = config_fixture(
+        r#"
+max_generate_length: 605
+max_text_tokens_per_segment: 100
+inter_segment_silence_ms: 175
+generation_start_token: 7000
+generation_stop_token: 7001
+"#,
+    );
+    let mut spec = model_spec(dir.path().to_path_buf(), vec!["cpu".to_string()]);
+    spec.metadata
+        .insert("max_generate_length".to_string(), serde_json::json!("700"));
+    spec.metadata
+        .insert("max_text_tokens".to_string(), serde_json::json!("110"));
+    spec.metadata.insert(
+        "inter_segment_silence_ms".to_string(),
+        serde_json::json!(200),
+    );
+    spec.metadata
+        .insert("start_token".to_string(), serde_json::json!(8000));
+    spec.metadata
+        .insert("stop_token".to_string(), serde_json::json!("8001"));
+
+    let config = IndexTtsModelConfig::load(&artifacts, &spec).expect("metadata overrides");
+
+    assert_eq!(config.max_generate_length, 700);
+    assert_eq!(config.max_text_tokens_per_segment, 110);
+    assert_eq!(config.inter_segment_silence_ms, 200);
+    assert_eq!(config.generation_start_token, 8000);
+    assert_eq!(config.generation_stop_token, 8001);
+}
+
+#[test]
+fn model_config_rejects_present_invalid_manifest_values_and_aliases() {
+    for (field, value) in [
+        ("max_generate_length", "0"),
+        ("max_generate_length", "100001"),
+        ("max_generate_length", "-1"),
+        ("max_generate_length", "1.5"),
+        ("max_generate_length", "not-a-number"),
+        ("max_generate_length", "184467440737095516160"),
+        ("max_text_tokens", "0"),
+        ("max_text_tokens_per_segment", "4097"),
+        ("inter_segment_silence_ms", "10001"),
+        ("inter_segment_silence_ms", "4294967296"),
+        ("start_token", "2147483648"),
+        ("generation_stop_token", "-2147483649"),
+    ] {
+        let manifest = format!("{field}: \"{value}\"\n");
+        let (dir, artifacts) = config_fixture(&manifest);
+        let spec = model_spec(dir.path().to_path_buf(), vec!["cpu".to_string()]);
+        let err = IndexTtsModelConfig::load(&artifacts, &spec)
+            .expect_err("present invalid manifest value must fail");
+        assert!(
+            err.to_string().contains(field)
+                || err.to_string().contains("max_text_tokens_per_segment"),
+            "{field}={value}: {err}"
+        );
+    }
+}
+
+#[test]
+fn model_config_rejects_present_invalid_model_metadata_even_with_valid_manifest() {
+    for (field, value) in [
+        ("max_generate_length", serde_json::json!(-1)),
+        ("max_text_tokens", serde_json::json!(1.25)),
+        ("inter_segment_silence_ms", serde_json::json!("4294967296")),
+        ("generation_start_token", serde_json::json!("bad")),
+        ("stop_token", serde_json::json!(2147483648_i64)),
+    ] {
+        let (dir, artifacts) = config_fixture("max_generate_length: 605\n");
+        let mut spec = model_spec(dir.path().to_path_buf(), vec!["cpu".to_string()]);
+        spec.metadata.insert(field.to_string(), value);
+        let err = IndexTtsModelConfig::load(&artifacts, &spec)
+            .expect_err("present invalid metadata value must fail");
+        assert!(err.to_string().contains(field), "{field}: {err}");
+    }
+}
+
+#[test]
+fn canonical_and_alias_values_are_both_validated() {
+    let (dir, artifacts) = config_fixture(
+        r#"
+max_text_tokens_per_segment: 120
+max_text_tokens: malformed
+"#,
+    );
+    let spec = model_spec(dir.path().to_path_buf(), vec!["cpu".to_string()]);
+    let err = IndexTtsModelConfig::load(&artifacts, &spec)
+        .expect_err("invalid alias must not be masked by canonical field");
+    assert!(err.to_string().contains("max_text_tokens"), "{err}");
+}
+
+#[test]
+fn indextts_cpu_thread_defaults_overrides_and_invalid_values() {
+    assert_eq!(
+        index_tts_cpu_session_options_from_values(None, None, 16).expect("defaults"),
+        CpuSessionOptions {
+            intra_threads: 8,
+            inter_threads: 1
+        }
+    );
+    assert_eq!(
+        index_tts_cpu_session_options_from_values(Some("6"), Some("2"), 16).expect("overrides"),
+        CpuSessionOptions {
+            intra_threads: 6,
+            inter_threads: 2
+        }
+    );
+    assert!(index_tts_cpu_session_options_from_values(Some("no"), None, 16).is_err());
+    assert!(index_tts_cpu_session_options_from_values(Some("0"), None, 16).is_err());
 }
 
 #[test]
@@ -688,4 +1037,16 @@ fn model_spec(path: PathBuf, provider_order: Vec<String>) -> ModelSpec {
         load_policy: Default::default(),
         metadata: Default::default(),
     }
+}
+
+fn config_fixture(manifest: &str) -> (tempfile::TempDir, IndexTtsArtifacts) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for name in MODEL_FILENAMES {
+        fs::write(dir.path().join(name), b"placeholder").expect("onnx");
+    }
+    fs::write(dir.path().join("bpe.model"), b"sentencepiece").expect("bpe");
+    fs::write(dir.path().join("manifest.yaml"), manifest).expect("manifest");
+    let artifacts =
+        IndexTtsArtifacts::validate(dir.path(), IndexTtsPrecision::CpuFp32).expect("artifacts");
+    (dir, artifacts)
 }
