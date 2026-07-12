@@ -101,11 +101,13 @@ fn frontend_rejects_pinyin_like_suffixes_inside_ascii_words() {
     assert!(!contains_explicit_pinyin_tone("voice2"));
     assert!(!contains_explicit_pinyin_tone("babala2"));
     assert!(!contains_explicit_pinyin_tone("AGAN3"));
+    assert!(!contains_explicit_pinyin_tone("M42"));
     assert_eq!(official_like("beta1"), "BETA1");
     assert_eq!(official_like("BETA1"), "BETA1");
     assert_eq!(official_like("voice2"), "VOICE2");
     assert_eq!(official_like("babala2"), "BABALA2");
     assert_eq!(official_like("AGAN3"), "AGAN3");
+    assert_eq!(official_like("M42中文"), "M 四 十 二 中 文");
 }
 
 #[test]
@@ -211,6 +213,19 @@ fn frontend_corpus_covers_mixed_text_and_lightweight_tn_boundaries() {
     for (input, expected) in cases {
         assert_eq!(official_like(input), expected, "{input}");
     }
+}
+
+#[test]
+fn exact_m42_request_frontend_regression() {
+    let input = "这里是M42语音测试，现在检查合成、分段和发送链路是否都能正常工作。";
+    assert_eq!(
+        normalize_text(input),
+        "这里是M四十二语音测试,现在检查合成,分段和发送链路是否都能正常工作."
+    );
+    assert_eq!(
+        official_like(input),
+        "这 里 是 M 四 十 二 语 音 测 试 , 现 在 检 查 合 成 , 分 段 和 发 送 链 路 是 否 都 能 正 常 工 作 ."
+    );
 }
 
 #[test]
@@ -466,6 +481,104 @@ fn punctuation_aware_planning_uses_boundary_without_loss() {
     assert_eq!(chunks.concat(), ids);
 }
 
+fn plan_indexed_pieces(pieces: &[&str], max_tokens: usize) -> Vec<Vec<i32>> {
+    let ids = (0..pieces.len() as i32).collect::<Vec<_>>();
+    let pieces = pieces
+        .iter()
+        .map(|piece| (*piece).to_string())
+        .collect::<Vec<_>>();
+    plan_token_chunks(&ids, Some(&pieces), max_tokens).expect("planned chunks")
+}
+
+#[test]
+fn exact_m42_request_soft_splits_once_at_first_comma() {
+    let pieces = [
+        "这", "里", "是", "M", "四", "十", "二", "语", "音", "测", "试", ",", "现", "在", "检",
+        "查", "合", "成", ",", "分", "段", "和", "发", "送", "链", "路", "是", "否", "都", "能",
+        "正", "常", "工", "作", ".",
+    ];
+    let chunks = plan_indexed_pieces(&pieces, 120);
+
+    assert_eq!(
+        chunks.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![12, 23]
+    );
+    assert_eq!(chunks.concat(), (0..35).collect::<Vec<_>>());
+    assert_eq!(pieces[*chunks[0].last().expect("first end") as usize], ",");
+    assert!(chunks[1].iter().any(|id| pieces[*id as usize] == ","));
+}
+
+#[test]
+fn soft_segmentation_supports_normalized_and_sentencepiece_punctuation_forms() {
+    for punctuation in [
+        ",", "▁,", "，", "▁，", ".", "▁.", "。", "▁。", "!", "?", "…", ";", ":",
+    ] {
+        let mut pieces = vec!["A"; 8];
+        pieces.push(punctuation);
+        pieces.extend(["B"; 8]);
+        pieces.push(".");
+        let chunks = plan_indexed_pieces(&pieces, 120);
+        assert_eq!(
+            chunks.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![9, 9],
+            "{punctuation}"
+        );
+        assert_eq!(
+            chunks.concat(),
+            (0..18).collect::<Vec<_>>(),
+            "{punctuation}"
+        );
+    }
+}
+
+#[test]
+fn soft_segmentation_is_conservative_and_keeps_punctuation_attached() {
+    let short = plan_indexed_pieces(&["短", "句", "。"], 120);
+    assert_eq!(short.len(), 1);
+
+    let mut pieces = vec!["A"; 8];
+    pieces.extend(["?", "!", "…"]);
+    pieces.extend(["B"; 8]);
+    pieces.extend([",", ".", "C"]);
+    let chunks = plan_indexed_pieces(&pieces, 120);
+    assert_eq!(
+        chunks.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![11, 11]
+    );
+    assert_eq!(chunks.concat(), (0..22).collect::<Vec<_>>());
+    assert!(chunks.iter().all(|chunk| chunk
+        .iter()
+        .any(|id| piece_has_substantive_text(pieces[*id as usize]))));
+}
+
+#[test]
+fn soft_and_hard_planning_preserve_all_ids_and_maximum_length() {
+    let mut pieces = vec!["A".to_string(); 8];
+    pieces.push(",".to_string());
+    pieces.extend((0..250).map(|index| format!("T{index}")));
+    let ids = (0..pieces.len() as i32).collect::<Vec<_>>();
+    let chunks = plan_token_chunks(&ids, Some(&pieces), 120).expect("hard chunks");
+
+    assert_eq!(chunks.concat(), ids);
+    assert!(chunks
+        .iter()
+        .all(|chunk| !chunk.is_empty() && chunk.len() <= 120));
+    assert!(chunks.iter().all(|chunk| chunk
+        .iter()
+        .any(|id| piece_has_substantive_text(&pieces[*id as usize]))));
+}
+
+#[test]
+fn explicit_ids_remain_opaque_hard_chunks_despite_punctuation_like_values() {
+    let ids = vec![44; 121];
+    let chunks = plan_token_chunks(&ids, None, 120).expect("opaque ids");
+    assert_eq!(
+        chunks.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![120, 1]
+    );
+    assert_eq!(chunks.concat(), ids);
+}
+
 #[test]
 fn terminal_punctuation_after_full_chunk_is_rebalanced_without_loss() {
     for (substantive_count, punctuation) in [
@@ -627,6 +740,22 @@ fn segment_audio_inserts_200ms_only_between_chunks() {
     assert!(output[2..4_802].iter().all(|sample| *sample == 0));
     assert_eq!(&output[4_802..], &[3, 4]);
     assert_eq!(output.last(), Some(&4));
+}
+
+#[test]
+fn every_segment_must_validate_before_intentional_gap_is_added() {
+    let segments = [vec![1; 48], vec![0; 48]];
+    assert!(validate_generated_audio(&segments[0], 2).is_ok());
+    assert!(validate_generated_audio(&segments[1], 2).is_err());
+
+    let valid = [vec![1; 48], vec![2; 48]];
+    for segment in &valid {
+        validate_generated_audio(segment, 2).expect("each generated segment is valid");
+    }
+    let output = concatenate_segment_audio(&valid, 1_000, 10).expect("concatenated");
+    assert_eq!(&output[..48], &[1; 48]);
+    assert_eq!(&output[48..58], &[0; 10]);
+    assert_eq!(&output[58..], &[2; 48]);
 }
 
 #[test]
@@ -962,7 +1091,10 @@ fn real_model_smoke_if_env_set() {
         report.f.cpu_fallback_used
     );
 
-    match adapter.synthesize("MON3TR test.", Some(&FileRef::local(&reference_audio))) {
+    match adapter.synthesize(
+        "这里是M42语音测试，现在检查合成、分段和发送链路是否都能正常工作。",
+        Some(&FileRef::local(&reference_audio)),
+    ) {
         Ok(InferenceOutput::TtsAudio { audio }) => {
             let wav_path = audio
                 .path

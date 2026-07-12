@@ -226,7 +226,19 @@ pub(crate) fn parse_pinyin_at_word_boundary(chunk: &str, pos: usize) -> Option<(
             }
         }
     }
-    parse_pinyin_at(chunk, pos).map(|(_normalized, end)| (chunk[pos..end].to_string(), end))
+    parse_pinyin_at(chunk, pos).and_then(|(_normalized, end)| {
+        // A tone digit ends a pinyin syllable, but a following digit means this
+        // is an alphanumeric identifier such as M42 rather than explicit M4.
+        if chunk[end..]
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_digit())
+        {
+            None
+        } else {
+            Some((chunk[pos..end].to_string(), end))
+        }
+    })
 }
 
 pub(crate) fn save_names(original_text: &str) -> (String, Vec<String>) {

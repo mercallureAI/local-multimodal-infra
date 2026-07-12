@@ -72,6 +72,7 @@ impl IndexTtsAdapter {
         let reference_path = local_files::local_path(reference_audio)?;
         let reference = audio::read_wav_mono_i16_24k(&reference_path)?;
         let explicit_ids = explicit_text_token_ids_from_params(params)?;
+        let uses_explicit_ids = explicit_ids.is_some();
         if is_punctuation_only(text) && explicit_ids.is_none() {
             return Err(InfraError::BadRequest(
                 "IndexTTS text must contain something other than whitespace or punctuation"
@@ -86,6 +87,12 @@ impl IndexTtsAdapter {
                 plan_token_chunks(&ids, Some(&pieces), self.config.max_text_tokens_per_segment)?
             }
         };
+        tracing::info!(
+            chunk_count = chunks.len(),
+            chunk_token_counts = ?chunks.iter().map(Vec::len).collect::<Vec<_>>(),
+            explicit_token_ids = uses_explicit_ids,
+            "IndexTTS planned text chunks"
+        );
         let reference_state = self.run_a(&reference)?;
         let mut segment_audio = Vec::with_capacity(chunks.len());
         for (chunk_index, text_ids) in chunks.iter().enumerate() {
@@ -470,6 +477,18 @@ pub(crate) fn plan_token_chunks(
         ));
     }
 
+    // A short request can still be too long semantically for one reliable model
+    // decode. Make one conservative soft split at the first natural punctuation
+    // run that leaves substantial speech on both sides. Deliberately do not
+    // recurse: later punctuation remains in the second segment, avoiding the
+    // one-clause-per-chunk fragmentation of ordinary prose. Opaque explicit IDs
+    // cannot be inspected and retain the compatibility `chunks(max)` behavior.
+    if pieces.len() <= max_tokens {
+        if let Some(end) = soft_punctuation_boundary(pieces) {
+            return Ok(vec![ids[..end].to_vec(), ids[end..].to_vec()]);
+        }
+    }
+
     // `feasible[start]` records whether the complete suffix can be partitioned
     // into bounded chunks that each contain substantive content. Computing it
     // backwards makes reconstruction globally correct without exponential
@@ -517,11 +536,51 @@ pub(crate) fn plan_token_chunks(
     Ok(chunks)
 }
 
+const MIN_SOFT_SEGMENT_SUBSTANTIVE_PIECES: usize = 8;
+
+fn soft_punctuation_boundary(pieces: &[String]) -> Option<usize> {
+    let total_substantive = pieces
+        .iter()
+        .filter(|piece| piece_has_substantive_text(piece))
+        .count();
+    let mut substantive_before = 0usize;
+    let mut index = 0usize;
+    while index < pieces.len() {
+        if piece_has_substantive_text(&pieces[index]) {
+            substantive_before += 1;
+            index += 1;
+            continue;
+        }
+        if !is_segment_boundary_piece(&pieces[index]) {
+            index += 1;
+            continue;
+        }
+
+        // Keep a continuous punctuation run attached to the preceding speech.
+        // This also prevents punctuation-only chunks for forms such as "?!…".
+        let mut end = index + 1;
+        while end < pieces.len()
+            && !piece_has_substantive_text(&pieces[end])
+            && is_segment_boundary_piece(&pieces[end])
+        {
+            end += 1;
+        }
+        let substantive_after = total_substantive.saturating_sub(substantive_before);
+        if substantive_before >= MIN_SOFT_SEGMENT_SUBSTANTIVE_PIECES
+            && substantive_after >= MIN_SOFT_SEGMENT_SUBSTANTIVE_PIECES
+        {
+            return Some(end);
+        }
+        index = end;
+    }
+    None
+}
+
 fn chunk_has_substantive(prefix: &[usize], start: usize, end: usize) -> bool {
     prefix[end] > prefix[start]
 }
 
-fn piece_has_substantive_text(piece: &str) -> bool {
+pub(crate) fn piece_has_substantive_text(piece: &str) -> bool {
     piece.chars().any(|ch| {
         ch != '▁' && !ch.is_whitespace() && !ch.is_ascii_punctuation() && !is_cjk_punctuation(ch)
     })
@@ -530,7 +589,7 @@ fn piece_has_substantive_text(piece: &str) -> bool {
 fn is_segment_boundary_piece(piece: &str) -> bool {
     matches!(
         piece.trim_start_matches('▁'),
-        "." | "!" | "?" | "…" | "," | ";" | ":"
+        "." | "!" | "?" | "…" | "," | ";" | ":" | "。" | "！" | "？" | "，" | "；" | "："
     )
 }
 
