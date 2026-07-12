@@ -811,7 +811,8 @@ fn decoder_waveform_accepts_distributed_quiet_voice() {
     let (finalized, report) =
         finalize_decoder_waveform(&quiet_voice).expect("distributed quiet voice");
     assert_eq!(finalized, quiet_voice);
-    assert_eq!(report.effective_active_ratio, 1.0);
+    assert_eq!(report.raw_active_ratio, 1.0);
+    assert_eq!(report.raw_credible_active_ratio, 1.0);
 }
 
 #[test]
@@ -888,6 +889,111 @@ fn waveform_tail_boundary_and_ratio_gates_are_deterministic() {
     let second = finalize_decoder_waveform(&boundary).expect("repeat");
     assert_eq!(first, second);
     assert!(first.1.tail_trimmed);
+}
+
+fn activate_frame(samples: &mut [i16], frame: usize) {
+    let start = frame * 480;
+    let end = (start + 480).min(samples.len());
+    for (offset, sample) in samples[start..end].iter_mut().enumerate() {
+        *sample = if offset % 16 < 8 { 2_000 } else { -2_000 };
+    }
+}
+
+#[test]
+fn exact_404480_sparse_fixture_is_rejected() {
+    let mut samples = vec![0_i16; 404_480];
+    for frame in 0..3 {
+        activate_frame(&mut samples, frame);
+    }
+    // Exactly 45 additional sparse frames, including the final 320-sample
+    // partial frame. None can form a credible 200 ms envelope.
+    for index in 0..45 {
+        let frame = 18 + index * (842 - 18) / 44;
+        activate_frame(&mut samples, frame);
+    }
+    let err = finalize_decoder_waveform(&samples).expect_err("sparse output must fail closed");
+    assert!(
+        err.to_string().contains("reason periodic_sparse_pulses")
+            || err
+                .to_string()
+                .contains("reason fragmented_sparse_activity")
+    );
+    assert!(
+        err.to_string().contains("raw_active_ratio 0.056940"),
+        "{err}"
+    );
+}
+
+#[test]
+fn waveform_preserves_multiple_phrase_islands_and_long_internal_pause() {
+    let mut samples = voiced(20 * 480);
+    samples.extend(vec![0; 80 * 480]);
+    samples.extend(voiced(12 * 480));
+    samples.extend(vec![0; 8 * 480]); // Natural sentence-ending pause.
+    let (finalized, report) = finalize_decoder_waveform(&samples).expect("multiple phrases");
+    assert_eq!(finalized, samples);
+    assert_eq!(report.credible_island_count, 2);
+    assert!(!report.tail_trimmed);
+}
+
+#[test]
+fn credible_speech_tail_periodic_clicks_do_not_anchor_endpoint() {
+    let speech = voiced(50 * 480);
+    let mut samples = speech.clone();
+    samples.extend(vec![0; 220 * 480]);
+    for frame in (60..270).step_by(10) {
+        let start = frame * 480;
+        let end = (start + 4).min(samples.len());
+        for sample in &mut samples[start..end] {
+            *sample = 5_000;
+        }
+    }
+    let (finalized, report) = finalize_decoder_waveform(&samples).expect("credible prefix");
+    assert!(report.tail_trimmed);
+    assert!(report.periodic_sparse_pulses);
+    assert_eq!(finalized.len(), speech.len() + 2_880);
+}
+
+#[test]
+fn exact_588800_tail_fixture_retains_45600_samples() {
+    let mut samples = voiced(42_720);
+    samples.resize(588_800, 0);
+    let (finalized, report) = finalize_decoder_waveform(&samples).expect("long decoder tail");
+    assert_eq!(report.trailing_quiet_samples, 546_080);
+    assert_eq!(finalized.len(), 45_600);
+    assert!(report.tail_trimmed);
+}
+
+#[test]
+fn token_degeneration_audit_tracks_runs_rolling_metrics_and_milestones() {
+    let mut observer = TokenDegenerationObserver::default();
+    let mut milestones = Vec::new();
+    for token in (0..128).map(|index| if index % 2 == 0 { 7 } else { 8 }) {
+        if observer.observe(token) {
+            milestones.push(observer.snapshot().total_tokens);
+        }
+    }
+    let snapshot = observer.snapshot();
+    assert_eq!(milestones, vec![64, 128]);
+    assert_eq!(snapshot.total_tokens, 128);
+    assert_eq!(snapshot.unique_tokens, 2);
+    assert_eq!(snapshot.top_token_count, 64);
+    assert_eq!(snapshot.longest_same_token_run, 1);
+    assert_eq!(snapshot.rolling_unique_tokens, 2);
+    assert_eq!(snapshot.rolling_adjacent_repeat_ratio, 0.0);
+    assert_eq!(snapshot.rolling_period2_match_ratio, 1.0);
+
+    for _ in 0..70 {
+        observer.observe(9);
+    }
+    let snapshot = observer.snapshot();
+    assert_eq!(snapshot.total_tokens, 198);
+    assert_eq!(snapshot.current_same_token_run, 70);
+    assert_eq!(snapshot.longest_same_token_run, 70);
+    assert_eq!(snapshot.rolling_unique_tokens, 1);
+    assert_eq!(snapshot.rolling_top_share, 1.0);
+    // Diagnostics-only: observing even a compelling loop never returns a
+    // premature rejection; production STOP/silence semantics remain separate.
 }
 
 #[test]

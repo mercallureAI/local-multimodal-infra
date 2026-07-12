@@ -232,11 +232,16 @@ impl IndexTtsAdapter {
                 max_silence_run = decode.max_silence_run,
                 f_input_rows = decode.f_input_rows,
                 raw_samples = raw_wav.len(),
-                reason = "mostly_silent_f_output",
+                quality_decision = "rejected",
+                reason = "waveform_quality_rejected",
                 error = %err,
                 "IndexTTS chunk failed"
             );
-            err
+            InfraError::Backend(format!(
+                "IndexTTS request {request_id} chunk {}/{} waveform quality failure: {err}",
+                chunk_index + 1,
+                chunk_count
+            ))
         })?;
         validate_generated_audio(&wav, decode.generated_steps)?;
         tracing::info!(
@@ -256,8 +261,27 @@ impl IndexTtsAdapter {
             trailing_quiet_samples = waveform.trailing_quiet_samples,
             peak = waveform.peak,
             rms = waveform.rms,
-            effective_active_ratio = waveform.effective_active_ratio,
+            raw_active_ratio = waveform.raw_active_ratio,
+            raw_credible_active_ratio = waveform.raw_credible_active_ratio,
+            final_active_ratio = waveform.final_active_ratio,
+            final_credible_active_ratio = waveform.final_credible_active_ratio,
+            credible_island_count = waveform.credible_island_count,
+            longest_credible_run_frames = waveform.longest_credible_run_frames,
+            short_glitch_count = waveform.short_glitch_count,
+            raw_late_active_ratio = waveform.raw_late_active_ratio,
+            credible_late_active_ratio = waveform.credible_late_active_ratio,
+            periodic_sparse_pulses = waveform.periodic_sparse_pulses,
+            quality_decision = waveform.quality_decision,
+            quality_reason = waveform.quality_reason,
             tail_trimmed = waveform.tail_trimmed,
+            token_unique = decode.degeneration.unique_tokens,
+            token_top = ?decode.degeneration.top_token,
+            token_top_count = decode.degeneration.top_token_count,
+            token_longest_run = decode.degeneration.longest_same_token_run,
+            rolling_unique = decode.degeneration.rolling_unique_tokens,
+            rolling_top_share = decode.degeneration.rolling_top_share,
+            rolling_adjacent_repeat_ratio = decode.degeneration.rolling_adjacent_repeat_ratio,
+            rolling_period2_match_ratio = decode.degeneration.rolling_period2_match_ratio,
             stopped = decode.stopped,
             b_ms,
             c_initial_ms,
@@ -384,6 +408,7 @@ impl IndexTtsAdapter {
         let mut history_len = 0_i64;
         let mut hidden_states = Vec::<OrtTensorOutput>::new();
         let mut silence_guard = SilenceRunGuard::default();
+        let mut degeneration = TokenDegenerationObserver::default();
 
         let budget = checked_decode_budget(self.config.max_generate_length, concat.concat_len)?;
         let mut stopped = false;
@@ -430,6 +455,17 @@ impl IndexTtsAdapter {
             history_len = step.kv_seq_len;
             hidden_states.push(step.last_hidden_state.clone());
             let token = step.max_logit_id;
+            let degeneration_milestone = degeneration.observe(token);
+            if degeneration_milestone {
+                let snapshot = degeneration.snapshot();
+                log_token_degeneration(
+                    request_id,
+                    chunk_index,
+                    chunk_count,
+                    "milestone",
+                    &snapshot,
+                );
+            }
             let decision = process_decode_token(
                 &mut silence_guard,
                 token,
@@ -444,8 +480,18 @@ impl IndexTtsAdapter {
                     threshold,
                     silence_token_count,
                 }) => {
+                    let snapshot = degeneration.snapshot();
+                    log_token_degeneration(
+                        request_id,
+                        chunk_index,
+                        chunk_count,
+                        "pathological_silence_reject",
+                        &snapshot,
+                    );
                     let err = InfraError::Backend(format!(
-                        "IndexTTS_E pathological silence loop: silence_token {SILENCE_TOKEN}, consecutive {consecutive}, threshold {threshold}, silence_token_count {silence_token_count}"
+                        "IndexTTS request {request_id} chunk {}/{} decode rejected: pathological silence loop (silence_token {SILENCE_TOKEN}, consecutive {consecutive}, threshold {threshold}, silence_token_count {silence_token_count})",
+                        chunk_index + 1,
+                        chunk_count
                     ));
                     tracing::warn!(
                         request_id = %request_id,
@@ -455,13 +501,45 @@ impl IndexTtsAdapter {
                         decode_budget = budget,
                         silence_token_count = silence_guard.silence_token_count(),
                         max_silence_run = silence_guard.max_run(),
+                        token_unique = snapshot.unique_tokens,
+                        token_longest_run = snapshot.longest_same_token_run,
+                        rolling_unique = snapshot.rolling_unique_tokens,
+                        rolling_top_share = snapshot.rolling_top_share,
+                        rolling_adjacent_repeat_ratio = snapshot.rolling_adjacent_repeat_ratio,
+                        quality_decision = "rejected",
                         reason = "pathological_silence_token_run",
                         error = %err,
                         "IndexTTS decode aborted before continuation and vocoder"
                     );
                     return Err(err);
                 }
-                Err(DecodeTokenError::Continuation(err)) => return Err(err),
+                Err(DecodeTokenError::Continuation(source)) => {
+                    let snapshot = degeneration.snapshot();
+                    log_token_degeneration(
+                        request_id,
+                        chunk_index,
+                        chunk_count,
+                        "continuation_reject",
+                        &snapshot,
+                    );
+                    let err = InfraError::Backend(format!(
+                        "IndexTTS request {request_id} chunk {}/{} decode rejected: continuation failed: {source}",
+                        chunk_index + 1,
+                        chunk_count
+                    ));
+                    tracing::warn!(
+                        request_id = %request_id,
+                        chunk_index = chunk_index + 1,
+                        chunk_count,
+                        generated_steps = hidden_states.len(),
+                        decode_budget = budget,
+                        quality_decision = "rejected",
+                        reason = "decode_continuation_failed",
+                        error = %err,
+                        "IndexTTS decode failed before vocoder"
+                    );
+                    return Err(err);
+                }
             };
             if step_index < 8
                 || step_index.is_power_of_two()
@@ -496,9 +574,20 @@ impl IndexTtsAdapter {
             hidden_state = c_step.gpt_hidden_state;
         }
         if !stopped {
+            let snapshot = degeneration.snapshot();
+            log_token_degeneration(
+                request_id,
+                chunk_index,
+                chunk_count,
+                "decode_budget_exhausted",
+                &snapshot,
+            );
             let err = InfraError::Backend(format!(
-                "IndexTTS_E exhausted decode budget {budget} without STOP (concat_len {}, max_generate_length {})",
-                concat.concat_len, self.config.max_generate_length
+                "IndexTTS request {request_id} chunk {}/{} decode rejected: exhausted budget {budget} without STOP (concat_len {}, max_generate_length {})",
+                chunk_index + 1,
+                chunk_count,
+                concat.concat_len,
+                self.config.max_generate_length
             ));
             tracing::warn!(
                 request_id = %request_id,
@@ -508,6 +597,7 @@ impl IndexTtsAdapter {
                 decode_budget = budget,
                 silence_token_count = silence_guard.silence_token_count(),
                 max_silence_run = silence_guard.max_run(),
+                quality_decision = "rejected",
                 reason = "decode_budget_exhausted_without_stop",
                 error = %err,
                 "IndexTTS decode failed before vocoder"
@@ -515,12 +605,36 @@ impl IndexTtsAdapter {
             return Err(err);
         }
         if hidden_states.len() < 2 {
-            return Err(InfraError::Backend(format!(
-                "IndexTTS_E stopped too early after {} decode step(s); refusing incomplete/blank synthesis",
+            let snapshot = degeneration.snapshot();
+            log_token_degeneration(
+                request_id,
+                chunk_index,
+                chunk_count,
+                "too_early_stop_reject",
+                &snapshot,
+            );
+            let err = InfraError::Backend(format!(
+                "IndexTTS request {request_id} chunk {}/{} decode rejected: STOP after only {} decode step(s); refusing incomplete/blank synthesis",
+                chunk_index + 1,
+                chunk_count,
                 hidden_states.len()
-            )));
+            ));
+            tracing::warn!(
+                request_id = %request_id,
+                chunk_index = chunk_index + 1,
+                chunk_count,
+                generated_steps = hidden_states.len(),
+                decode_budget = budget,
+                quality_decision = "rejected",
+                reason = "decode_stopped_too_early",
+                error = %err,
+                "IndexTTS decode failed before vocoder"
+            );
+            return Err(err);
         }
 
+        let degeneration = degeneration.snapshot();
+        log_token_degeneration(request_id, chunk_index, chunk_count, "stop", &degeneration);
         let save_hidden_state = concatenate_hidden_states(&hidden_states)?;
         let f_input_rows = save_hidden_state.shape.first().copied().unwrap_or(0);
         Ok(DecodeState {
@@ -529,6 +643,7 @@ impl IndexTtsAdapter {
             stopped,
             silence_token_count: silence_guard.silence_token_count(),
             max_silence_run: silence_guard.max_run(),
+            degeneration,
             f_input_rows,
         })
     }
@@ -701,7 +816,131 @@ pub(crate) struct DecodeState {
     pub(crate) stopped: bool,
     pub(crate) silence_token_count: usize,
     pub(crate) max_silence_run: usize,
+    pub(crate) degeneration: TokenDegenerationSnapshot,
     pub(crate) f_input_rows: usize,
+}
+
+const TOKEN_AUDIT_WINDOW: usize = 64;
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct TokenDegenerationSnapshot {
+    pub(crate) total_tokens: usize,
+    pub(crate) unique_tokens: usize,
+    pub(crate) top_token: Option<i32>,
+    pub(crate) top_token_count: usize,
+    pub(crate) current_same_token_run: usize,
+    pub(crate) longest_same_token_run: usize,
+    pub(crate) rolling_unique_tokens: usize,
+    pub(crate) rolling_top_share: f64,
+    pub(crate) rolling_adjacent_repeat_ratio: f64,
+    pub(crate) rolling_period2_match_ratio: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TokenDegenerationObserver {
+    histogram: std::collections::HashMap<i32, usize>,
+    rolling: std::collections::VecDeque<i32>,
+    last_token: Option<i32>,
+    current_run: usize,
+    longest_run: usize,
+    total: usize,
+}
+
+impl TokenDegenerationObserver {
+    /// Performs only incremental bookkeeping in the decode hot loop. The
+    /// bounded/cumulative scans needed for a report happen in `snapshot`, which
+    /// callers invoke only at 64-step milestones and terminal/error paths.
+    pub(crate) fn observe(&mut self, token: i32) -> bool {
+        self.total += 1;
+        *self.histogram.entry(token).or_default() += 1;
+        if self.last_token == Some(token) {
+            self.current_run += 1;
+        } else {
+            self.current_run = 1;
+            self.last_token = Some(token);
+        }
+        self.longest_run = self.longest_run.max(self.current_run);
+        self.rolling.push_back(token);
+        if self.rolling.len() > TOKEN_AUDIT_WINDOW {
+            self.rolling.pop_front();
+        }
+        self.total % TOKEN_AUDIT_WINDOW == 0
+    }
+
+    pub(crate) fn snapshot(&self) -> TokenDegenerationSnapshot {
+        let (top_token, top_token_count) = self
+            .histogram
+            .iter()
+            .max_by_key(|(token, count)| (**count, std::cmp::Reverse(**token)))
+            .map(|(token, count)| (Some(*token), *count))
+            .unwrap_or((None, 0));
+        let mut rolling_counts = BTreeMap::<i32, usize>::new();
+        for token in &self.rolling {
+            *rolling_counts.entry(*token).or_default() += 1;
+        }
+        let rolling_len = self.rolling.len();
+        let rolling_top = rolling_counts.values().copied().max().unwrap_or(0);
+        let adjacent = self
+            .rolling
+            .iter()
+            .zip(self.rolling.iter().skip(1))
+            .filter(|(left, right)| left == right)
+            .count();
+        let period2 = self
+            .rolling
+            .iter()
+            .zip(self.rolling.iter().skip(2))
+            .filter(|(left, right)| left == right)
+            .count();
+        TokenDegenerationSnapshot {
+            total_tokens: self.total,
+            unique_tokens: self.histogram.len(),
+            top_token,
+            top_token_count,
+            current_same_token_run: self.current_run,
+            longest_same_token_run: self.longest_run,
+            rolling_unique_tokens: rolling_counts.len(),
+            rolling_top_share: ratio_metric(rolling_top, rolling_len),
+            rolling_adjacent_repeat_ratio: ratio_metric(adjacent, rolling_len.saturating_sub(1)),
+            rolling_period2_match_ratio: ratio_metric(period2, rolling_len.saturating_sub(2)),
+        }
+    }
+}
+
+fn ratio_metric(part: usize, total: usize) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        part as f64 / total as f64
+    }
+}
+
+fn log_token_degeneration(
+    request_id: Uuid,
+    chunk_index: usize,
+    chunk_count: usize,
+    audit_stage: &'static str,
+    audit: &TokenDegenerationSnapshot,
+) {
+    tracing::info!(
+        request_id = %request_id,
+        chunk_index = chunk_index + 1,
+        chunk_count,
+        audit_stage,
+        total_tokens = audit.total_tokens,
+        unique_tokens = audit.unique_tokens,
+        top_token = ?audit.top_token,
+        top_token_count = audit.top_token_count,
+        current_same_token_run = audit.current_same_token_run,
+        longest_same_token_run = audit.longest_same_token_run,
+        rolling_window = TOKEN_AUDIT_WINDOW.min(audit.total_tokens),
+        rolling_unique_tokens = audit.rolling_unique_tokens,
+        rolling_top_share = audit.rolling_top_share,
+        rolling_adjacent_repeat_ratio = audit.rolling_adjacent_repeat_ratio,
+        rolling_period2_match_ratio = audit.rolling_period2_match_ratio,
+        enforcement = false,
+        "IndexTTS token degeneration audit"
+    );
 }
 
 pub(crate) fn checked_decode_budget(
