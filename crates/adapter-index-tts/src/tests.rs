@@ -506,6 +506,30 @@ fn exact_m42_request_soft_splits_once_at_first_comma() {
     assert_eq!(chunks.concat(), (0..35).collect::<Vec<_>>());
     assert_eq!(pieces[*chunks[0].last().expect("first end") as usize], ",");
     assert!(chunks[1].iter().any(|id| pieces[*id as usize] == ","));
+    let owned = pieces
+        .iter()
+        .map(|piece| piece.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(classify_split_kind(&owned, &chunks, 120), "soft");
+}
+
+#[test]
+fn split_kind_distinguishes_none_hard_and_natural_hard_plans() {
+    let plain = (0..5).map(|_| "A".to_string()).collect::<Vec<_>>();
+    assert_eq!(classify_split_kind(&plain, &[vec![1, 2, 3]], 5), "none");
+
+    let hard = (0..10).map(|_| "A".to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        classify_split_kind(&hard, &[vec![0; 5], vec![0; 5]], 5),
+        "hard"
+    );
+
+    let mut natural = (0..10).map(|_| "A".to_string()).collect::<Vec<_>>();
+    natural[4] = ",".to_string();
+    assert_eq!(
+        classify_split_kind(&natural, &[vec![0; 5], vec![0; 5]], 5),
+        "soft+hard"
+    );
 }
 
 #[test]
@@ -742,6 +766,260 @@ fn segment_audio_inserts_200ms_only_between_chunks() {
     assert_eq!(output.last(), Some(&4));
 }
 
+fn voiced(samples: usize) -> Vec<i16> {
+    (0..samples)
+        .map(|index| if index % 16 < 8 { 2_000 } else { -2_000 })
+        .collect()
+}
+
+#[test]
+fn decoder_waveform_trims_only_disproportionate_trailing_quiet_suffix() {
+    let speech = voiced(24_000);
+    let mut raw = speech.clone();
+    raw.extend((0..96_000).map(|index| if index % 2 == 0 { 2 } else { -2 }));
+    let (finalized, report) = finalize_decoder_waveform(&raw).expect("speech plus quiet tail");
+    assert_eq!(&finalized[..speech.len()], speech.as_slice());
+    assert!(report.tail_trimmed);
+    assert_eq!(report.trailing_quiet_samples, 96_000);
+    assert_eq!(finalized.len(), speech.len() + 2_880);
+}
+
+#[test]
+fn decoder_waveform_sparse_impulses_cannot_hide_quiet_tail() {
+    let speech = voiced(24_000);
+    let mut raw = speech.clone();
+    let mut sparse_tail = vec![2_i16; 96_000];
+    for frame in sparse_tail.chunks_mut(480) {
+        frame[0] = 2_000;
+    }
+    raw.extend_from_slice(&sparse_tail);
+
+    let (finalized, report) = finalize_decoder_waveform(&raw).expect("sparse impulse tail");
+    assert_eq!(&finalized[..speech.len()], speech.as_slice());
+    assert!(report.tail_trimmed);
+    assert_eq!(report.trailing_quiet_samples, sparse_tail.len());
+    assert_eq!(finalized.len(), speech.len() + 2_880);
+}
+
+#[test]
+fn decoder_waveform_accepts_distributed_quiet_voice() {
+    // Amplitude 28 is below the RMS activity threshold, but sustained occupancy
+    // represents a credible quiet voice rather than isolated decoder clicks.
+    let quiet_voice = (0..24_000)
+        .map(|index| if index % 16 < 8 { 28 } else { -28 })
+        .collect::<Vec<i16>>();
+    let (finalized, report) =
+        finalize_decoder_waveform(&quiet_voice).expect("distributed quiet voice");
+    assert_eq!(finalized, quiet_voice);
+    assert_eq!(report.effective_active_ratio, 1.0);
+}
+
+#[test]
+fn decoder_waveform_preserves_short_terminal_and_internal_silence() {
+    let mut short_tail = voiced(48_000);
+    short_tail.extend(vec![0; 24_000]);
+    let (unchanged, report) = finalize_decoder_waveform(&short_tail).expect("short tail");
+    assert_eq!(unchanged, short_tail);
+    assert!(!report.tail_trimmed);
+
+    let mut internal = voiced(24_000);
+    internal.extend(vec![0; 12_000]); // 500 ms pause.
+    internal.extend(voiced(24_000));
+    let (unchanged, report) = finalize_decoder_waveform(&internal).expect("internal pause");
+    assert_eq!(unchanged, internal);
+    assert_eq!(report.trailing_quiet_samples, 0);
+}
+
+#[test]
+fn decoder_waveform_rejects_silence_low_noise_and_tiny_blip() {
+    assert!(finalize_decoder_waveform(&vec![0; 96_000]).is_err());
+    assert!(finalize_decoder_waveform(&vec![3; 96_000]).is_err());
+    let mut click = vec![0; 96_000];
+    click[20] = 20_000;
+    assert!(finalize_decoder_waveform(&click).is_err());
+    let mut tiny_transient = voiced(3 * 480);
+    tiny_transient.extend(vec![0; 96_000]);
+    assert!(finalize_decoder_waveform(&tiny_transient).is_err());
+
+    let finite_noise = OrtTensorOutput {
+        name: "generated_wav".to_string(),
+        shape: vec![1, 96_000],
+        data: OrtTensorData::F32(vec![0.00001; 96_000]),
+    };
+    let converted = tensor_to_i16_audio(&finite_noise).expect("finite conversion");
+    assert!(finalize_decoder_waveform(&converted).is_err());
+}
+
+#[test]
+fn finalized_chunks_keep_exact_intentional_gap() {
+    let first = finalize_decoder_waveform(&voiced(24_000)).expect("first").0;
+    let second = finalize_decoder_waveform(&voiced(24_000))
+        .expect("second")
+        .0;
+    let joined =
+        concatenate_segment_audio(&[first, second], TARGET_SAMPLE_RATE, 200).expect("joined");
+    assert!(joined[24_000..28_800].iter().all(|sample| *sample == 0));
+    assert_eq!(joined.len(), 52_800);
+}
+
+#[test]
+fn waveform_tail_boundary_and_ratio_gates_are_deterministic() {
+    let mut under_length = voiced(48_000);
+    under_length.extend(vec![0; 47_999]);
+    assert!(
+        !finalize_decoder_waveform(&under_length)
+            .expect("under length")
+            .1
+            .tail_trimmed
+    );
+
+    let mut under_ratio = voiced(72_000);
+    under_ratio.extend(vec![0; 48_000]);
+    assert!(
+        !finalize_decoder_waveform(&under_ratio)
+            .expect("under ratio")
+            .1
+            .tail_trimmed
+    );
+
+    let mut boundary = voiced(48_000);
+    boundary.extend(vec![0; 48_000]);
+    let first = finalize_decoder_waveform(&boundary).expect("boundary");
+    let second = finalize_decoder_waveform(&boundary).expect("repeat");
+    assert_eq!(first, second);
+    assert!(first.1.tail_trimmed);
+}
+
+#[test]
+fn silence_run_guard_matches_official_more_than_thirty_semantics_and_resets() {
+    let mut guard = SilenceRunGuard::default();
+    for _ in 0..DEFAULT_MAX_CONSECUTIVE_SILENCE_TOKENS {
+        guard
+            .observe(SILENCE_TOKEN, DEFAULT_MAX_CONSECUTIVE_SILENCE_TOKENS)
+            .expect("official limit continues");
+    }
+    assert_eq!(guard.max_run(), 30);
+    assert!(guard
+        .observe(SILENCE_TOKEN, DEFAULT_MAX_CONSECUTIVE_SILENCE_TOKENS)
+        .is_err());
+
+    let mut ordinary = SilenceRunGuard::default();
+    for token in [1, SILENCE_TOKEN, SILENCE_TOKEN, 2, SILENCE_TOKEN, 3] {
+        ordinary
+            .observe(token, DEFAULT_MAX_CONSECUTIVE_SILENCE_TOKENS)
+            .expect("ordinary sequence");
+    }
+    assert_eq!(ordinary.max_run(), 2);
+    let next_chunk = SilenceRunGuard::default();
+    assert_eq!(next_chunk.max_run(), 0);
+}
+
+fn simulate_decode_and_f(
+    tokens: &[i32],
+    budget: usize,
+    c_tokens: &mut Vec<i32>,
+    f_calls: &mut usize,
+) -> Result<Vec<i32>> {
+    let mut guard = SilenceRunGuard::default();
+    let mut accepted = Vec::new();
+    let mut stopped = false;
+    let decode = (|| {
+        for &token in tokens.iter().take(budget) {
+            accepted.push(token);
+            match process_decode_token(
+                &mut guard,
+                token,
+                STOP_TOKEN,
+                DEFAULT_MAX_CONSECUTIVE_SILENCE_TOKENS,
+                |token| {
+                    c_tokens.push(token);
+                    Ok(token)
+                },
+            ) {
+                Ok(DecodeTokenAction::Stop) => {
+                    stopped = true;
+                    break;
+                }
+                Ok(DecodeTokenAction::Continue(_)) => {}
+                Err(DecodeTokenError::PathologicalSilence {
+                    consecutive,
+                    threshold,
+                    ..
+                }) => {
+                    return Err(InfraError::Backend(format!(
+                        "typed pathological silence: consecutive {consecutive}, threshold {threshold}"
+                    )));
+                }
+                Err(DecodeTokenError::Continuation(err)) => return Err(err),
+            }
+        }
+        if !stopped {
+            return Err(InfraError::Backend(
+                "synthetic decode budget exhausted without STOP".to_string(),
+            ));
+        }
+        Ok(accepted)
+    })();
+    run_after_success(decode, |_| {
+        *f_calls += 1;
+        Ok(())
+    })
+    .map(|(accepted, ())| accepted)
+}
+
+#[test]
+fn production_decode_seam_allows_thirty_silences_then_stop_and_f_once() {
+    let mut tokens = vec![SILENCE_TOKEN; 30];
+    tokens.push(STOP_TOKEN);
+    let mut c_tokens = Vec::new();
+    let mut f_calls = 0;
+    let accepted =
+        simulate_decode_and_f(&tokens, tokens.len(), &mut c_tokens, &mut f_calls).expect("success");
+    assert_eq!(accepted, tokens);
+    assert_eq!(c_tokens, vec![SILENCE_TOKEN; 30]);
+    assert_eq!(f_calls, 1);
+}
+
+#[test]
+fn production_decode_seam_aborts_thirty_first_silence_before_c_and_f() {
+    let mut tokens = vec![SILENCE_TOKEN; 31];
+    tokens.push(STOP_TOKEN);
+    let mut c_tokens = Vec::new();
+    let mut f_calls = 0;
+    let err = simulate_decode_and_f(&tokens, tokens.len(), &mut c_tokens, &mut f_calls)
+        .expect_err("must fail closed before hypothetical STOP");
+    assert!(
+        err.to_string().contains("typed pathological silence"),
+        "{err}"
+    );
+    assert_eq!(c_tokens, vec![SILENCE_TOKEN; 30]);
+    assert_eq!(f_calls, 0);
+}
+
+#[test]
+fn production_decode_seam_resets_runs_and_reaches_stop_and_f() {
+    let mut tokens = vec![SILENCE_TOKEN; 30];
+    tokens.push(7);
+    tokens.extend(vec![SILENCE_TOKEN; 30]);
+    tokens.extend([8, STOP_TOKEN]);
+    let mut c_tokens = Vec::new();
+    let mut f_calls = 0;
+    simulate_decode_and_f(&tokens, tokens.len(), &mut c_tokens, &mut f_calls).expect("success");
+    assert_eq!(c_tokens, tokens[..tokens.len() - 1]);
+    assert_eq!(f_calls, 1);
+}
+
+#[test]
+fn production_decode_seam_no_stop_budget_exhaustion_skips_f() {
+    let tokens = [1, 2, 3, 4, STOP_TOKEN];
+    let mut c_tokens = Vec::new();
+    let mut f_calls = 0;
+    let err = simulate_decode_and_f(&tokens, 4, &mut c_tokens, &mut f_calls).expect_err("no STOP");
+    assert!(err.to_string().contains("without STOP"), "{err}");
+    assert_eq!(c_tokens, vec![1, 2, 3, 4]);
+    assert_eq!(f_calls, 0);
+}
+
 #[test]
 fn every_segment_must_validate_before_intentional_gap_is_added() {
     let segments = [vec![1; 48], vec![0; 48]];
@@ -779,6 +1057,10 @@ fn model_config_defaults_remain_backward_compatible() {
     assert_eq!(config.max_generate_length, 800);
     assert_eq!(config.max_text_tokens_per_segment, 120);
     assert_eq!(config.inter_segment_silence_ms, 200);
+    assert_eq!(
+        config.max_consecutive_silence_tokens,
+        DEFAULT_MAX_CONSECUTIVE_SILENCE_TOKENS
+    );
     assert_eq!(config.generation_start_token, START_TOKEN);
     assert_eq!(config.generation_stop_token, STOP_TOKEN);
 }
@@ -790,6 +1072,7 @@ fn model_config_loads_manifest_numbers_strings_and_aliases() {
 max_generate_length: "605"
 max_text_tokens: 96
 inter_segment_silence_ms: "175"
+max_consecutive_silence_tokens: "40"
 start_token: "7000"
 generation_stop_token: 7001
 mel_code_size: "8194"
@@ -802,6 +1085,7 @@ mel_code_size: "8194"
     assert_eq!(config.max_generate_length, 605);
     assert_eq!(config.max_text_tokens_per_segment, 96);
     assert_eq!(config.inter_segment_silence_ms, 175);
+    assert_eq!(config.max_consecutive_silence_tokens, 40);
     assert_eq!(config.generation_start_token, 7000);
     assert_eq!(config.generation_stop_token, 7001);
     assert_eq!(config.mel_code_size, Some(8194));
@@ -814,6 +1098,7 @@ fn model_metadata_intentionally_overrides_manifest() {
 max_generate_length: 605
 max_text_tokens_per_segment: 100
 inter_segment_silence_ms: 175
+max_consecutive_silence_tokens: 20
 generation_start_token: 7000
 generation_stop_token: 7001
 "#,
@@ -831,12 +1116,17 @@ generation_stop_token: 7001
         .insert("start_token".to_string(), serde_json::json!(8000));
     spec.metadata
         .insert("stop_token".to_string(), serde_json::json!("8001"));
+    spec.metadata.insert(
+        "max_consecutive_silence_tokens".to_string(),
+        serde_json::json!("45"),
+    );
 
     let config = IndexTtsModelConfig::load(&artifacts, &spec).expect("metadata overrides");
 
     assert_eq!(config.max_generate_length, 700);
     assert_eq!(config.max_text_tokens_per_segment, 110);
     assert_eq!(config.inter_segment_silence_ms, 200);
+    assert_eq!(config.max_consecutive_silence_tokens, 45);
     assert_eq!(config.generation_start_token, 8000);
     assert_eq!(config.generation_stop_token, 8001);
 }
@@ -854,6 +1144,8 @@ fn model_config_rejects_present_invalid_manifest_values_and_aliases() {
         ("max_text_tokens_per_segment", "4097"),
         ("inter_segment_silence_ms", "10001"),
         ("inter_segment_silence_ms", "4294967296"),
+        ("max_consecutive_silence_tokens", "0"),
+        ("max_consecutive_silence_tokens", "121"),
         ("start_token", "2147483648"),
         ("generation_stop_token", "-2147483649"),
     ] {
@@ -878,6 +1170,10 @@ fn model_config_rejects_present_invalid_model_metadata_even_with_valid_manifest(
         ("inter_segment_silence_ms", serde_json::json!("4294967296")),
         ("generation_start_token", serde_json::json!("bad")),
         ("stop_token", serde_json::json!(2147483648_i64)),
+        ("max_consecutive_silence_tokens", serde_json::json!(0)),
+        ("max_consecutive_silence_tokens", serde_json::json!(-1)),
+        ("max_consecutive_silence_tokens", serde_json::json!(121)),
+        ("max_consecutive_silence_tokens", serde_json::json!("bad")),
     ] {
         let (dir, artifacts) = config_fixture("max_generate_length: 605\n");
         let mut spec = model_spec(dir.path().to_path_buf(), vec!["cpu".to_string()]);

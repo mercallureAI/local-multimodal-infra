@@ -9,6 +9,7 @@ pub struct IndexTtsModelConfig {
     pub generation_stop_token: i32,
     pub max_text_tokens_per_segment: usize,
     pub inter_segment_silence_ms: u32,
+    pub max_consecutive_silence_tokens: usize,
 }
 
 impl Default for IndexTtsModelConfig {
@@ -21,6 +22,7 @@ impl Default for IndexTtsModelConfig {
             generation_stop_token: STOP_TOKEN,
             max_text_tokens_per_segment: DEFAULT_MAX_TEXT_TOKENS_PER_SEGMENT,
             inter_segment_silence_ms: DEFAULT_INTER_SEGMENT_SILENCE_MS,
+            max_consecutive_silence_tokens: DEFAULT_MAX_CONSECUTIVE_SILENCE_TOKENS,
         }
     }
 }
@@ -103,6 +105,13 @@ impl IndexTtsModelConfig {
         )? {
             self.inter_segment_silence_ms = value;
         }
+        if let Some(value) = parse_usize_fields(
+            get,
+            &["max_consecutive_silence_tokens"],
+            "max_consecutive_silence_tokens",
+        )? {
+            self.max_consecutive_silence_tokens = value;
+        }
         if let Some(value) = parse_i32_fields(
             get,
             &["generation_start_token", "start_token"],
@@ -137,6 +146,14 @@ impl IndexTtsModelConfig {
             return Err(InfraError::BadRequest(format!(
                 "IndexTTS inter_segment_silence_ms must be <=10000, got {}",
                 self.inter_segment_silence_ms
+            )));
+        }
+        // Zero disables the safety mechanism and very large values recreate the
+        // decode-budget failure it is intended to prevent.
+        if !(1..=120).contains(&self.max_consecutive_silence_tokens) {
+            return Err(InfraError::BadRequest(format!(
+                "IndexTTS max_consecutive_silence_tokens must be in 1..=120, got {}",
+                self.max_consecutive_silence_tokens
             )));
         }
         Ok(())

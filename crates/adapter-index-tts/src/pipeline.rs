@@ -66,11 +66,25 @@ impl IndexTtsAdapter {
         reference_audio: Option<&FileRef>,
         params: &BTreeMap<String, Value>,
     ) -> Result<InferenceOutput> {
+        self.synthesize_with_request_id(Uuid::new_v4(), text, reference_audio, params)
+    }
+
+    pub fn synthesize_with_request_id(
+        &mut self,
+        request_id: Uuid,
+        text: &str,
+        reference_audio: Option<&FileRef>,
+        params: &BTreeMap<String, Value>,
+    ) -> Result<InferenceOutput> {
+        let total_started = std::time::Instant::now();
         let reference_audio = reference_audio.ok_or_else(|| {
             InfraError::BadRequest("IndexTTS synthesis requires reference_audio".to_string())
         })?;
+        let reference_started = std::time::Instant::now();
         let reference_path = local_files::local_path(reference_audio)?;
         let reference = audio::read_wav_mono_i16_24k(&reference_path)?;
+        let reference_read_ms = reference_started.elapsed().as_millis() as u64;
+        let frontend_started = std::time::Instant::now();
         let explicit_ids = explicit_text_token_ids_from_params(params)?;
         let uses_explicit_ids = explicit_ids.is_some();
         if is_punctuation_only(text) && explicit_ids.is_none() {
@@ -79,24 +93,51 @@ impl IndexTtsAdapter {
                     .to_string(),
             ));
         }
-        let chunks = match explicit_ids {
-            Some(ids) => plan_token_chunks(&ids, None, self.config.max_text_tokens_per_segment)?,
+        let (chunks, split_kind) = match explicit_ids {
+            Some(ids) => {
+                let chunks =
+                    plan_token_chunks(&ids, None, self.config.max_text_tokens_per_segment)?;
+                let kind = if chunks.len() == 1 { "none" } else { "hard" };
+                (chunks, kind)
+            }
             None => {
                 let prepared = preprocess_text_for_index_tts(text);
                 let (ids, pieces) = self.tokenizer.encode_ids_and_pieces(&prepared)?;
-                plan_token_chunks(&ids, Some(&pieces), self.config.max_text_tokens_per_segment)?
+                let chunks = plan_token_chunks(
+                    &ids,
+                    Some(&pieces),
+                    self.config.max_text_tokens_per_segment,
+                )?;
+                let kind =
+                    classify_split_kind(&pieces, &chunks, self.config.max_text_tokens_per_segment);
+                (chunks, kind)
             }
         };
+        let frontend_ms = frontend_started.elapsed().as_millis() as u64;
         tracing::info!(
+            request_id = %request_id,
             chunk_count = chunks.len(),
             chunk_token_counts = ?chunks.iter().map(Vec::len).collect::<Vec<_>>(),
             explicit_token_ids = uses_explicit_ids,
+            split_kind,
+            frontend_ms,
+            reference_read_ms,
             "IndexTTS planned text chunks"
         );
+        let a_started = std::time::Instant::now();
         let reference_state = self.run_a(&reference)?;
+        let reference_a_ms = a_started.elapsed().as_millis() as u64;
         let mut segment_audio = Vec::with_capacity(chunks.len());
+        let mut total_decode_steps = 0usize;
         for (chunk_index, text_ids) in chunks.iter().enumerate() {
-            let generated = self.run_bf(&reference_state, text_ids, chunk_index, chunks.len())?;
+            let (generated, decode_steps) = self.run_bf(
+                request_id,
+                &reference_state,
+                text_ids,
+                chunk_index,
+                chunks.len(),
+            )?;
+            total_decode_steps += decode_steps;
             segment_audio.push(generated);
         }
         let generated = concatenate_segment_audio(
@@ -104,7 +145,21 @@ impl IndexTtsAdapter {
             TARGET_SAMPLE_RATE,
             self.config.inter_segment_silence_ms,
         )?;
+        let encode_started = std::time::Instant::now();
         let output = self.write_wav(&generated)?;
+        tracing::info!(
+            request_id = %request_id,
+            frontend_ms,
+            reference_read_ms,
+            reference_a_ms,
+            chunk_count = chunks.len(),
+            split_kind,
+            decode_steps = total_decode_steps,
+            audio_samples = generated.len(),
+            encode_write_ms = encode_started.elapsed().as_millis() as u64,
+            total_ms = total_started.elapsed().as_millis() as u64,
+            "IndexTTS synthesis stages"
+        );
         Ok(InferenceOutput::TtsAudio { audio: output })
     }
 
@@ -129,33 +184,90 @@ impl IndexTtsAdapter {
 
     fn run_bf(
         &mut self,
+        request_id: Uuid,
         reference_state: &ReferenceState,
         text_ids: &[i32],
         chunk_index: usize,
         chunk_count: usize,
-    ) -> Result<Vec<i16>> {
+    ) -> Result<(Vec<i16>, usize)> {
+        let chunk_started = std::time::Instant::now();
+        let b_started = std::time::Instant::now();
         let text_hidden = self.run_b(text_ids)?;
+        let b_ms = b_started.elapsed().as_millis() as u64;
+        let c_started = std::time::Instant::now();
         let c_start = self.run_c_token(self.config.generation_start_token, 0)?;
+        let c_initial_ms = c_started.elapsed().as_millis() as u64;
+        let d_started = std::time::Instant::now();
         let concat = self.run_d(
             &reference_state.conds_latent,
             &text_hidden,
             &c_start.gpt_hidden_state,
         )?;
+        let d_ms = d_started.elapsed().as_millis() as u64;
         let concat_len = concat.concat_len;
-        let decode = self.run_e_loop(concat, c_start.next_gen_len)?;
-        let wav = self.run_f(reference_state, &decode.save_hidden_state)?;
+        let budget = checked_decode_budget(self.config.max_generate_length, concat_len)?;
+        let e_started = std::time::Instant::now();
+        let decode_result = self.run_e_loop(
+            request_id,
+            chunk_index,
+            chunk_count,
+            concat,
+            c_start.next_gen_len,
+        );
+        // This loop includes each E invocation and continuation C invocation.
+        let decode_loop_ms = e_started.elapsed().as_millis() as u64;
+        let f_started = std::time::Instant::now();
+        let (decode, raw_wav) = run_after_success(decode_result, |decode| {
+            self.run_f(reference_state, &decode.save_hidden_state)
+        })?;
+        let f_ms = f_started.elapsed().as_millis() as u64;
+        let (wav, waveform) = finalize_decoder_waveform(&raw_wav).map_err(|err| {
+            tracing::warn!(
+                request_id = %request_id,
+                chunk_index = chunk_index + 1,
+                chunk_count,
+                generated_steps = decode.generated_steps,
+                decode_budget = budget,
+                silence_token_count = decode.silence_token_count,
+                max_silence_run = decode.max_silence_run,
+                f_input_rows = decode.f_input_rows,
+                raw_samples = raw_wav.len(),
+                reason = "mostly_silent_f_output",
+                error = %err,
+                "IndexTTS chunk failed"
+            );
+            err
+        })?;
         validate_generated_audio(&wav, decode.generated_steps)?;
         tracing::info!(
+            request_id = %request_id,
             chunk_index = chunk_index + 1,
             chunk_count,
             token_count = text_ids.len(),
             concat_len,
             generated_steps = decode.generated_steps,
-            sample_count = wav.len(),
+            decode_budget = budget,
+            silence_token_count = decode.silence_token_count,
+            max_silence_run = decode.max_silence_run,
+            f_input_rows = decode.f_input_rows,
+            raw_samples = waveform.raw_samples,
+            final_samples = waveform.final_samples,
+            trimmed_samples = waveform.trimmed_samples,
+            trailing_quiet_samples = waveform.trailing_quiet_samples,
+            peak = waveform.peak,
+            rms = waveform.rms,
+            effective_active_ratio = waveform.effective_active_ratio,
+            tail_trimmed = waveform.tail_trimmed,
             stopped = decode.stopped,
+            b_ms,
+            c_initial_ms,
+            d_ms,
+            decode_loop_ms,
+            f_ms,
+            chunk_total_ms = chunk_started.elapsed().as_millis() as u64,
             "IndexTTS synthesized chunk"
         );
-        Ok(wav)
+        Ok((wav, decode.generated_steps))
     }
 
     fn run_a(&mut self, samples: &[i16]) -> Result<ReferenceState> {
@@ -239,7 +351,14 @@ impl IndexTtsAdapter {
         })
     }
 
-    fn run_e_loop(&mut self, concat: ConcatState, mut gen_len: i64) -> Result<DecodeState> {
+    fn run_e_loop(
+        &mut self,
+        request_id: Uuid,
+        chunk_index: usize,
+        chunk_count: usize,
+        concat: ConcatState,
+        mut gen_len: i64,
+    ) -> Result<DecodeState> {
         require_inputs(
             &self.e,
             &[
@@ -264,6 +383,7 @@ impl IndexTtsAdapter {
         let mut hidden_state = concat.hidden_state;
         let mut history_len = 0_i64;
         let mut hidden_states = Vec::<OrtTensorOutput>::new();
+        let mut silence_guard = SilenceRunGuard::default();
 
         let budget = checked_decode_budget(self.config.max_generate_length, concat.concat_len)?;
         let mut stopped = false;
@@ -310,7 +430,55 @@ impl IndexTtsAdapter {
             history_len = step.kv_seq_len;
             hidden_states.push(step.last_hidden_state.clone());
             let token = step.max_logit_id;
-            if token == self.config.generation_stop_token {
+            let decision = process_decode_token(
+                &mut silence_guard,
+                token,
+                self.config.generation_stop_token,
+                self.config.max_consecutive_silence_tokens,
+                |token| self.run_c_token(token, gen_len),
+            );
+            let decision = match decision {
+                Ok(decision) => decision,
+                Err(DecodeTokenError::PathologicalSilence {
+                    consecutive,
+                    threshold,
+                    silence_token_count,
+                }) => {
+                    let err = InfraError::Backend(format!(
+                        "IndexTTS_E pathological silence loop: silence_token {SILENCE_TOKEN}, consecutive {consecutive}, threshold {threshold}, silence_token_count {silence_token_count}"
+                    ));
+                    tracing::warn!(
+                        request_id = %request_id,
+                        chunk_index = chunk_index + 1,
+                        chunk_count,
+                        generated_steps = hidden_states.len(),
+                        decode_budget = budget,
+                        silence_token_count = silence_guard.silence_token_count(),
+                        max_silence_run = silence_guard.max_run(),
+                        reason = "pathological_silence_token_run",
+                        error = %err,
+                        "IndexTTS decode aborted before continuation and vocoder"
+                    );
+                    return Err(err);
+                }
+                Err(DecodeTokenError::Continuation(err)) => return Err(err),
+            };
+            if step_index < 8
+                || step_index.is_power_of_two()
+                || token == self.config.generation_stop_token
+            {
+                tracing::debug!(
+                    request_id = %request_id,
+                    chunk_index = chunk_index + 1,
+                    step = step_index + 1,
+                    token_id = token,
+                    is_stop = token == self.config.generation_stop_token,
+                    is_silence = token == SILENCE_TOKEN,
+                    consecutive_silence = silence_guard.consecutive(),
+                    "IndexTTS decode token"
+                );
+            }
+            if matches!(decision, DecodeTokenAction::Stop) {
                 stopped = true;
                 break;
             }
@@ -321,15 +489,30 @@ impl IndexTtsAdapter {
                 DEFAULT_REPEAT_WINDOW,
                 DEFAULT_REPEAT_PENALTY,
             );
-            let c_step = self.run_c_token(token, gen_len)?;
+            let DecodeTokenAction::Continue(c_step) = decision else {
+                unreachable!("STOP handled above")
+            };
             gen_len = c_step.next_gen_len;
             hidden_state = c_step.gpt_hidden_state;
         }
         if !stopped {
-            return Err(InfraError::Backend(format!(
+            let err = InfraError::Backend(format!(
                 "IndexTTS_E exhausted decode budget {budget} without STOP (concat_len {}, max_generate_length {})",
                 concat.concat_len, self.config.max_generate_length
-            )));
+            ));
+            tracing::warn!(
+                request_id = %request_id,
+                chunk_index = chunk_index + 1,
+                chunk_count,
+                generated_steps = hidden_states.len(),
+                decode_budget = budget,
+                silence_token_count = silence_guard.silence_token_count(),
+                max_silence_run = silence_guard.max_run(),
+                reason = "decode_budget_exhausted_without_stop",
+                error = %err,
+                "IndexTTS decode failed before vocoder"
+            );
+            return Err(err);
         }
         if hidden_states.len() < 2 {
             return Err(InfraError::Backend(format!(
@@ -338,10 +521,15 @@ impl IndexTtsAdapter {
             )));
         }
 
+        let save_hidden_state = concatenate_hidden_states(&hidden_states)?;
+        let f_input_rows = save_hidden_state.shape.first().copied().unwrap_or(0);
         Ok(DecodeState {
-            save_hidden_state: concatenate_hidden_states(&hidden_states)?,
+            save_hidden_state,
             generated_steps: hidden_states.len(),
             stopped,
+            silence_token_count: silence_guard.silence_token_count(),
+            max_silence_run: silence_guard.max_run(),
+            f_input_rows,
         })
     }
 
@@ -403,6 +591,82 @@ impl IndexTtsAdapter {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DecodeTokenAction<T> {
+    Stop,
+    Continue(T),
+}
+
+#[derive(Debug)]
+pub(crate) enum DecodeTokenError {
+    PathologicalSilence {
+        consecutive: usize,
+        threshold: usize,
+        silence_token_count: usize,
+    },
+    Continuation(InfraError),
+}
+
+/// Production decode decision seam. STOP has precedence and never invokes C;
+/// a pathological silence token is rejected before C; only ordinary tokens
+/// invoke the continuation callback.
+pub(crate) fn process_decode_token<T>(
+    guard: &mut SilenceRunGuard,
+    token: i32,
+    stop_token: i32,
+    threshold: usize,
+    continue_c: impl FnOnce(i32) -> Result<T>,
+) -> std::result::Result<DecodeTokenAction<T>, DecodeTokenError> {
+    if token == stop_token {
+        return Ok(DecodeTokenAction::Stop);
+    }
+    guard
+        .observe(token, threshold)
+        .map_err(|_| DecodeTokenError::PathologicalSilence {
+            consecutive: guard.consecutive(),
+            threshold,
+            silence_token_count: guard.silence_token_count(),
+        })?;
+    continue_c(token)
+        .map(DecodeTokenAction::Continue)
+        .map_err(DecodeTokenError::Continuation)
+}
+
+/// The production F gate: callbacks are invoked only for a successful,
+/// STOP-terminated decode result. Decode errors (including no STOP and the
+/// silence guard) pass through without touching F.
+pub(crate) fn run_after_success<T, U>(
+    decode: Result<T>,
+    run_f: impl FnOnce(&T) -> Result<U>,
+) -> Result<(T, U)> {
+    let decode = decode?;
+    let output = run_f(&decode)?;
+    Ok((decode, output))
+}
+
+pub(crate) fn classify_split_kind(
+    pieces: &[String],
+    chunks: &[Vec<i32>],
+    max_tokens: usize,
+) -> &'static str {
+    if chunks.len() <= 1 {
+        return "none";
+    }
+    if pieces.len() <= max_tokens {
+        return "soft";
+    }
+    let mut end = 0usize;
+    let has_natural_boundary = chunks.iter().take(chunks.len() - 1).any(|chunk| {
+        end += chunk.len();
+        end > 0 && is_segment_boundary_piece(&pieces[end - 1])
+    });
+    if has_natural_boundary {
+        "soft+hard"
+    } else {
+        "hard"
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ReferenceState {
     pub(crate) outputs: Vec<OrtTensorOutput>,
@@ -435,6 +699,9 @@ pub(crate) struct DecodeState {
     pub(crate) save_hidden_state: OrtTensorOutput,
     pub(crate) generated_steps: usize,
     pub(crate) stopped: bool,
+    pub(crate) silence_token_count: usize,
+    pub(crate) max_silence_run: usize,
+    pub(crate) f_input_rows: usize,
 }
 
 pub(crate) fn checked_decode_budget(

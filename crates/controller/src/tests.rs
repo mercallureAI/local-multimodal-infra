@@ -457,6 +457,7 @@ fn tts_local_output_is_registered_as_downloadable_artifact_asset() {
     let before = Utc::now().timestamp();
     let output = controller
         .register_output_assets(
+            Uuid::new_v4(),
             "task-output-test",
             InferenceOutput::TtsAudio {
                 audio: FileRef {
@@ -490,6 +491,28 @@ fn tts_local_output_is_registered_as_downloadable_artifact_asset() {
         "artifact_expires={artifact_expires} before={before} after={after}"
     );
     cleanup_test_controller(&controller);
+}
+
+#[test]
+fn tts_output_asset_source_read_failure_is_returned() {
+    let controller = test_controller_with_temp_data_dir();
+    let missing = controller.data_dir.join("missing-output.wav");
+
+    let error = controller
+        .register_output_assets(
+            Uuid::new_v4(),
+            "task-missing-output",
+            InferenceOutput::TtsAudio {
+                audio: FileRef {
+                    path: Some(missing),
+                    mime: Some("audio/wav".to_string()),
+                    ..FileRef::default()
+                },
+            },
+        )
+        .expect_err("missing source must fail registration");
+
+    assert!(error.to_string().contains("missing-output.wav"), "{error}");
 }
 
 #[test]

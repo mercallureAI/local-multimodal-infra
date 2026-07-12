@@ -29,6 +29,10 @@ pub const STOP_TOKEN: i32 = 8193;
 pub const MAX_GENERATE_LENGTH: usize = 800;
 pub const DEFAULT_MAX_TEXT_TOKENS_PER_SEGMENT: usize = 120;
 pub const DEFAULT_INTER_SEGMENT_SILENCE_MS: u32 = 200;
+/// IndexTTS v1.5's `remove_long_silence` uses acoustic code 52 and allows
+/// 30 consecutive occurrences (upstream commit abb14325e48b0a5e893e36c7db035b5ac1d6a4ae).
+pub const SILENCE_TOKEN: i32 = 52;
+pub const DEFAULT_MAX_CONSECUTIVE_SILENCE_TOKENS: usize = 30;
 /// IndexTTS E graph applies repeat suppression by multiplying logits by
 /// `repeat_penality`, so repeated token columns must be below 1.0.
 pub const DEFAULT_REPEAT_PENALTY: f32 = 0.9;
@@ -48,6 +52,7 @@ pub struct IndexTtsProviderReport {
 
 mod artifacts;
 pub mod audio;
+mod audio_quality;
 mod config;
 mod frontend;
 mod normalization_rules;
@@ -74,6 +79,7 @@ pub use tokenizer::{
 
 #[cfg(test)]
 pub(crate) use artifacts::MODEL_FILENAMES;
+pub(crate) use audio_quality::*;
 pub(crate) use frontend::*;
 pub(crate) use normalization_rules::*;
 pub(crate) use onnx::*;

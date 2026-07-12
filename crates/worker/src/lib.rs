@@ -78,7 +78,7 @@ impl WorkerState {
             node_id: self.node_id.clone(),
             resources: local_hardware::snapshot(),
             loaded_models: self.runtime.loaded_models().await,
-            queued_jobs: 0,
+            queued_jobs: self.runtime.queued_jobs(),
         }
     }
 
@@ -176,6 +176,7 @@ async fn infer(
     headers: HeaderMap,
     Json(task): Json<InferenceTask>,
 ) -> impl IntoResponse {
+    let handler_started = std::time::Instant::now();
     let expected = state.session_token().await;
     let provided = headers
         .get(WORKER_TOKEN_HEADER)
@@ -187,7 +188,17 @@ async fn infer(
         )
             .into_response();
     }
-    match state.runtime.infer(task).await {
+    let request_id = task.id;
+    let result = state.runtime.infer(task).await;
+    tracing::info!(
+        request_id = %request_id,
+        handler_total_ms = handler_started.elapsed().as_millis() as u64,
+        queued_jobs = state.runtime.queued_jobs(),
+        active_jobs = state.runtime.active_jobs(),
+        success = result.is_ok(),
+        "worker inference handler completed"
+    );
+    match result {
         Ok(output) => (StatusCode::OK, Json(json!(output))).into_response(),
         Err(err) => (
             StatusCode::NOT_IMPLEMENTED,

@@ -267,6 +267,8 @@ impl ControllerState {
     }
 
     async fn forward_to_worker(&self, task: InferenceTask) -> Result<InferenceOutput> {
+        let total_started = std::time::Instant::now();
+        let request_id = task.id;
         if let Some(store) = &self.store {
             store.record_job_state(&task, JobState::Queued, None, None)?;
         }
@@ -297,6 +299,7 @@ impl ControllerState {
             .cloned()
             .collect::<Vec<_>>();
         let worker = self.scheduler.select_worker(&model, &nodes).ok_or_else(|| InfraError::Unsupported("no registered worker can serve the requested model; controller does not load models".to_string()))?;
+        let schedule_ms = total_started.elapsed().as_millis() as u64;
         let worker_token = self
             .worker_session_tokens
             .read()
@@ -313,6 +316,7 @@ impl ControllerState {
             "{}/internal/infer",
             worker.registration.base_url.trim_end_matches('/')
         );
+        let http_started = std::time::Instant::now();
         let response = self
             .http
             .post(url)
@@ -321,6 +325,7 @@ impl ControllerState {
             .send()
             .await
             .map_err(|e| InfraError::Backend(format!("forward inference task to worker: {e}")))?;
+        let worker_response_headers_ms = http_started.elapsed().as_millis() as u64;
         if !response.status().is_success() {
             let text = response
                 .text()
@@ -332,13 +337,23 @@ impl ControllerState {
             }
             return Err(err);
         }
+        let body_started = std::time::Instant::now();
         let output = response
             .json::<InferenceOutput>()
             .await
             .map_err(|e| InfraError::Backend(format!("decode worker inference response: {e}")))?;
+        let response_body_decode_ms = body_started.elapsed().as_millis() as u64;
         if let Some(store) = &self.store {
             store.record_job_state(&task, JobState::Succeeded, Some(&output), None)?;
         }
+        tracing::info!(
+            request_id = %request_id,
+            schedule_ms,
+            worker_response_headers_ms,
+            response_body_decode_ms,
+            total_ms = total_started.elapsed().as_millis() as u64,
+            "controller worker dispatch completed"
+        );
         Ok(output)
     }
 
@@ -653,25 +668,33 @@ impl ControllerState {
         status.state = GenericTaskState::Running;
         status.updated_at = Utc::now();
         self.save_task(status.clone()).await?;
-        match self.forward_to_worker(task).await {
-            Ok(output) => {
-                let output = self.register_output_assets(&status.task_id, output)?;
-                status.files = output_files(&output);
-                status.output = Some(output);
-                status.error = None;
-                status.state = GenericTaskState::Succeeded;
-            }
-            Err(err) => {
-                status.error = Some(err.to_string());
-                status.state = GenericTaskState::Failed;
-                status.updated_at = Utc::now();
-                self.save_task(status.clone()).await?;
-                return Err(err);
-            }
+        let request_id = task.id;
+        let dispatch_started = std::time::Instant::now();
+        let result: Result<GenericTaskResult> = async {
+            let output = self.forward_to_worker(task).await?;
+            let output = self.register_output_assets(request_id, &status.task_id, output)?;
+            status.files = output_files(&output);
+            status.output = Some(output);
+            status.error = None;
+            status.state = GenericTaskState::Succeeded;
+            status.updated_at = Utc::now();
+            self.save_task(status.clone()).await?;
+            Ok(result_from_status(&status))
         }
-        status.updated_at = Utc::now();
-        self.save_task(status.clone()).await?;
-        Ok(result_from_status(&status))
+        .await;
+        if let Err(err) = &result {
+            status.error = Some(err.to_string());
+            status.state = GenericTaskState::Failed;
+            status.updated_at = Utc::now();
+            self.save_task(status.clone()).await?;
+        }
+        tracing::info!(
+            request_id = %request_id,
+            controller_dispatch_total_ms = dispatch_started.elapsed().as_millis() as u64,
+            success = result.is_ok(),
+            "controller generic task dispatch finished"
+        );
+        result
     }
 
     async fn fail_task_status(&self, status: &mut TaskStatus, err: &InfraError) -> Result<()> {
@@ -967,10 +990,15 @@ impl ControllerState {
 
     fn register_output_assets(
         &self,
+        request_id: Uuid,
         task_id: &str,
         output: InferenceOutput,
     ) -> Result<InferenceOutput> {
-        match output {
+        let started = std::time::Instant::now();
+        let mut source_read_ms = None;
+        let mut asset_write_hash_metadata_ms = None;
+        let mut error_stage = "none";
+        let result = match output {
             InferenceOutput::TtsAudio { mut audio } => {
                 if let Some(path) = audio.path.clone() {
                     let file_name = path
@@ -979,13 +1007,51 @@ impl ControllerState {
                         .map(safe_filename)
                         .unwrap_or_else(|| "audio.wav".to_string());
                     let asset_path = format!("tasks/{task_id}/outputs/{file_name}");
-                    let mut record = self.assets.record_for_existing(
+                    let source_read_started = std::time::Instant::now();
+                    let bytes = match std::fs::read(&path) {
+                        Ok(bytes) => bytes,
+                        Err(err) => {
+                            source_read_ms = Some(source_read_started.elapsed().as_millis() as u64);
+                            error_stage = "source_read";
+                            let result = Err(InfraError::io(Some(path), err));
+                            log_output_asset_completion(
+                                request_id,
+                                started,
+                                source_read_ms,
+                                asset_write_hash_metadata_ms,
+                                error_stage,
+                                false,
+                            );
+                            return result;
+                        }
+                    };
+                    source_read_ms = Some(source_read_started.elapsed().as_millis() as u64);
+                    let asset_write_started = std::time::Instant::now();
+                    let mut record = match self.assets.put(
                         AssetKind::Artifact,
                         &asset_path,
-                        &path,
                         audio.mime.clone().or_else(|| Some("audio/wav".to_string())),
                         Some(Utc::now() + chrono::Duration::hours(24)),
-                    )?;
+                        &bytes,
+                    ) {
+                        Ok(record) => record,
+                        Err(err) => {
+                            asset_write_hash_metadata_ms =
+                                Some(asset_write_started.elapsed().as_millis() as u64);
+                            error_stage = "asset_write_hash_metadata";
+                            log_output_asset_completion(
+                                request_id,
+                                started,
+                                source_read_ms,
+                                asset_write_hash_metadata_ms,
+                                error_stage,
+                                false,
+                            );
+                            return Err(err);
+                        }
+                    };
+                    asset_write_hash_metadata_ms =
+                        Some(asset_write_started.elapsed().as_millis() as u64);
                     self.decorate_asset(&mut record);
                     audio.uri = Some(record.uri);
                     audio.url = record.download_url;
@@ -994,8 +1060,36 @@ impl ControllerState {
                 Ok(InferenceOutput::TtsAudio { audio })
             }
             other => Ok(other),
-        }
+        };
+        log_output_asset_completion(
+            request_id,
+            started,
+            source_read_ms,
+            asset_write_hash_metadata_ms,
+            error_stage,
+            result.is_ok(),
+        );
+        result
     }
+}
+
+fn log_output_asset_completion(
+    request_id: Uuid,
+    started: std::time::Instant,
+    source_read_ms: Option<u64>,
+    asset_write_hash_metadata_ms: Option<u64>,
+    error_stage: &'static str,
+    success: bool,
+) {
+    tracing::info!(
+        request_id = %request_id,
+        source_read_ms,
+        asset_write_hash_metadata_ms,
+        error_stage,
+        success,
+        output_asset_total_ms = started.elapsed().as_millis() as u64,
+        "controller output asset registration completed"
+    );
 }
 
 enum UploadResponse {
@@ -1536,16 +1630,26 @@ impl AdminApi for ControllerState {
 #[async_trait]
 impl InferenceApi for ControllerState {
     async fn dispatch(&self, task: InferenceTask) -> Result<InferenceOutput> {
+        let started = std::time::Instant::now();
+        let request_id = task.id;
         let output_asset_task_id = task.id.to_string();
         let result = self
             .forward_to_worker(task.clone())
             .await
-            .and_then(|output| self.register_output_assets(&output_asset_task_id, output));
+            .and_then(|output| {
+                self.register_output_assets(request_id, &output_asset_task_id, output)
+            });
         if let Err(err) = &result {
             if let Some(store) = &self.store {
                 store.record_job_state(&task, JobState::Failed, None, Some(&err.to_string()))?;
             }
         }
+        tracing::info!(
+            request_id = %request_id,
+            controller_dispatch_total_ms = started.elapsed().as_millis() as u64,
+            success = result.is_ok(),
+            "controller inference dispatch finished"
+        );
         result
     }
 
@@ -1576,16 +1680,26 @@ impl OpenAiApi for ControllerState {
         Ok(self.registry.list().await)
     }
     async fn dispatch(&self, task: InferenceTask) -> Result<InferenceOutput> {
+        let started = std::time::Instant::now();
+        let request_id = task.id;
         let output_asset_task_id = task.id.to_string();
         let result = self
             .forward_to_worker(task.clone())
             .await
-            .and_then(|output| self.register_output_assets(&output_asset_task_id, output));
+            .and_then(|output| {
+                self.register_output_assets(request_id, &output_asset_task_id, output)
+            });
         if let Err(err) = &result {
             if let Some(store) = &self.store {
                 store.record_job_state(&task, JobState::Failed, None, Some(&err.to_string()))?;
             }
         }
+        tracing::info!(
+            request_id = %request_id,
+            controller_dispatch_total_ms = started.elapsed().as_millis() as u64,
+            success = result.is_ok(),
+            "controller OpenAI dispatch finished"
+        );
         result
     }
 }

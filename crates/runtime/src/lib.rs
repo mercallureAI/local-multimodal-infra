@@ -8,10 +8,14 @@ use local_core::{
 use local_error::{InfraError, Result};
 use std::{
     collections::HashMap,
-    sync::Arc,
+    panic::{catch_unwind, AssertUnwindSafe},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex as StdMutex,
+    },
     time::{Duration, Instant},
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 pub const DEFAULT_IDLE_UNLOAD_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -66,8 +70,10 @@ impl Drop for IdleMaintenanceLoopHandle {
 #[derive(Debug)]
 pub struct RuntimeManager {
     specs: HashMap<String, ModelSpec>,
-    loaded: Mutex<HashMap<String, LoadedEntry>>,
+    loaded: Mutex<HashMap<String, Arc<ModelSlot>>>,
     config: RuntimeManagerConfig,
+    queued_jobs: Arc<AtomicUsize>,
+    active_jobs: Arc<AtomicUsize>,
 }
 
 impl RuntimeManager {
@@ -79,26 +85,89 @@ impl RuntimeManager {
                 .collect(),
             loaded: Mutex::new(HashMap::new()),
             config,
+            queued_jobs: Arc::new(AtomicUsize::new(0)),
+            active_jobs: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     pub async fn infer(&self, task: InferenceTask) -> Result<InferenceOutput> {
-        self.maintain_idle().await?;
+        let total_started = Instant::now();
         let spec = self.resolve_spec(&task)?;
         let model_id = spec.id.clone();
-        let mut loaded = self.loaded.lock().await;
-        if !loaded.contains_key(&model_id) {
-            let entry = LoadedEntry::load(&spec)?;
-            loaded.insert(model_id.clone(), entry);
-        }
-        let entry = loaded.get_mut(&model_id).ok_or_else(|| {
-            InfraError::Runtime(format!("model `{model_id}` failed to enter loaded cache"))
-        })?;
-        entry.state = ModelState::Busy;
-        let result = entry.model.infer(&task);
-        entry.last_used = Instant::now();
-        entry.last_cache_released_at = None;
-        entry.state = ModelState::Idle;
+        let slot = {
+            let mut loaded = self.loaded.lock().await;
+            loaded
+                .entry(model_id.clone())
+                .or_insert_with(|| Arc::new(ModelSlot::new(spec.runtime.max_concurrency)))
+                .clone()
+        };
+
+        let queued = QueuedGuard::new(self.queued_jobs.clone());
+        let queue_started = Instant::now();
+        let permit = slot
+            .admission
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| InfraError::Runtime(format!("model `{model_id}` admission closed")))?;
+        let queue_wait = queue_started.elapsed();
+        queued.finish();
+        let active = ActiveGuard::new(self.active_jobs.clone());
+        let request_id = task.id;
+        let completed_model_id = model_id.clone();
+        let execution_started = Instant::now();
+        let result = tokio::task::spawn_blocking(move || {
+            let _active = active;
+            let _permit = permit;
+            let acquire_started = Instant::now();
+            let mut entry = slot
+                .entry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let acquire = acquire_started.elapsed();
+            let load_started = Instant::now();
+            if entry.is_none() {
+                *entry = Some(LoadedEntry::load(&spec)?);
+            }
+            let load = load_started.elapsed();
+            let loaded = entry.as_mut().ok_or_else(|| {
+                InfraError::Runtime(format!("model `{model_id}` failed to enter loaded cache"))
+            })?;
+            loaded.state = ModelState::Busy;
+            let infer_started = Instant::now();
+            let (result, panicked) = infer_model_catching_panic(loaded, &task, &model_id);
+            let execution = infer_started.elapsed();
+            tracing::info!(
+                request_id = %request_id,
+                model_id,
+                acquire_ms = acquire.as_millis() as u64,
+                load_ms = load.as_millis() as u64,
+                execution_ms = execution.as_millis() as u64,
+                success = result.is_ok(),
+                panicked,
+                "runtime inference stages"
+            );
+            if panicked {
+                // Never reuse an adapter whose mutable session state may have
+                // been corrupted. The canonical slot remains in the map and
+                // the next admitted request will reload it.
+                let suspect = entry.take();
+                drop(entry);
+                drop(suspect);
+            }
+            result
+        })
+        .await
+        .map_err(|err| InfraError::Runtime(format!("model inference task failed: {err}")))?;
+        tracing::info!(
+            request_id = %request_id,
+            model_id = completed_model_id,
+            queue_wait_ms = queue_wait.as_millis() as u64,
+            execution_total_ms = execution_started.elapsed().as_millis() as u64,
+            total_ms = total_started.elapsed().as_millis() as u64,
+            success = result.is_ok(),
+            "runtime inference completed"
+        );
         result
     }
 
@@ -127,16 +196,50 @@ impl RuntimeManager {
     }
 
     pub async fn loaded_models(&self) -> Vec<String> {
-        self.loaded.lock().await.keys().cloned().collect()
+        let slots = self.slot_snapshot().await;
+        slots
+            .into_iter()
+            .filter_map(|(id, slot)| match slot.entry.try_lock() {
+                Ok(entry) => entry.as_ref().map(|_| id),
+                // A contended slot is loading or executing and therefore is
+                // truthfully considered loaded/busy without blocking heartbeat.
+                Err(std::sync::TryLockError::WouldBlock) => Some(id),
+                Err(std::sync::TryLockError::Poisoned(err)) => {
+                    err.into_inner().as_ref().map(|_| id)
+                }
+            })
+            .collect()
     }
 
     pub async fn states(&self) -> HashMap<String, ModelState> {
+        let slots = self.slot_snapshot().await;
+        slots
+            .into_iter()
+            .filter_map(|(id, slot)| match slot.entry.try_lock() {
+                Ok(entry) => entry.as_ref().map(|entry| (id, entry.state)),
+                Err(std::sync::TryLockError::WouldBlock) => Some((id, ModelState::Busy)),
+                Err(std::sync::TryLockError::Poisoned(err)) => {
+                    err.into_inner().as_ref().map(|entry| (id, entry.state))
+                }
+            })
+            .collect()
+    }
+
+    async fn slot_snapshot(&self) -> Vec<(String, Arc<ModelSlot>)> {
         self.loaded
             .lock()
             .await
             .iter()
-            .map(|(k, v)| (k.clone(), v.state))
+            .map(|(id, slot)| (id.clone(), slot.clone()))
             .collect()
+    }
+
+    pub fn queued_jobs(&self) -> usize {
+        self.queued_jobs.load(Ordering::Relaxed)
+    }
+
+    pub fn active_jobs(&self) -> usize {
+        self.active_jobs.load(Ordering::Relaxed)
     }
 
     pub async fn unload_idle(&self) -> Result<()> {
@@ -146,12 +249,32 @@ impl RuntimeManager {
     pub async fn maintain_idle(&self) -> Result<()> {
         let mut loaded = self.loaded.lock().await;
         let now = Instant::now();
-        loaded.retain(|id, entry| {
+        let mut removed = Vec::new();
+        loaded.retain(|id, slot| {
+            // Reserving admission is atomic. Arc::strong_count also prevents
+            // removing a slot already handed to an inference that has not yet
+            // acquired admission. Together with holding the map lock, this
+            // preserves exactly one canonical slot per model.
+            if Arc::strong_count(slot) != 1 {
+                return true;
+            }
+            let Ok(_maintenance_permit) = slot.admission.clone().try_acquire_owned() else {
+                return true;
+            };
+            let Ok(mut guard) = slot.entry.try_lock() else {
+                return true;
+            };
+            let Some(entry) = guard.as_mut() else {
+                return true;
+            };
             let can_unload = entry.state == ModelState::Idle
                 && now.duration_since(entry.last_used) >= self.config.model_idle_ttl
                 && now.duration_since(entry.loaded_at) >= self.config.min_residency;
             if can_unload {
                 tracing::info!(model_id = id, "unloading idle model");
+                if let Some(entry) = guard.take() {
+                    removed.push(entry);
+                }
                 return false;
             }
 
@@ -164,6 +287,10 @@ impl RuntimeManager {
             }
             true
         });
+        drop(loaded);
+        // ORT session destruction can be expensive. Never perform it while the
+        // global slot-map lock is held.
+        drop(removed);
         self.note_memory_pressure_policy();
         Ok(())
     }
@@ -199,6 +326,98 @@ impl RuntimeManager {
                 model_id: "<auto>".to_string(),
                 reason: format!("no enabled model supports task {:?}", task.kind),
             })
+    }
+}
+
+fn infer_model_catching_panic(
+    loaded: &mut LoadedEntry,
+    task: &InferenceTask,
+    model_id: &str,
+) -> (Result<InferenceOutput>, bool) {
+    match catch_unwind(AssertUnwindSafe(|| loaded.model.infer(task))) {
+        Ok(result) => {
+            loaded.last_used = Instant::now();
+            loaded.last_cache_released_at = None;
+            loaded.state = ModelState::Idle;
+            (result, false)
+        }
+        Err(_) => (
+            Err(InfraError::Runtime(format!(
+                "model `{model_id}` panicked during inference; invalidating loaded instance"
+            ))),
+            true,
+        ),
+    }
+}
+
+#[derive(Debug)]
+struct ModelSlot {
+    entry: StdMutex<Option<LoadedEntry>>,
+    admission: Arc<Semaphore>,
+}
+
+impl ModelSlot {
+    fn new(configured_max_concurrency: usize) -> Self {
+        if configured_max_concurrency == 0 {
+            tracing::warn!(
+                configured_max_concurrency,
+                effective_max_concurrency = 1,
+                "max_concurrency must be positive; using safe serial per-model admission"
+            );
+        } else if configured_max_concurrency != 1 {
+            tracing::warn!(
+                configured_max_concurrency,
+                effective_max_concurrency = 1,
+                "loaded adapters expose mutable sessions; using safe serial per-model admission"
+            );
+        }
+        Self {
+            entry: StdMutex::new(None),
+            admission: Arc::new(Semaphore::new(1)),
+        }
+    }
+}
+
+struct QueuedGuard {
+    counter: Arc<AtomicUsize>,
+    active: bool,
+}
+
+impl QueuedGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self {
+            counter,
+            active: true,
+        }
+    }
+
+    fn finish(mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+        self.active = false;
+    }
+}
+
+impl Drop for QueuedGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.counter.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+struct ActiveGuard(Arc<AtomicUsize>);
+
+impl ActiveGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self(counter)
+    }
+}
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -305,11 +524,21 @@ enum LoadedModel {
     #[cfg(test)]
     Test {
         cache_releases: Arc<std::sync::atomic::AtomicUsize>,
+        panic_on_infer: Arc<std::sync::atomic::AtomicBool>,
     },
 }
 
 impl LoadedModel {
     fn infer(&mut self, task: &InferenceTask) -> Result<InferenceOutput> {
+        #[cfg(test)]
+        if let LoadedModel::Test { panic_on_infer, .. } = self {
+            if panic_on_infer.swap(false, Ordering::SeqCst) {
+                panic!("intentional test executor panic");
+            }
+            return Ok(InferenceOutput::Accepted {
+                job_id: task.id.to_string(),
+            });
+        }
         match (&mut *self, task.kind, &task.input) {
             (
                 LoadedModel::Yolo(adapter),
@@ -328,7 +557,12 @@ impl LoadedModel {
                     text,
                     reference_audio,
                 },
-            ) => adapter.synthesize_with_params(text, reference_audio.as_ref(), &task.params),
+            ) => adapter.synthesize_with_request_id(
+                task.id,
+                text,
+                reference_audio.as_ref(),
+                &task.params,
+            ),
             (_, kind, _) => Err(InfraError::Unsupported(format!(
                 "loaded adapter does not support task {kind:?}"
             ))),
@@ -344,7 +578,7 @@ impl LoadedModel {
                 );
             }
             #[cfg(test)]
-            LoadedModel::Test { cache_releases } => {
+            LoadedModel::Test { cache_releases, .. } => {
                 cache_releases.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
         }
@@ -564,6 +798,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn per_model_admission_serializes_same_model_but_not_unrelated_models() {
+        let first = Arc::new(ModelSlot::new(1));
+        let unrelated = Arc::new(ModelSlot::new(1));
+        let held = first
+            .admission
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("first permit");
+
+        assert!(
+            timeout(
+                Duration::from_millis(20),
+                first.admission.clone().acquire_owned()
+            )
+            .await
+            .is_err(),
+            "same-model request must queue"
+        );
+        assert!(timeout(
+            Duration::from_millis(20),
+            unrelated.admission.clone().acquire_owned()
+        )
+        .await
+        .expect("unrelated model must not queue")
+        .is_ok());
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn maintenance_cannot_remove_a_slot_already_observed_by_inference() {
+        let runtime = RuntimeManager::new(Vec::new(), test_runtime_config(0, 0, 0));
+        let slot =
+            test_loaded_entry_with_state(Instant::now() - Duration::from_secs(1), ModelState::Idle);
+        runtime
+            .loaded
+            .lock()
+            .await
+            .insert("canonical".to_string(), slot.clone());
+        let observed_by_inference = slot.clone();
+
+        runtime.maintain_idle().await.expect("maintenance");
+
+        let canonical = runtime
+            .loaded
+            .lock()
+            .await
+            .get("canonical")
+            .cloned()
+            .expect("observed slot must remain canonical");
+        assert!(Arc::ptr_eq(&canonical, &observed_by_inference));
+    }
+
+    #[tokio::test]
+    async fn state_queries_never_wait_for_busy_entry_mutex() {
+        let runtime = RuntimeManager::new(Vec::new(), RuntimeManagerConfig::default());
+        let busy = test_loaded_entry_with_state(Instant::now(), ModelState::Busy);
+        let unrelated = test_loaded_entry_with_state(Instant::now(), ModelState::Idle);
+        {
+            let mut loaded = runtime.loaded.lock().await;
+            loaded.insert("busy".to_string(), busy.clone());
+            loaded.insert("unrelated".to_string(), unrelated.clone());
+        }
+        let _busy_guard = busy.entry.lock().expect("busy entry");
+
+        let states = timeout(Duration::from_millis(20), runtime.states())
+            .await
+            .expect("state query must not block");
+        assert_eq!(states.get("busy"), Some(&ModelState::Busy));
+        assert_eq!(states.get("unrelated"), Some(&ModelState::Idle));
+        assert!(
+            unrelated.admission.clone().try_acquire_owned().is_ok(),
+            "heartbeat/state query must not stop unrelated admission"
+        );
+    }
+
+    #[test]
+    fn panic_invalidates_test_model_without_poisoning_slot() {
+        let panic_on_infer = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut entry = LoadedEntry {
+            model: LoadedModel::Test {
+                cache_releases: Arc::new(AtomicUsize::new(0)),
+                panic_on_infer,
+            },
+            loaded_at: Instant::now(),
+            last_used: Instant::now(),
+            last_cache_released_at: None,
+            state: ModelState::Busy,
+        };
+        let task = InferenceTask::new(
+            TaskKind::TtsSynthesize,
+            None,
+            InferenceInput::TtsSynthesize {
+                text: "not logged".to_string(),
+                reference_audio: None,
+            },
+        );
+
+        let (result, panicked) = infer_model_catching_panic(&mut entry, &task, "test");
+        assert!(panicked);
+        assert!(result
+            .expect_err("typed panic error")
+            .to_string()
+            .contains("panicked"));
+        // The caller invalidates this entry; proving the panic was caught also
+        // proves it cannot poison the canonical slot mutex.
+    }
+
+    #[test]
+    fn queue_and_active_guards_decrement_on_drop() {
+        let queued = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        {
+            let _queued_guard = QueuedGuard::new(queued.clone());
+            let _active_guard = ActiveGuard::new(active.clone());
+            assert_eq!(queued.load(Ordering::Relaxed), 1);
+            assert_eq!(active.load(Ordering::Relaxed), 1);
+        }
+        assert_eq!(queued.load(Ordering::Relaxed), 0);
+        assert_eq!(active.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
     async fn disabled_indextts_model_is_gated_before_artifact_loading() {
         let runtime = RuntimeManager::new(
             vec![index_tts_spec(false, PathBuf::from("definitely-missing"))],
@@ -709,7 +1066,7 @@ mod tests {
         }
     }
 
-    fn test_loaded_entry_with_state(last_used: Instant, state: ModelState) -> LoadedEntry {
+    fn test_loaded_entry_with_state(last_used: Instant, state: ModelState) -> Arc<ModelSlot> {
         test_loaded_entry_with_state_and_counter(last_used, state, Arc::new(AtomicUsize::new(0)))
     }
 
@@ -717,14 +1074,20 @@ mod tests {
         last_used: Instant,
         state: ModelState,
         cache_releases: Arc<AtomicUsize>,
-    ) -> LoadedEntry {
-        LoadedEntry {
-            model: LoadedModel::Test { cache_releases },
-            loaded_at: last_used,
-            last_used,
-            last_cache_released_at: None,
-            state,
-        }
+    ) -> Arc<ModelSlot> {
+        Arc::new(ModelSlot {
+            entry: StdMutex::new(Some(LoadedEntry {
+                model: LoadedModel::Test {
+                    cache_releases,
+                    panic_on_infer: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                },
+                loaded_at: last_used,
+                last_used,
+                last_cache_released_at: None,
+                state,
+            })),
+            admission: Arc::new(Semaphore::new(1)),
+        })
     }
 
     fn test_spec(id: &str, adapter: AdapterKind, enabled: bool, path: PathBuf) -> ModelSpec {
