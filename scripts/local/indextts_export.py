@@ -32,11 +32,14 @@ from typing import Any, Iterable, Sequence
 
 
 MODEL_FILES = [f"IndexTTS_{stage}.onnx" for stage in "ABCDEF"]
+REQUIRED_ONNX_FILES = [*MODEL_FILES, "IndexTTS_E_Prefill.onnx"]
 SUPPORTED_PRECISION = "cpu-fp32"
 SAMPLE_RATE = 24_000
 START_TOKEN = 8192
 STOP_TOKEN = 8193
-MAX_GENERATE_LENGTH = 800
+MAX_GENERATE_LENGTH = 600
+SPLIT_CONTRACT_VERSION = 2
+EXPORTER_METADATA_FILES = ["manifest.json", "manifest.yaml", "bpe.model"]
 
 RAW_EXPORT_REQUIRED_MODULES = [
     ("torch", "torch", "pip install torch --index-url https://download.pytorch.org/whl/cpu"),
@@ -150,6 +153,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.check_deps:
         return dependency_check_command(args)
 
+    preflight_error = preflight_export(args)
+    if preflight_error is not None:
+        print(preflight_error, file=sys.stderr)
+        return 2
     args.output_dir.mkdir(parents=True, exist_ok=True)
     notes.append(
         "A-F graph contract: A(reference audio conds), B(text ids), C(GPT token embedding), "
@@ -157,6 +164,12 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     status = "unsupported"
+    # Invalidate certification only after non-mutating preflight authorizes mutation.
+    try:
+        write_invalidation_manifests(args.output_dir, "export started; destination certification invalidated")
+    except Exception as exc:
+        print(f"unable to invalidate destination certification safely: {exc}", file=sys.stderr)
+        return 2
     try:
         ready = False
         if args.mode in {"auto", "package"}:
@@ -165,23 +178,45 @@ def main(argv: list[str] | None = None) -> int:
         if not ready and args.mode in {"auto", "raw-export"}:
             ready = raw_export(args, notes)
         if not ready and args.mode == "local-export":
-            ready = invoke_local_exporter(args, notes)
+            raise UnsupportedExport(
+                "local-export cannot certify split contract v2; use raw-export from the pinned official checkpoint"
+            )
         if not ready:
             raise UnsupportedExport(
-                "No complete IndexTTS_A.onnx ... IndexTTS_F.onnx set was produced. "
-                "Use --mode raw-export for official local PyTorch weights, provide pre-exported A-F ONNX files, "
-                "or run --mode local-export with an explicit --local-export-entry MODULE:FUNCTION."
+                "No complete seven-graph IndexTTS split-contract-v2 set was produced. "
+                "Use --mode raw-export with the pinned official PyTorch checkpoint."
             )
         apply_precision(args, notes)
+        validate_ready_export(args)
         status = "ready"
     except (UnsupportedExport, DependencyError) as exc:
         notes.append(str(exc))
         status = "unsupported"
 
-    copy_bpe(args, notes)
-    manifest = build_manifest(args, status, notes)
-    write_yaml(args.output_dir / "manifest.yaml", manifest)
-    write_json(args.output_dir / "manifest.json", manifest)
+    try:
+        copy_bpe(args, notes)
+    except Exception as exc:
+        notes.append(f"copy tokenizer failed: {exc}")
+        status = "unsupported"
+    try:
+        manifest = build_manifest(args, status, notes)
+        atomic_write_text(args.output_dir / "manifest.yaml", to_yaml(manifest))
+        atomic_write_text(
+            args.output_dir / "manifest.json",
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        )
+    except Exception as exc:
+        status = "unsupported"
+        notes.append(f"writing enriched export manifest failed: {exc}")
+        try:
+            write_invalidation_manifests(args.output_dir, notes[-1])
+        except Exception as invalidation_exc:
+            print(
+                f"unable to preserve unsupported destination status: {invalidation_exc}",
+                file=sys.stderr,
+            )
+        print("IndexTTS export failed while writing diagnostics.", file=sys.stderr)
+        return 2
     validate_layout(args.output_dir, require_onnx=(status == "ready"))
 
     if status == "unsupported":
@@ -189,6 +224,55 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print(f"IndexTTS artifacts prepared under {args.output_dir}")
     return 0
+
+
+def preflight_export(args: argparse.Namespace) -> str | None:
+    if args.mode in {"package", "local-export"}:
+        return (
+            f"{args.mode} is disabled because it cannot certify split contract v2; "
+            "destination was not modified"
+        )
+    if not args.overwrite:
+        existing = exporter_owned_destinations(args.output_dir)
+        if existing:
+            return (
+                "exporter-owned destination files already exist and --overwrite was not supplied; "
+                "destination was not modified: " + ", ".join(existing)
+            )
+    return None
+
+
+def exporter_owned_destinations(output_dir: Path) -> list[str]:
+    """Return only destinations this exporter creates or replaces."""
+    owned = []
+    for name in [*REQUIRED_ONNX_FILES, *EXPORTER_METADATA_FILES]:
+        if (output_dir / name).exists():
+            owned.append(name)
+    for onnx_name in REQUIRED_ONNX_FILES:
+        # torch.onnx uses both a single `.data` file and numbered `.data.*`
+        # shards. Keep this pattern tied to an exact exporter graph name.
+        for sidecar in sorted(output_dir.glob(f"{onnx_name}.data*")):
+            if sidecar.name not in owned:
+                owned.append(sidecar.name)
+    return owned
+
+
+def write_invalidation_manifests(output_dir: Path, reason: str) -> None:
+    diagnostic = {
+        "model_family": "index_tts",
+        "adapter": "index_tts",
+        "status": "unsupported",
+        "notes": [reason],
+        "invalidated_unix": int(time.time()),
+    }
+    atomic_write_text(output_dir / "manifest.yaml", to_yaml(diagnostic))
+    atomic_write_text(output_dir / "manifest.json", json.dumps(diagnostic, indent=2) + "\n")
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(text, encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def validate_args(args: argparse.Namespace) -> None:
@@ -284,20 +368,10 @@ def require_raw_export_dependencies(args: argparse.Namespace) -> None:
 
 
 def package_existing_onnx(args: argparse.Namespace, notes: list[str]) -> PackageResult:
-    candidates: list[Path] = [args.source_model_dir]
-    found = next(
-        (root for root in candidates if all((root / name).exists() for name in MODEL_FILES)),
-        None,
+    notes.append(
+        "package mode cannot certify or invent split contract v2; re-export from the pinned original PyTorch checkpoint"
     )
-    if found is None:
-        return PackageResult(False)
-    source_root = found
-    for filename in MODEL_FILES:
-        copy_one(source_root / filename, args.output_dir / filename, args.overwrite)
-    for data_file in source_root.glob("*.onnx.data"):
-        copy_one(data_file, args.output_dir / data_file.name, args.overwrite)
-    notes.append(f"packaged pre-exported FP32 ONNX files from {source_root}")
-    return PackageResult(True)
+    return PackageResult(False)
 
 
 def raw_export(args: argparse.Namespace, notes: list[str]) -> bool:
@@ -307,9 +381,9 @@ def raw_export(args: argparse.Namespace, notes: list[str]) -> bool:
         exporter.export_all()
     except Exception as exc:  # pragma: no cover - real model/export dependent
         raise UnsupportedExport(f"raw PyTorch export failed: {exc}") from exc
-    complete = all((args.output_dir / name).exists() for name in MODEL_FILES)
+    complete = all((args.output_dir / name).exists() for name in REQUIRED_ONNX_FILES)
     if complete:
-        notes.append("raw PyTorch export produced IndexTTS_A.onnx ... IndexTTS_F.onnx")
+        notes.append("raw PyTorch export produced the complete seven-graph split-contract-v2 set")
     return complete
 
 
@@ -334,7 +408,7 @@ class RawIndexTtsExporter:
             sys.path[:] = old_path
 
     def _check_targets(self) -> None:
-        existing = [name for name in MODEL_FILES if (self.args.output_dir / name).exists()]
+        existing = [name for name in REQUIRED_ONNX_FILES if (self.args.output_dir / name).exists()]
         if existing and not self.args.overwrite:
             raise UnsupportedExport(
                 "raw export target files already exist and --overwrite was not supplied: " + ", ".join(existing)
@@ -494,7 +568,29 @@ class RawIndexTtsExporter:
 
     def _export_e(self, torch: Any, gpt: Any, heads: int, head_dim: int, hidden: int, mel_len: int, dtype: Any) -> None:
         layers = int(gpt.layers)
-        module = IndexTtsE(gpt, layers).to(self.args.device)
+        prefill = IndexTtsE(gpt, layers, prefill=True).to(self.args.device)
+        hidden_state = torch.zeros((1, mel_len, hidden), dtype=dtype, device=self.args.device)
+        attention_mask = torch.ones((1, mel_len), dtype=torch.int64, device=self.args.device)
+        prefill_outputs: list[str] = []
+        prefill_axes = {
+            "hidden_state": {1: "ids_len"},
+            "attention_mask": {1: "ids_len"},
+        }
+        for idx in range(layers):
+            prefill_outputs.extend([f"out_key_{idx}", f"out_value_{idx}"])
+            prefill_axes[f"out_key_{idx}"] = {2: "next_past_len"}
+            prefill_axes[f"out_value_{idx}"] = {2: "next_past_len"}
+        prefill_outputs.extend(["last_hidden_state", "raw_logits"])
+        self._export_onnx(
+            prefill,
+            (hidden_state, attention_mask),
+            "IndexTTS_E_Prefill.onnx",
+            ["hidden_state", "attention_mask"],
+            prefill_outputs,
+            prefill_axes,
+        )
+
+        module = IndexTtsE(gpt, layers, prefill=False).to(self.args.device)
         inputs: list[Any] = []
         input_names: list[str] = []
         dynamic_axes: dict[str, dict[int, str]] = {}
@@ -513,15 +609,11 @@ class RawIndexTtsExporter:
 
         inputs.extend(
             [
-                torch.ones((1,), dtype=torch.int64, device=self.args.device),
-                torch.ones((1, int(gpt.number_mel_codes)), dtype=dtype, device=self.args.device),
-                torch.tensor([mel_len], dtype=torch.int64, device=self.args.device),
-                torch.zeros((1, mel_len, hidden), dtype=dtype, device=self.args.device),
-                torch.ones((1, mel_len + 1), dtype=torch.int64, device=self.args.device),
+                torch.zeros((1, 1, hidden), dtype=dtype, device=self.args.device),
+                torch.ones((1, 2), dtype=torch.int64, device=self.args.device),
             ]
         )
-        input_names.extend(["history_len", "repeat_penality", "ids_len", "hidden_state", "attention_mask"])
-        dynamic_axes["repeat_penality"] = {1: "mel_code_size"}
+        input_names.extend(["hidden_state", "attention_mask"])
         dynamic_axes["hidden_state"] = {1: "ids_len"}
         dynamic_axes["attention_mask"] = {1: "total_seq_len"}
 
@@ -530,8 +622,9 @@ class RawIndexTtsExporter:
             output_names.extend([f"out_key_{idx}", f"out_value_{idx}"])
             dynamic_axes[f"out_key_{idx}"] = {2: "next_past_len"}
             dynamic_axes[f"out_value_{idx}"] = {2: "next_past_len"}
-        output_names.extend(["kv_seq_len", "last_hidden_state", "max_logit_id"])
+        output_names.extend(["last_hidden_state", "raw_logits"])
         dynamic_axes["last_hidden_state"] = {1: "one_or_ids"}
+        dynamic_axes["raw_logits"] = {1: "one_or_ids"}
         self._export_onnx(module, tuple(inputs), "IndexTTS_E.onnx", input_names, output_names, dynamic_axes)
 
     def _export_f(self, torch: Any, bigvgan: Any, hidden: int, mel_len: int, dtype: Any) -> None:
@@ -879,21 +972,26 @@ class IndexTtsD:
 
 
 class IndexTtsE:
-    def __new__(cls, gpt: Any, layers: int):
+    def __new__(cls, gpt: Any, layers: int, prefill: bool = False):
         import torch
 
         class _IndexTtsE(torch.nn.Module):
-            def __init__(self, gpt_model: Any, layer_count: int):
+            def __init__(self, gpt_model: Any, layer_count: int, is_prefill: bool):
                 super().__init__()
                 self.gpt = gpt_model
                 self.layer_count = layer_count
+                self.prefill = is_prefill
 
             def forward(self, *inputs):
-                past_inputs = inputs[: self.layer_count * 2]
-                history_len, repeat_penality, ids_len, hidden_state, attention_mask = inputs[self.layer_count * 2 :]
-                past = tuple(
-                    (past_inputs[idx * 2], past_inputs[idx * 2 + 1]) for idx in range(self.layer_count)
-                )
+                if self.prefill:
+                    hidden_state, attention_mask = inputs
+                    past = None
+                else:
+                    past_inputs = inputs[: self.layer_count * 2]
+                    hidden_state, attention_mask = inputs[self.layer_count * 2 :]
+                    past = tuple(
+                        (past_inputs[idx * 2], past_inputs[idx * 2 + 1]) for idx in range(self.layer_count)
+                    )
                 transformer_outputs = self.gpt.gpt(
                     inputs_embeds=hidden_state,
                     past_key_values=past,
@@ -904,15 +1002,12 @@ class IndexTtsE:
                 present = transformer_outputs.past_key_values
                 last_hidden = self.gpt.final_norm(transformer_outputs.last_hidden_state[:, -1:, :])
                 logits = self.gpt.mel_head(last_hidden)
-                penalties = repeat_penality.to(logits.dtype).unsqueeze(1)
-                max_logit_id = torch.argmax(logits * penalties, dim=-1).to(torch.int32).reshape(1)
-                kv_seq_len = history_len.to(torch.long).reshape(1) + ids_len.to(torch.long).reshape(1)
                 flat_present = []
                 for key, value in present:
                     flat_present.extend([key, value])
-                return (*flat_present, kv_seq_len, last_hidden, max_logit_id)
+                return (*flat_present, last_hidden, logits)
 
-        return _IndexTtsE(gpt, layers)
+        return _IndexTtsE(gpt, layers, prefill)
 
 
 class IndexTtsF:
@@ -951,41 +1046,9 @@ class IndexTtsF:
 
 
 def invoke_local_exporter(args: argparse.Namespace, notes: list[str]) -> bool:
-    """Invoke a project-local exporter without vendoring upstream code."""
-    entries = list(args.local_export_entry)
-    if not entries:
-        notes.append(
-            "local-export mode requires at least one explicit --local-export-entry MODULE:FUNCTION; "
-            "no default exporter entries are imported to avoid side effects in the official checkout"
-        )
-        return False
-    old_path = list(sys.path)
-    sys.path.insert(0, str(args.index_tts_project.resolve()))
-    try:
-        for entry in entries:
-            try:
-                func = load_export_callable(entry)
-            except Exception as exc:  # pragma: no cover - project-dependent imports
-                notes.append(f"local exporter {entry} unavailable: {exc}")
-                continue
-            try:
-                notes.append(f"invoking local exporter {entry}")
-                result = call_exporter(func, args)
-                source = Path(result) if result else args.output_dir
-                if source != args.output_dir and all((source / name).exists() for name in MODEL_FILES):
-                    for filename in MODEL_FILES:
-                        copy_one(source / filename, args.output_dir / filename, args.overwrite)
-                    for data_file in source.glob("*.onnx.data"):
-                        copy_one(data_file, args.output_dir / data_file.name, args.overwrite)
-                if all((args.output_dir / name).exists() for name in MODEL_FILES):
-                    notes.append(f"local exporter {entry} produced A-F ONNX files")
-                    return True
-                notes.append(f"local exporter {entry} returned but A-F ONNX files were incomplete")
-            except Exception as exc:  # pragma: no cover - project-dependent exports
-                notes.append(f"local exporter {entry} failed: {exc}")
-        return False
-    finally:
-        sys.path[:] = old_path
+    """Disabled: arbitrary local exporters cannot certify split contract v2."""
+    notes.append("local-export is disabled because it cannot certify split contract v2")
+    return False
 
 
 def load_export_callable(entry: str):
@@ -1051,7 +1114,7 @@ def index_tts_config_metadata(cfg_path: Path) -> dict[str, Any]:
     return {
         "start_token": positive_int(gpt.get("start_mel_token")) or START_TOKEN,
         "stop_token": positive_int(gpt.get("stop_mel_token")) or STOP_TOKEN,
-        "max_generate_length": positive_int(gpt.get("max_mel_tokens")) or MAX_GENERATE_LENGTH,
+        "max_generate_length": MAX_GENERATE_LENGTH,
         "mel_code_size": number_mel_codes,
         # The Rust adapter uses vocab_size as a fallback for repeat_penality width, so keep it aligned
         # with mel code size and expose text_vocab_size separately when present.
@@ -1128,23 +1191,17 @@ def build_manifest(args: argparse.Namespace, status: str, notes: list[str]) -> d
     optional.extend(path.name for path in sorted(args.output_dir.glob("*.onnx.data")))
     cfg_path = args.source_model_dir / "config.yaml"
     cfg_meta = index_tts_config_metadata(cfg_path)
-    return {
+    source_provenance = read_source_provenance(args.source_model_dir.parent / "provenance.json")
+    manifest = {
         "model_family": "index_tts",
         "adapter": "index_tts",
         "sample_rate": SAMPLE_RATE,
-        "start_token": cfg_meta["start_token"],
-        "stop_token": cfg_meta["stop_token"],
-        "max_generate_length": cfg_meta["max_generate_length"],
-        "mel_code_size": cfg_meta["mel_code_size"],
-        "vocab_size": cfg_meta["vocab_size"],
-        "text_vocab_size": cfg_meta["text_vocab_size"],
         "precision": SUPPORTED_PRECISION,
-        "precision_policy": "fp32-only; cpu-q4 and gpu-fp16 paths are deprecated and ignored",
         "device": args.device,
         "source_model_dir": str(args.source_model_dir),
         "index_tts_project": str(args.index_tts_project),
         "source_config": cfg_meta["config_source"],
-        "files": [*MODEL_FILES, "bpe.model", "manifest.yaml", "manifest.json"],
+        "files": [*MODEL_FILES, "IndexTTS_E_Prefill.onnx", "bpe.model", "manifest.yaml", "manifest.json"],
         "optional_files": optional,
         "artifacts": artifacts,
         "export_provenance": {
@@ -1157,14 +1214,210 @@ def build_manifest(args: argparse.Namespace, status: str, notes: list[str]) -> d
             "created_unix": int(time.time()),
             "python": sys.version.split()[0],
             "platform": platform.platform(),
+            "source": source_provenance,
         },
         "status": status,
         "notes": notes,
     }
+    if status != "ready":
+        return manifest
+    manifest.update({
+        "split_contract_version": SPLIT_CONTRACT_VERSION,
+        "graph_contract": {
+            "cache_mode": "prefill_decode",
+            "cache_layout": "hf_bhsd",
+            "layers": 24,
+            "dtype": "float32",
+            "batch": 1,
+            "heads": 20,
+            "cache_sequence_axis": 2,
+            "head_dim": 64,
+            "initial_cache_length": 0,
+            "attention_mask": {"rank": 2, "dtype": "int64"},
+            "logits": {"name": "raw_logits", "rank": 3, "shape": [1, 1, 8194], "selection": "runtime"},
+        },
+        "generation_policy": {
+            "version": 1,
+            "algorithm": "seeded_top_k_top_p",
+            "num_beams": 1,
+            "source_num_beams": 3,
+            "top_k": 30,
+            "top_p": 0.8,
+            "temperature": 1.0,
+            "repetition_penalty": 10.0,
+            "repetition_scope": "mel_bos_and_full_generated_history",
+            "default_seed": 0,
+            "max_new_mel_tokens": 600,
+            "start_token": 8192,
+            "stop_token": 8193,
+            "silence_token": 52,
+        },
+        "start_token": cfg_meta["start_token"],
+        "stop_token": cfg_meta["stop_token"],
+        "max_generate_length": cfg_meta["max_generate_length"],
+        "mel_code_size": cfg_meta["mel_code_size"],
+        "vocab_size": cfg_meta["vocab_size"],
+        "text_vocab_size": cfg_meta["text_vocab_size"],
+        "precision_policy": "fp32-only; cpu-q4 and gpu-fp16 paths are deprecated and ignored",
+    })
+    return manifest
+
+
+def read_source_provenance(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"path": None}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    model = data.get("model", {})
+    code = data.get("code", {})
+    return {
+        "path": str(path),
+        "sha256": sha256_file(path),
+        "model_repository": model.get("repository"),
+        "model_revision": model.get("revision"),
+        "code_repository": code.get("repository"),
+        "code_tag": code.get("tag"),
+        "code_commit": code.get("commit"),
+        "code_tree": code.get("tree"),
+        "model_license": model.get("license"),
+    }
+
+
+def validate_ready_export(args: argparse.Namespace) -> None:
+    provenance = read_source_provenance(args.source_model_dir.parent / "provenance.json")
+    expected = {
+        "model_repository": "IndexTeam/IndexTTS-1.5",
+        "model_revision": "25851a6036dfd3095bb70fb3c8f49217104672c3",
+        "code_tag": "v1.5.0",
+        "code_commit": "9098497272d5803bae46cbaf5154cf2ba48f6866",
+        "code_tree": "aa0335ccaba54ac42d6d209dac56bb9a8b2e80a7",
+    }
+    mismatches = {key: (provenance.get(key), value) for key, value in expected.items() if provenance.get(key) != value}
+    if mismatches:
+        raise UnsupportedExport(f"source provenance does not match required pinned IndexTTS v1.5 export: {mismatches}")
+    validate_source_config(args.source_model_dir / "config.yaml")
+    missing = [name for name in REQUIRED_ONNX_FILES if not (args.output_dir / name).is_file()]
+    if missing:
+        raise UnsupportedExport(f"split-contract-v2 export is missing required graphs: {missing}")
+    import onnx
+    import onnxruntime as ort
+
+    sessions = {}
+    for name in REQUIRED_ONNX_FILES:
+        path = args.output_dir / name
+        try:
+            onnx.checker.check_model(str(path))
+        except Exception as exc:
+            raise UnsupportedExport(f"ONNX checker failed for {name}: {exc}") from exc
+        try:
+            sessions[name] = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+        except Exception as exc:
+            raise UnsupportedExport(f"ONNX Runtime failed to load {name}: {exc}") from exc
+    prefill = sessions["IndexTTS_E_Prefill.onnx"]
+    decode = sessions["IndexTTS_E.onnx"]
+    validate_e_session_metadata(prefill, prefill=True)
+    validate_e_session_metadata(decode, prefill=False)
+
+
+def validate_source_config(cfg_path: Path) -> None:
+    if not cfg_path.is_file():
+        raise UnsupportedExport(f"source config.yaml is missing: {cfg_path}")
+    cfg = read_config_yaml_best_effort(cfg_path)
+    gpt = cfg.get("gpt") if isinstance(cfg, dict) else None
+    if not isinstance(gpt, dict):
+        raise UnsupportedExport(f"source config.yaml has no gpt mapping: {cfg_path}")
+    expected = {
+        "layers": 24,
+        "heads": 20,
+        "model_dim": 1280,
+        "number_mel_codes": 8194,
+        "start_mel_token": START_TOKEN,
+        "stop_mel_token": STOP_TOKEN,
+    }
+    mismatches = {
+        key: (gpt.get(key), value)
+        for key, value in expected.items()
+        if positive_int(gpt.get(key)) != value
+    }
+    if 1280 // 20 != 64:
+        raise AssertionError("hardcoded IndexTTS v2 head dimension is inconsistent")
+    if mismatches:
+        raise UnsupportedExport(f"source config does not match the IndexTTS v2 ABI: {mismatches}")
+
+
+def validate_e_session_metadata(session: Any, *, prefill: bool) -> None:
+    label = "IndexTTS_E_Prefill.onnx" if prefill else "IndexTTS_E.onnx"
+    inputs = list(session.get_inputs())
+    outputs = list(session.get_outputs())
+    expected_inputs: list[tuple[str, str, list[Any]]] = []
+    if not prefill:
+        for index in range(24):
+            expected_inputs.extend(
+                [
+                    (f"in_key_{index}", "tensor(float)", [1, 20, "dynamic", 64]),
+                    (f"in_value_{index}", "tensor(float)", [1, 20, "dynamic", 64]),
+                ]
+            )
+    expected_inputs.extend(
+        [
+            ("hidden_state", "tensor(float)", [1, "dynamic", 1280]),
+            ("attention_mask", "tensor(int64)", [1, "dynamic"]),
+        ]
+    )
+    expected_outputs: list[tuple[str, str, list[Any]]] = []
+    for index in range(24):
+        expected_outputs.extend(
+            [
+                (f"out_key_{index}", "tensor(float)", [1, 20, "dynamic", 64]),
+                (f"out_value_{index}", "tensor(float)", [1, 20, "dynamic", 64]),
+            ]
+        )
+    expected_outputs.extend(
+        [
+            ("last_hidden_state", "tensor(float)", [1, "one_or_dynamic", 1280]),
+            ("raw_logits", "tensor(float)", [1, "one_or_dynamic", 8194]),
+        ]
+    )
+    validate_metadata_list(label, "inputs", inputs, expected_inputs)
+    validate_metadata_list(label, "outputs", outputs, expected_outputs)
+
+
+def validate_metadata_list(
+    label: str,
+    io_kind: str,
+    actual: list[Any],
+    expected: list[tuple[str, str, list[Any]]],
+) -> None:
+    if len(actual) != len(expected):
+        raise UnsupportedExport(
+            f"{label} must have exactly {len(expected)} {io_kind}, got {len(actual)}"
+        )
+    for index, (item, (name, element_type, shape)) in enumerate(zip(actual, expected)):
+        actual_shape = list(item.shape)
+        shape_ok = len(actual_shape) == len(shape) and all(
+            metadata_dimension_matches(got, wanted)
+            for got, wanted in zip(actual_shape, shape)
+        )
+        if item.name != name or item.type != element_type or not shape_ok:
+            raise UnsupportedExport(
+                f"{label} {io_kind}[{index}] ABI mismatch: got "
+                f"{item.name!r} {item.type!r} {actual_shape!r}, expected "
+                f"{name!r} {element_type!r} {shape!r}"
+            )
+
+
+def metadata_dimension_matches(actual: Any, expected: Any) -> bool:
+    is_dynamic = actual is None or isinstance(actual, str)
+    if expected == "dynamic":
+        return is_dynamic
+    if expected == "one_or_dynamic":
+        return actual == 1 or is_dynamic
+    # Match the Rust ABI validator: exporters may leave a semantically fixed
+    # dimension symbolic, but a concrete dimension must be exactly correct.
+    return actual == expected or is_dynamic
 
 
 def artifact_metadata(root: Path) -> list[dict[str, Any]]:
-    names = [*MODEL_FILES, "bpe.model"]
+    names = [*MODEL_FILES, "IndexTTS_E_Prefill.onnx", "bpe.model"]
     records = []
     for name in names:
         path = root / name
@@ -1238,7 +1491,7 @@ def yaml_scalar(value: Any) -> str:
 
 
 def validate_layout(output_dir: Path, require_onnx: bool) -> None:
-    missing = [name for name in MODEL_FILES if not (output_dir / name).exists()]
+    missing = [name for name in REQUIRED_ONNX_FILES if not (output_dir / name).exists()]
     if require_onnx and missing:
         raise SystemExit(f"export reported ready but required files are missing: {missing}")
     if not (output_dir / "bpe.model").exists():

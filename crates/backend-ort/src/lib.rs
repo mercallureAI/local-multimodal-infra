@@ -1038,6 +1038,24 @@ mod tests {
     }
 
     #[test]
+    fn generated_f32_identity_documents_zero_length_dimension_gate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model_path = dir.path().join("identity_zero_dim.onnx");
+        fs::write(&model_path, identity_model_with_shape(1, &[1, 20, 0, 64])).expect("write model");
+
+        let mut session = OrtSession::load(&model_path, ProviderSelection::default())
+            .expect("load identity model");
+        let error = session
+            .run_tensors(&[OrtTensorInput {
+                name: "x".to_string(),
+                shape: vec![1, 20, 0, 64],
+                data: OrtTensorData::F32(Vec::new()),
+            }])
+            .expect_err("the pinned ORT tensor constructor currently rejects zero dimensions");
+        assert!(error.to_string().contains("all dimensions must be >= 1"));
+    }
+
+    #[test]
     fn generated_f16_identity_runs_on_cpu() {
         let dir = tempfile::tempdir().expect("tempdir");
         let model_path = dir.path().join("identity_f16.onnx");
@@ -1134,13 +1152,17 @@ mod tests {
     }
 
     fn identity_model(elem_type: u64) -> Vec<u8> {
+        identity_model_with_shape(elem_type, &[2])
+    }
+
+    fn identity_model_with_shape(elem_type: u64, dimensions: &[u64]) -> Vec<u8> {
         let node = message(|node| {
             string_field(node, 1, "x");
             string_field(node, 2, "y");
             string_field(node, 4, "Identity");
         });
-        let input = value_info("x", elem_type);
-        let output = value_info("y", elem_type);
+        let input = value_info_with_shape("x", elem_type, dimensions);
+        let output = value_info_with_shape("y", elem_type, dimensions);
         let graph = message(|graph| {
             bytes_field(graph, 1, &node);
             string_field(graph, 2, "identity_graph");
@@ -1158,9 +1180,13 @@ mod tests {
         })
     }
 
-    fn value_info(name: &str, elem_type: u64) -> Vec<u8> {
-        let dim = message(|dim| varint_field(dim, 1, 2));
-        let shape = message(|shape| bytes_field(shape, 1, &dim));
+    fn value_info_with_shape(name: &str, elem_type: u64, dimensions: &[u64]) -> Vec<u8> {
+        let shape = message(|shape| {
+            for dimension in dimensions {
+                let dim = message(|dim| varint_field(dim, 1, *dimension));
+                bytes_field(shape, 1, &dim);
+            }
+        });
         let tensor_type = message(|tensor| {
             varint_field(tensor, 1, elem_type);
             bytes_field(tensor, 2, &shape);

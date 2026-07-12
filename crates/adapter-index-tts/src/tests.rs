@@ -15,6 +15,7 @@ fn validates_complete_artifact_layout() {
     for name in MODEL_FILENAMES {
         fs::write(dir.path().join(name), b"placeholder").expect("onnx");
     }
+    fs::write(dir.path().join("IndexTTS_E_Prefill.onnx"), b"placeholder").expect("prefill");
     fs::write(dir.path().join("bpe.model"), b"sentencepiece").expect("bpe");
     fs::write(dir.path().join("manifest.yaml"), b"precision: cpu-fp32\n").expect("manifest");
 
@@ -34,6 +35,7 @@ fn fp32_layout_ignores_quantized_subdirs() {
     for name in MODEL_FILENAMES {
         fs::write(dir.path().join(name), b"placeholder").expect("onnx");
     }
+    fs::write(dir.path().join("IndexTTS_E_Prefill.onnx"), b"placeholder").expect("prefill");
     let q4 = dir.path().join("q4");
     fs::create_dir(&q4).expect("q4 dir");
     for name in MODEL_FILENAMES {
@@ -431,32 +433,6 @@ fn output_filename_uses_indextts_prefix_and_wav_suffix() {
     assert_eq!(
         index_tts_wav_filename(id),
         "indextts-00000000-0000-0000-0000-000000000123.wav"
-    );
-}
-
-#[test]
-fn repeat_penalty_width_prefers_manifest_then_static_metadata() {
-    let meta = tensor_meta("repeat_penality", TensorElement::F32, vec![1, -1]);
-    let config = IndexTtsModelConfig {
-        mel_code_size: Some(8194),
-        vocab_size: None,
-        ..Default::default()
-    };
-    assert_eq!(
-        repeat_penalty_width_from_metadata(&meta, &config),
-        Some(8194)
-    );
-
-    let meta = tensor_meta("repeat_penality", TensorElement::F32, vec![1, 2048]);
-    assert_eq!(
-        repeat_penalty_width_from_metadata(&meta, &IndexTtsModelConfig::default()),
-        Some(2048)
-    );
-
-    let meta = tensor_meta("repeat_penality", TensorElement::F32, vec![1, -1]);
-    assert_eq!(
-        repeat_penalty_width_from_metadata(&meta, &IndexTtsModelConfig::default()),
-        None
     );
 }
 
@@ -1144,8 +1120,8 @@ fn every_segment_must_validate_before_intentional_gap_is_added() {
 
 #[test]
 fn decode_budget_is_checked_and_blank_audio_rejected() {
-    assert_eq!(checked_decode_budget(800, 125).expect("budget"), 675);
-    assert!(checked_decode_budget(125, 125).is_err());
+    assert_eq!(checked_decode_budget(600, 125).expect("budget"), 600);
+    assert_eq!(checked_decode_budget(600, 900).expect("budget"), 600);
     assert!(validate_generated_audio(&[0; 48], 3).is_err());
     assert!(validate_generated_audio(&[1; 48], 1).is_err());
     assert!(validate_generated_audio(&[1; 48], 2).is_ok());
@@ -1158,9 +1134,9 @@ fn decode_budget_is_checked_and_blank_audio_rejected() {
 }
 
 #[test]
-fn model_config_defaults_remain_backward_compatible() {
+fn model_config_defaults_use_v2_new_token_budget() {
     let config = IndexTtsModelConfig::default();
-    assert_eq!(config.max_generate_length, 800);
+    assert_eq!(config.max_generate_length, 600);
     assert_eq!(config.max_text_tokens_per_segment, 120);
     assert_eq!(config.inter_segment_silence_ms, 200);
     assert_eq!(
@@ -1175,53 +1151,40 @@ fn model_config_defaults_remain_backward_compatible() {
 fn model_config_loads_manifest_numbers_strings_and_aliases() {
     let (dir, artifacts) = config_fixture(
         r#"
-max_generate_length: "605"
 max_text_tokens: 96
 inter_segment_silence_ms: "175"
 max_consecutive_silence_tokens: "40"
-start_token: "7000"
-generation_stop_token: 7001
-mel_code_size: "8194"
 "#,
     );
     let spec = model_spec(dir.path().to_path_buf(), vec!["cpu".to_string()]);
 
     let config = IndexTtsModelConfig::load(&artifacts, &spec).expect("valid manifest config");
 
-    assert_eq!(config.max_generate_length, 605);
+    assert_eq!(config.max_generate_length, 600);
     assert_eq!(config.max_text_tokens_per_segment, 96);
     assert_eq!(config.inter_segment_silence_ms, 175);
     assert_eq!(config.max_consecutive_silence_tokens, 40);
-    assert_eq!(config.generation_start_token, 7000);
-    assert_eq!(config.generation_stop_token, 7001);
+    assert_eq!(config.generation_start_token, 8192);
+    assert_eq!(config.generation_stop_token, 8193);
     assert_eq!(config.mel_code_size, Some(8194));
 }
 
 #[test]
-fn model_metadata_intentionally_overrides_manifest() {
+fn model_metadata_overrides_only_operational_fields() {
     let (dir, artifacts) = config_fixture(
         r#"
-max_generate_length: 605
 max_text_tokens_per_segment: 100
 inter_segment_silence_ms: 175
 max_consecutive_silence_tokens: 20
-generation_start_token: 7000
-generation_stop_token: 7001
 "#,
     );
     let mut spec = model_spec(dir.path().to_path_buf(), vec!["cpu".to_string()]);
-    spec.metadata
-        .insert("max_generate_length".to_string(), serde_json::json!("700"));
     spec.metadata
         .insert("max_text_tokens".to_string(), serde_json::json!("110"));
     spec.metadata.insert(
         "inter_segment_silence_ms".to_string(),
         serde_json::json!(200),
     );
-    spec.metadata
-        .insert("start_token".to_string(), serde_json::json!(8000));
-    spec.metadata
-        .insert("stop_token".to_string(), serde_json::json!("8001"));
     spec.metadata.insert(
         "max_consecutive_silence_tokens".to_string(),
         serde_json::json!("45"),
@@ -1229,12 +1192,12 @@ generation_stop_token: 7001
 
     let config = IndexTtsModelConfig::load(&artifacts, &spec).expect("metadata overrides");
 
-    assert_eq!(config.max_generate_length, 700);
+    assert_eq!(config.max_generate_length, 600);
     assert_eq!(config.max_text_tokens_per_segment, 110);
     assert_eq!(config.inter_segment_silence_ms, 200);
     assert_eq!(config.max_consecutive_silence_tokens, 45);
-    assert_eq!(config.generation_start_token, 8000);
-    assert_eq!(config.generation_stop_token, 8001);
+    assert_eq!(config.generation_start_token, 8192);
+    assert_eq!(config.generation_stop_token, 8193);
 }
 
 #[test]
@@ -1281,7 +1244,7 @@ fn model_config_rejects_present_invalid_model_metadata_even_with_valid_manifest(
         ("max_consecutive_silence_tokens", serde_json::json!(121)),
         ("max_consecutive_silence_tokens", serde_json::json!("bad")),
     ] {
-        let (dir, artifacts) = config_fixture("max_generate_length: 605\n");
+        let (dir, artifacts) = config_fixture("");
         let mut spec = model_spec(dir.path().to_path_buf(), vec!["cpu".to_string()]);
         spec.metadata.insert(field.to_string(), value);
         let err = IndexTtsModelConfig::load(&artifacts, &spec)
@@ -1325,28 +1288,299 @@ fn indextts_cpu_thread_defaults_overrides_and_invalid_values() {
 }
 
 #[test]
-fn repeat_penalty_window_resets_evicted_tokens() {
-    let mut penalties = vec![1.0; 6];
-    let mut history = Vec::new();
-
-    apply_repeat_penalty_token(&mut penalties, &mut history, 2, 2, DEFAULT_REPEAT_PENALTY);
-    apply_repeat_penalty_token(&mut penalties, &mut history, 3, 2, DEFAULT_REPEAT_PENALTY);
-    apply_repeat_penalty_token(&mut penalties, &mut history, 4, 2, DEFAULT_REPEAT_PENALTY);
-
-    assert_eq!(history, vec![3, 4]);
-    assert_eq!(penalties[2], 1.0);
-    assert!(DEFAULT_REPEAT_PENALTY < 1.0);
-    assert_eq!(penalties[3], DEFAULT_REPEAT_PENALTY);
-    assert_eq!(penalties[4], DEFAULT_REPEAT_PENALTY);
+fn repetition_penalty_is_sign_sensitive_full_history_and_unique() {
+    let mut logits = vec![20.0, -2.0, 0.0, 4.0];
+    apply_repetition_penalty(&mut logits, &[0, 1, 1, 2], DEFAULT_REPEAT_PENALTY).expect("penalty");
+    assert_eq!(logits, vec![2.0, -20.0, 0.0, 4.0]);
 }
 
 #[test]
-fn e_loop_control_lengths_use_prior_kv_sequence() {
-    let concat_len = 5;
+fn seeded_sampling_is_deterministic_and_rejects_nonfinite() {
+    let logits = [2.0, 2.0, 1.0, 0.0];
+    let mut a = SplitMix64::new(42);
+    let mut b = SplitMix64::new(42);
+    let sequence_a = (0..8)
+        .map(|_| sample_logits(&logits, 3, 0.8, 1.0, &mut a).unwrap())
+        .collect::<Vec<_>>();
+    let sequence_b = (0..8)
+        .map(|_| sample_logits(&logits, 3, 0.8, 1.0, &mut b).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(sequence_a, sequence_b);
+    assert!(sample_logits(&[f32::NAN], 30, 0.8, 1.0, &mut a).is_err());
+}
 
-    assert_eq!(e_loop_control_lengths(true, concat_len, 0), (0, 5));
-    assert_eq!(e_loop_control_lengths(false, concat_len, 5), (5, 1));
-    assert_eq!(e_loop_control_lengths(false, concat_len, 6), (6, 1));
+#[test]
+fn repetition_penalty_uses_history_beyond_sixteen_tokens() {
+    let mut logits = vec![1.0; 32];
+    let history = (0..24).collect::<Vec<i32>>();
+    apply_repetition_penalty(&mut logits, &history, 10.0).expect("penalty");
+    assert_eq!(logits[0], 0.1);
+    assert_eq!(logits[23], 0.1);
+    assert_eq!(logits[24], 1.0);
+}
+
+#[test]
+fn sampling_top_k_excludes_lower_scores() {
+    let mut rng = SplitMix64::new(0);
+    for _ in 0..100 {
+        assert!(sample_logits(&[3.0, 2.0, 1.0], 2, 1.0, 1.0, &mut rng).unwrap() < 2);
+    }
+}
+
+#[test]
+fn sampling_top_p_keeps_threshold_crossing_candidate() {
+    let mut rng = SplitMix64::new(7);
+    let observed = (0..200)
+        .map(|_| sample_logits(&[0.0, 0.0, 0.0], 3, 0.5, 1.0, &mut rng).unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(observed, [0, 1].into_iter().collect());
+}
+
+#[test]
+fn sampling_ties_are_ordered_by_ascending_token_id() {
+    let mut rng = SplitMix64::new(1);
+    assert_eq!(
+        sample_logits(&[5.0, 5.0, 5.0], 1, 1.0, 1.0, &mut rng).unwrap(),
+        0
+    );
+}
+
+#[test]
+fn request_seed_accepts_u64_and_decimal_string_strictly() {
+    assert_eq!(indextts_seed_from_params(&BTreeMap::new()).unwrap(), 0);
+    for value in [Value::from(u64::MAX), Value::from(u64::MAX.to_string())] {
+        let params = BTreeMap::from([("indextts_seed".to_string(), value)]);
+        assert_eq!(indextts_seed_from_params(&params).unwrap(), u64::MAX);
+    }
+    for value in [Value::from(-1), Value::from("1.0"), Value::Bool(true)] {
+        let params = BTreeMap::from([("indextts_seed".to_string(), value)]);
+        assert!(indextts_seed_from_params(&params).is_err());
+    }
+}
+
+#[test]
+fn one_rng_lifecycle_continues_across_chunks() {
+    let logits = [1.0, 1.0, 1.0];
+    let mut request = SplitMix64::new(99);
+    let first = sample_logits(&logits, 3, 1.0, 1.0, &mut request).unwrap();
+    let second = sample_logits(&logits, 3, 1.0, 1.0, &mut request).unwrap();
+    let mut replay = SplitMix64::new(99);
+    assert_eq!(
+        first,
+        sample_logits(&logits, 3, 1.0, 1.0, &mut replay).unwrap()
+    );
+    assert_eq!(
+        second,
+        sample_logits(&logits, 3, 1.0, 1.0, &mut replay).unwrap()
+    );
+}
+
+#[test]
+fn raw_logits_abi_requires_exact_name_shape_and_type() {
+    let valid = OrtTensorOutput {
+        name: "raw_logits".to_string(),
+        shape: vec![1, 1, 3],
+        data: OrtTensorData::F32(vec![0.0; 3]),
+    };
+    assert_eq!(raw_logits_f32(&valid, 3).unwrap(), vec![0.0; 3]);
+    let mut invalid = valid.clone();
+    invalid.name = "max_logit_id".to_string();
+    assert!(raw_logits_f32(&invalid, 3).is_err());
+    invalid = valid.clone();
+    invalid.shape = vec![1, 3];
+    assert!(raw_logits_f32(&invalid, 3).is_err());
+}
+
+#[test]
+fn split_v2_manifest_is_required() {
+    let (_dir, artifacts) = config_fixture("");
+    fs::write(
+        artifacts.root.join("manifest.yaml"),
+        "status: ready\nsplit_contract_version: 1\n",
+    )
+    .expect("replace manifest");
+    let err = IndexTtsModelConfig::load(
+        &artifacts,
+        &model_spec(artifacts.root.clone(), vec!["cpu".to_string()]),
+    )
+    .expect_err("v1 must be rejected");
+    assert!(err.to_string().contains("split_contract_version"));
+}
+
+#[test]
+fn yaml_and_json_manifests_must_be_semantically_equal() {
+    let (_dir, artifacts) = config_fixture("max_generate_length: 600\n");
+    fs::write(
+        artifacts.root.join("manifest.json"),
+        r#"{"split_contract_version":2,"max_generate_length":599}"#,
+    )
+    .expect("json manifest");
+    let err = IndexTtsModelConfig::load(
+        &artifacts,
+        &model_spec(artifacts.root.clone(), vec!["cpu".to_string()]),
+    )
+    .expect_err("mismatch must fail");
+    assert!(err.to_string().contains("semantically equal"));
+}
+
+#[test]
+fn wrong_v2_cache_or_policy_declaration_is_rejected() {
+    for (path, replacement) in [
+        ("cache_mode", "permanent_dummy"),
+        ("top_k", "29"),
+        ("max_new_mel_tokens", "599"),
+    ] {
+        let (_dir, artifacts) = config_fixture("");
+        let manifest_path = artifacts.root.join("manifest.yaml");
+        let original = fs::read_to_string(&manifest_path).expect("manifest");
+        let changed = match path {
+            "cache_mode" => {
+                original.replace("cache_mode: prefill_decode", "cache_mode: permanent_dummy")
+            }
+            "top_k" => original.replace("top_k: 30", "top_k: 29"),
+            _ => original.replace("max_new_mel_tokens: 600", "max_new_mel_tokens: 599"),
+        };
+        fs::write(&manifest_path, changed).expect("changed manifest");
+        let err = IndexTtsModelConfig::load(
+            &artifacts,
+            &model_spec(artifacts.root.clone(), vec!["cpu".to_string()]),
+        )
+        .expect_err("wrong contract must fail");
+        assert!(err.to_string().contains(path), "{path}: {err}");
+        let _ = replacement;
+    }
+}
+
+#[test]
+fn deployment_metadata_cannot_override_v2_budget() {
+    let (_dir, artifacts) = config_fixture("");
+    let mut spec = model_spec(artifacts.root.clone(), vec!["cpu".to_string()]);
+    spec.metadata
+        .insert("max_generate_length".to_string(), Value::from(601));
+    let err = IndexTtsModelConfig::load(&artifacts, &spec).expect_err("override");
+    assert!(err.to_string().contains("cannot override"));
+}
+
+#[test]
+fn unsupported_diagnostic_manifest_is_never_runtime_loadable() {
+    let (_dir, artifacts) = config_fixture("");
+    let path = artifacts.root.join("manifest.yaml");
+    let manifest = fs::read_to_string(&path)
+        .expect("manifest")
+        .replace("status: ready", "status: unsupported");
+    fs::write(path, manifest).expect("diagnostic");
+    let err = IndexTtsModelConfig::load(
+        &artifacts,
+        &model_spec(artifacts.root.clone(), vec!["cpu".to_string()]),
+    )
+    .expect_err("unsupported status");
+    assert!(err.to_string().contains("status must be `ready`"), "{err}");
+}
+
+#[test]
+fn deployment_config_tracks_immutable_source_and_v2_contract() {
+    let (_dir, artifacts) = config_fixture("");
+    let manifest: Value =
+        serde_yaml::from_slice(&fs::read(artifacts.root.join("manifest.yaml")).unwrap()).unwrap();
+    fs::write(
+        artifacts.root.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let mut config = deployment_config_fixture(&artifacts.root);
+    fs::write(
+        artifacts.root.join("config.json"),
+        serde_json::to_vec_pretty(&config).unwrap(),
+    )
+    .expect("deployment config");
+    IndexTtsModelConfig::load(
+        &artifacts,
+        &model_spec(artifacts.root.clone(), vec!["cpu".to_string()]),
+    )
+    .expect("valid deployment config");
+    for pointer in [
+        "/official_code/tag",
+        "/official_code/tree",
+        "/contract/manifest_json_sha256",
+        "/contract/manifest_yaml_sha256",
+        "/contract/index_tts_e_sha256",
+        "/contract/index_tts_e_prefill_sha256",
+        "/source_provenance_reference/sha256",
+    ] {
+        config = deployment_config_fixture(&artifacts.root);
+        *config.pointer_mut(pointer).unwrap() = Value::from("bad");
+        fs::write(
+            artifacts.root.join("config.json"),
+            serde_json::to_vec_pretty(&config).unwrap(),
+        )
+        .unwrap();
+        let err = IndexTtsModelConfig::load(
+            &artifacts,
+            &model_spec(artifacts.root.clone(), vec!["cpu".to_string()]),
+        )
+        .expect_err("mutated deployment config");
+        assert!(err.to_string().contains("config.json"), "{pointer}: {err}");
+    }
+    config = deployment_config_fixture(&artifacts.root);
+    fs::write(artifacts.root.join("IndexTTS_E.onnx"), b"changed").unwrap();
+    fs::write(
+        artifacts.root.join("config.json"),
+        serde_json::to_vec_pretty(&config).unwrap(),
+    )
+    .unwrap();
+    let err = IndexTtsModelConfig::load(
+        &artifacts,
+        &model_spec(artifacts.root.clone(), vec!["cpu".to_string()]),
+    )
+    .expect_err("actual content mismatch");
+    assert!(err.to_string().contains("integrity mismatch"));
+}
+
+fn deployment_config_fixture(root: &Path) -> Value {
+    let hash = |name: &str| local_files::sha256_file(root.join(name)).unwrap();
+    serde_json::json!({
+        "schema": "local.index_tts.deployment.v1",
+        "model_id": "indextts-1.5-onnx",
+        "source": {
+            "repo_id": "IndexTeam/IndexTTS-1.5",
+            "revision": "25851a6036dfd3095bb70fb3c8f49217104672c3",
+            "download_method": "huggingface_hub.snapshot_download"
+        },
+        "official_code": {
+            "tag": "v1.5.0",
+            "commit": "9098497272d5803bae46cbaf5154cf2ba48f6866",
+            "tree": "aa0335ccaba54ac42d6d209dac56bb9a8b2e80a7"
+        },
+        "contract": {
+            "version": 2,
+            "cache_mode": "prefill_decode",
+            "manifest_json_sha256": hash("manifest.json"),
+            "manifest_yaml_sha256": hash("manifest.yaml"),
+            "index_tts_e_sha256": hash("IndexTTS_E.onnx"),
+            "index_tts_e_prefill_sha256": hash("IndexTTS_E_Prefill.onnx")
+        },
+        "source_provenance_reference": {
+            "sha256": "3bfb39cc326d834be4fda72000e4cc53ebbb6c52e154150f1fdbe7323d1e909c",
+            "runtime_verifiable": false,
+            "note": "Informational hash of the separately retained source provenance record; that record is intentionally outside this 14-file runtime package."
+        },
+        "license": {
+            "warning": "The pinned official code contains INDEX_MODEL_LICENSE with non-commercial and other restrictions. Preserve and review it; do not rely only on Hugging Face apache-2.0 metadata."
+        }
+    })
+}
+
+#[test]
+fn legacy_layout_without_prefill_fails_actionably() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for name in MODEL_FILENAMES {
+        fs::write(dir.path().join(name), b"placeholder").expect("onnx");
+    }
+    fs::write(dir.path().join("bpe.model"), b"sentencepiece").expect("bpe");
+    let err = IndexTtsArtifacts::validate(dir.path(), IndexTtsPrecision::CpuFp32)
+        .expect_err("legacy package");
+    assert!(err.to_string().contains("re-export"));
+    assert!(err.to_string().contains("IndexTTS_E_Prefill.onnx"));
 }
 
 #[test]
@@ -1383,16 +1617,6 @@ fn scalar_attention_mask_uses_official_first_step_flag() {
     assert_eq!(attention_mask_values(&[1], 0), vec![0]);
     assert_eq!(attention_mask_values(&[2], 1), vec![1, 1]);
     assert_eq!(attention_mask_values(&[2], 0), vec![0, 0]);
-}
-
-#[test]
-fn dynamic_cache_shape_uses_dummy_dimension_for_ort() {
-    let meta = tensor_meta("in_key_0", TensorElement::F32, vec![1, 20, -1, 64]);
-
-    let shape = concrete_or_empty_shape(&meta);
-
-    assert_eq!(shape, vec![1, 20, 1, 64]);
-    assert!(shape.iter().all(|dim| *dim >= 1));
 }
 
 #[test]
@@ -1578,8 +1802,47 @@ fn config_fixture(manifest: &str) -> (tempfile::TempDir, IndexTtsArtifacts) {
     for name in MODEL_FILENAMES {
         fs::write(dir.path().join(name), b"placeholder").expect("onnx");
     }
+    fs::write(dir.path().join("IndexTTS_E_Prefill.onnx"), b"placeholder").expect("prefill");
     fs::write(dir.path().join("bpe.model"), b"sentencepiece").expect("bpe");
-    fs::write(dir.path().join("manifest.yaml"), manifest).expect("manifest");
+    fs::write(
+        dir.path().join("manifest.yaml"),
+        format!(
+            r#"status: ready
+split_contract_version: 2
+graph_contract:
+  cache_mode: prefill_decode
+  cache_layout: hf_bhsd
+  layers: 24
+  dtype: float32
+  batch: 1
+  heads: 20
+  cache_sequence_axis: 2
+  head_dim: 64
+  initial_cache_length: 0
+  attention_mask: {{rank: 2, dtype: int64}}
+  logits: {{name: raw_logits, rank: 3, shape: [1, 1, 8194], selection: runtime}}
+generation_policy:
+  version: 1
+  algorithm: seeded_top_k_top_p
+  num_beams: 1
+  source_num_beams: 3
+  top_k: 30
+  top_p: 0.8
+  temperature: 1.0
+  repetition_penalty: 10.0
+  repetition_scope: mel_bos_and_full_generated_history
+  default_seed: 0
+  max_new_mel_tokens: 600
+  start_token: 8192
+  stop_token: 8193
+  silence_token: 52
+max_generate_length: 600
+mel_code_size: 8194
+vocab_size: 8194
+{manifest}"#
+        ),
+    )
+    .expect("manifest");
     let artifacts =
         IndexTtsArtifacts::validate(dir.path(), IndexTtsPrecision::CpuFp32).expect("artifacts");
     (dir, artifacts)

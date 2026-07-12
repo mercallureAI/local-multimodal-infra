@@ -26,17 +26,14 @@ use uuid::Uuid;
 pub const TARGET_SAMPLE_RATE: u32 = 24_000;
 pub const START_TOKEN: i32 = 8192;
 pub const STOP_TOKEN: i32 = 8193;
-pub const MAX_GENERATE_LENGTH: usize = 800;
+pub const MAX_GENERATE_LENGTH: usize = 600;
 pub const DEFAULT_MAX_TEXT_TOKENS_PER_SEGMENT: usize = 120;
 pub const DEFAULT_INTER_SEGMENT_SILENCE_MS: u32 = 200;
 /// IndexTTS v1.5's `remove_long_silence` uses acoustic code 52 and allows
 /// 30 consecutive occurrences (upstream commit abb14325e48b0a5e893e36c7db035b5ac1d6a4ae).
 pub const SILENCE_TOKEN: i32 = 52;
 pub const DEFAULT_MAX_CONSECUTIVE_SILENCE_TOKENS: usize = 30;
-/// IndexTTS E graph applies repeat suppression by multiplying logits by
-/// `repeat_penality`, so repeated token columns must be below 1.0.
-pub const DEFAULT_REPEAT_PENALTY: f32 = 0.9;
-pub const DEFAULT_REPEAT_WINDOW: usize = 16;
+pub const DEFAULT_REPEAT_PENALTY: f32 = 10.0;
 pub const DEFAULT_MEL_CODE_SIZE: usize = 8194;
 pub const MAX_TEXT_TOKEN_ID: i64 = 1_000_000;
 
@@ -68,7 +65,7 @@ pub use frontend::{
     split_sentences_by_token, tokenize_by_cjk_char, IndexTtsTextFrontendMode,
     INDEXTTS_PUNCTUATION_MARK_TOKENS,
 };
-pub use onnx::{apply_repeat_penalty_token, concatenate_hidden_states, e_loop_control_lengths};
+pub use onnx::{apply_repetition_penalty, concatenate_hidden_states, sample_logits, SplitMix64};
 pub use pipeline::IndexTtsAdapter;
 pub use tokenizer::{
     dump_text_frontend, ensure_index_tts_text_has_speakable_content,

@@ -46,16 +46,7 @@ pub(crate) fn validate_sessions(sessions: [&OrtSession; 6]) -> Result<()> {
         ("IndexTTS_B", &["text_ids"][..]),
         ("IndexTTS_C", &["gpt_ids"][..]),
         ("IndexTTS_D", &["embed_x", "embed_y", "embed_z"][..]),
-        (
-            "IndexTTS_E",
-            &[
-                "history_len",
-                "repeat_penality",
-                "ids_len",
-                "hidden_state",
-                "attention_mask",
-            ][..],
-        ),
+        ("IndexTTS_E", &["hidden_state", "attention_mask"][..]),
         ("IndexTTS_F", &["save_hidden_state"][..]),
     ];
     for ((label, required), session) in expected.into_iter().zip(sessions) {
@@ -69,6 +60,130 @@ pub(crate) fn validate_sessions(sessions: [&OrtSession; 6]) -> Result<()> {
         }
     }
     c_len_input_name(sessions[2])?;
+    validate_e_decode(sessions[4])?;
+    Ok(())
+}
+
+pub(crate) fn validate_e_prefill(session: &OrtSession) -> Result<()> {
+    require_inputs(
+        session,
+        &["hidden_state", "attention_mask"],
+        "IndexTTS_E_Prefill",
+    )?;
+    if session.inputs().len() != 2 {
+        return Err(InfraError::Backend(
+            "IndexTTS_E_Prefill must have exactly hidden_state and attention_mask inputs"
+                .to_string(),
+        ));
+    }
+    validate_hidden_and_mask_inputs(session, "IndexTTS_E_Prefill")?;
+    validate_e_outputs(session, "IndexTTS_E_Prefill", false)
+}
+
+fn validate_e_decode(session: &OrtSession) -> Result<()> {
+    for forbidden in ["history_len", "ids_len", "repeat_penality"] {
+        if has_input(session, forbidden) {
+            return Err(InfraError::Backend(format!(
+                "legacy IndexTTS E control `{forbidden}` is not supported; re-export with split contract v2"
+            )));
+        }
+    }
+    if session.inputs().len() != 50 {
+        return Err(InfraError::Backend(format!(
+            "IndexTTS_E must have exactly 50 v2 inputs, got {}",
+            session.inputs().len()
+        )));
+    }
+    for index in 0..24 {
+        validate_cache_meta(
+            &session.inputs()[index * 2],
+            &format!("in_key_{index}"),
+            "IndexTTS_E",
+        )?;
+        validate_cache_meta(
+            &session.inputs()[index * 2 + 1],
+            &format!("in_value_{index}"),
+            "IndexTTS_E",
+        )?;
+    }
+    validate_hidden_and_mask_inputs(session, "IndexTTS_E")?;
+    validate_e_outputs(session, "IndexTTS_E", true)
+}
+
+fn validate_e_outputs(session: &OrtSession, label: &str, decode: bool) -> Result<()> {
+    if session.outputs().len() != 50 {
+        return Err(InfraError::Backend(format!(
+            "{label} must have exactly 50 v2 outputs, got {}",
+            session.outputs().len()
+        )));
+    }
+    for index in 0..24 {
+        validate_cache_meta(
+            &session.outputs()[index * 2],
+            &format!("out_key_{index}"),
+            label,
+        )?;
+        validate_cache_meta(
+            &session.outputs()[index * 2 + 1],
+            &format!("out_value_{index}"),
+            label,
+        )?;
+    }
+    validate_ranked_f32(
+        &session.outputs()[48],
+        "last_hidden_state",
+        &[1, -1, 1280],
+        label,
+    )?;
+    validate_ranked_f32(&session.outputs()[49], "raw_logits", &[1, -1, 8194], label)?;
+    let _ = decode;
+    Ok(())
+}
+
+fn validate_hidden_and_mask_inputs(session: &OrtSession, label: &str) -> Result<()> {
+    let tail = session.inputs().len() - 2;
+    validate_ranked_f32(
+        &session.inputs()[tail],
+        "hidden_state",
+        &[1, -1, 1280],
+        label,
+    )?;
+    let mask = &session.inputs()[tail + 1];
+    if mask.name != "attention_mask"
+        || mask.element_type != TensorElement::I64
+        || mask.shape.len() != 2
+        || mask.shape[0] != 1
+    {
+        return Err(InfraError::Backend(format!(
+            "{label} attention_mask ABI mismatch: {:?}",
+            mask
+        )));
+    }
+    Ok(())
+}
+
+fn validate_cache_meta(meta: &TensorMetadata, name: &str, label: &str) -> Result<()> {
+    validate_ranked_f32(meta, name, &[1, 20, -1, 64], label)
+}
+
+fn validate_ranked_f32(
+    meta: &TensorMetadata,
+    name: &str,
+    expected: &[i64],
+    label: &str,
+) -> Result<()> {
+    let shape_ok = meta.shape.len() == expected.len()
+        && meta
+            .shape
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| *expected < 0 || actual == expected || *actual < 0);
+    if meta.name != name || meta.element_type != TensorElement::F32 || !shape_ok {
+        return Err(InfraError::Backend(format!(
+            "{label} `{name}` ABI mismatch: got {} {:?} {:?}, expected f32 {expected:?}",
+            meta.name, meta.element_type, meta.shape
+        )));
+    }
     Ok(())
 }
 
@@ -126,7 +241,7 @@ pub(crate) fn find_output(
 
 pub(crate) fn infer_layer_count(output_count: usize) -> Result<usize> {
     output_count
-        .checked_sub(3)
+        .checked_sub(2)
         .filter(|count| count % 2 == 0)
         .map(|count| count / 2)
         .filter(|count| *count > 0)
@@ -135,71 +250,6 @@ pub(crate) fn infer_layer_count(output_count: usize) -> Result<usize> {
                 "IndexTTS_E output count {output_count} cannot infer KV layer count"
             ))
         })
-}
-
-pub(crate) fn infer_repeat_penalty_width(
-    session: &OrtSession,
-    config: &IndexTtsModelConfig,
-) -> Result<usize> {
-    let meta = session
-        .inputs()
-        .iter()
-        .find(|input| input.name == "repeat_penality")
-        .ok_or_else(|| {
-            InfraError::Backend(format!(
-                "IndexTTS_E missing repeat_penality input; {}",
-                format_session_io("IndexTTS_E", session.metadata())
-            ))
-        })?;
-    repeat_penalty_width_from_metadata(meta, config).ok_or_else(|| {
-        InfraError::NeedImplementation(format!(
-            "IndexTTS_E repeat_penality width is dynamic/unknown; add mel_code_size or vocab_size to manifest.yaml/json or model metadata. Documented upstream default is {DEFAULT_MEL_CODE_SIZE}, but this adapter refuses to guess for real artifacts. {}",
-            format_session_io("IndexTTS_E", session.metadata())
-        ))
-    })
-}
-
-pub(crate) fn repeat_penalty_width_from_metadata(
-    meta: &TensorMetadata,
-    config: &IndexTtsModelConfig,
-) -> Option<usize> {
-    if let Some(width) = config.configured_mel_code_size() {
-        return Some(width);
-    }
-    if let Some(width) = static_last_dim(meta) {
-        return Some(width);
-    }
-    None
-}
-
-pub(crate) fn static_last_dim(meta: &TensorMetadata) -> Option<usize> {
-    meta.shape
-        .last()
-        .copied()
-        .filter(|dim| *dim > 0)
-        .and_then(|dim| usize::try_from(dim).ok())
-}
-
-pub(crate) fn empty_cache(session: &OrtSession, name: &str) -> Result<OrtTensorOutput> {
-    let meta = session
-        .inputs()
-        .iter()
-        .find(|input| input.name == name)
-        .ok_or_else(|| InfraError::Backend(format!("IndexTTS_E missing cache input `{name}`")))?;
-    let shape = concrete_or_empty_shape(meta);
-    let len = shape.iter().product::<usize>();
-    let data = match meta.element_type {
-        TensorElement::I8 => OrtTensorData::I8(vec![0; len]),
-        TensorElement::I16 => OrtTensorData::I16(vec![0; len]),
-        TensorElement::I32 => OrtTensorData::I32(vec![0; len]),
-        TensorElement::I64 => OrtTensorData::I64(vec![0; len]),
-        _ => OrtTensorData::F32(vec![0.0; len]),
-    };
-    Ok(OrtTensorOutput {
-        name: name.to_string(),
-        shape,
-        data,
-    })
 }
 
 pub(crate) fn cache_sequence_len(cache: &OrtTensorOutput) -> Result<i64> {
@@ -234,23 +284,6 @@ pub(crate) fn cache_sequence_len(cache: &OrtTensorOutput) -> Result<i64> {
             cache.name
         ))),
     }
-}
-
-pub(crate) fn concrete_or_empty_shape(meta: &TensorMetadata) -> Vec<usize> {
-    meta.shape
-        .iter()
-        .map(|dim| {
-            if *dim > 0 {
-                *dim as usize
-            } else {
-                // ORT tensor constructors reject zero-sized dimensions. For dynamic cache inputs
-                // such as [1, heads, -1, head_dim], use a one-token dummy cache so the tensor can
-                // be constructed; the decode loop separately sizes attention_mask from this real
-                // cache tensor shape while preserving logical history_len/ids_len inputs.
-                1
-            }
-        })
-        .collect()
 }
 
 pub(crate) fn parse_e_outputs(
@@ -290,29 +323,17 @@ pub(crate) fn parse_e_outputs(
             .ok_or_else(|| e_output_error("updated value", idx, session))?,
         );
     }
-    let tail = layer_count * 2;
-    let kv_seq_len_output = find_named_output(&outputs, &["kv_seq_len", "next_kv_seq_len"])
+    let last_hidden_state = find_named_output(&outputs, &["last_hidden_state"])
         .cloned()
-        .or_else(|| outputs.get(tail).cloned())
-        .ok_or_else(|| e_tail_output_error("kv_seq_len", session))?;
-    let kv_seq_len = first_i64_or_i32(&kv_seq_len_output, &kv_seq_len_output.name)?;
-    let last_hidden_state =
-        find_named_output(&outputs, &["last_hidden_state", "save_hidden_state"])
-            .cloned()
-            .or_else(|| outputs.get(tail + 1).cloned())
-            .ok_or_else(|| e_tail_output_error("last_hidden_state", session))?;
-    let max_logit_output =
-        find_named_output(&outputs, &["max_logit_id", "max_logits_id", "token_id"])
-            .cloned()
-            .or_else(|| outputs.get(tail + 2).cloned())
-            .ok_or_else(|| e_tail_output_error("max_logit_id", session))?;
-    let max_logit_id = first_i64_or_i32(&max_logit_output, &max_logit_output.name)? as i32;
+        .ok_or_else(|| e_tail_output_error("last_hidden_state", session))?;
+    let raw_logits = find_named_output(&outputs, &["raw_logits"])
+        .cloned()
+        .ok_or_else(|| e_tail_output_error("raw_logits", session))?;
     Ok(EStep {
         keys,
         values,
-        kv_seq_len,
         last_hidden_state,
-        max_logit_id,
+        raw_logits,
     })
 }
 
@@ -442,40 +463,113 @@ pub(crate) fn attention_mask_shape(
     })
 }
 
-pub fn apply_repeat_penalty_token(
-    penalties: &mut [f32],
-    history: &mut Vec<i32>,
-    token: i32,
-    window: usize,
-    penalty: f32,
-) {
-    history.push(token);
-    if let Ok(index) = usize::try_from(token) {
-        if let Some(slot) = penalties.get_mut(index) {
-            *slot = penalty;
-        }
+pub fn apply_repetition_penalty(logits: &mut [f32], history: &[i32], penalty: f32) -> Result<()> {
+    if !penalty.is_finite() || penalty <= 0.0 {
+        return Err(InfraError::BadRequest(
+            "repetition penalty must be finite and positive".to_string(),
+        ));
     }
-    while history.len() > window {
-        let removed = history.remove(0);
-        if !history.contains(&removed) {
-            if let Ok(index) = usize::try_from(removed) {
-                if let Some(slot) = penalties.get_mut(index) {
-                    *slot = 1.0;
-                }
+    let mut unique = std::collections::BTreeSet::new();
+    for token in history {
+        if let Ok(index) = usize::try_from(*token) {
+            if index < logits.len() && unique.insert(index) {
+                logits[index] = if logits[index] < 0.0 {
+                    logits[index] * penalty
+                } else {
+                    logits[index] / penalty
+                };
             }
         }
     }
+    Ok(())
 }
 
-pub fn e_loop_control_lengths(
-    first_step: bool,
-    concat_len: usize,
-    prior_kv_seq_len: i64,
-) -> (i64, i64) {
-    if first_step {
-        (0, concat_len as i64)
-    } else {
-        (prior_kv_seq_len, 1)
+#[derive(Debug, Clone)]
+pub struct SplitMix64(u64);
+
+impl SplitMix64 {
+    pub fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    }
+    fn unit_f64(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 * (1.0 / ((1_u64 << 53) as f64))
+    }
+}
+
+pub fn sample_logits(
+    logits: &[f32],
+    top_k: usize,
+    top_p: f64,
+    temperature: f64,
+    rng: &mut SplitMix64,
+) -> Result<i32> {
+    if logits.is_empty()
+        || !temperature.is_finite()
+        || temperature <= 0.0
+        || !top_p.is_finite()
+        || !(0.0 < top_p && top_p <= 1.0)
+        || logits.iter().any(|value| !value.is_finite())
+    {
+        return Err(InfraError::Backend(
+            "invalid or non-finite raw logits/generation policy".to_string(),
+        ));
+    }
+    let mut ranked = logits
+        .iter()
+        .enumerate()
+        .map(|(token, score)| (token, f64::from(*score) / temperature))
+        .collect::<Vec<_>>();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked.truncate(top_k.max(1).min(ranked.len()));
+    let max = ranked[0].1;
+    let mut weights = ranked
+        .iter()
+        .map(|(_, score)| (*score - max).exp())
+        .collect::<Vec<_>>();
+    let total: f64 = weights.iter().sum();
+    let mut cumulative = 0.0;
+    let mut keep = weights.len();
+    for (index, weight) in weights.iter().enumerate() {
+        cumulative += *weight / total;
+        if cumulative >= top_p {
+            keep = index + 1;
+            break;
+        }
+    }
+    ranked.truncate(keep);
+    weights.truncate(keep);
+    let retained: f64 = weights.iter().sum();
+    let draw = rng.unit_f64() * retained;
+    let mut cumulative = 0.0;
+    for ((token, _), weight) in ranked.iter().zip(weights.iter()) {
+        cumulative += weight;
+        if draw < cumulative {
+            return i32::try_from(*token)
+                .map_err(|_| InfraError::Backend("sampled token exceeds i32".to_string()));
+        }
+    }
+    Ok(ranked.last().expect("nonempty candidates").0 as i32)
+}
+
+pub(crate) fn raw_logits_f32(output: &OrtTensorOutput, expected: usize) -> Result<Vec<f32>> {
+    if output.name != "raw_logits" || output.shape != [1, 1, expected] {
+        return Err(InfraError::Backend(format!(
+            "IndexTTS raw_logits ABI mismatch: name `{}`, shape {:?}, expected [1, 1, {expected}]",
+            output.name, output.shape
+        )));
+    }
+    match &output.data {
+        OrtTensorData::F32(values) if values.len() == expected => Ok(values.clone()),
+        _ => Err(InfraError::Backend(
+            "IndexTTS raw_logits must contain finite f32 values".to_string(),
+        )),
     }
 }
 

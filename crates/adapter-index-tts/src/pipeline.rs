@@ -9,6 +9,7 @@ pub struct IndexTtsAdapter {
     c: OrtSession,
     d: OrtSession,
     e: OrtSession,
+    e_prefill: OrtSession,
     f: OrtSession,
     tokenizer: SentencePieceTokenizer,
     config: IndexTtsModelConfig,
@@ -30,8 +31,10 @@ impl IndexTtsAdapter {
         let c = backend.load_session(&artifacts.c)?;
         let d = backend.load_session(&artifacts.d)?;
         let e = backend.load_session(&artifacts.e)?;
+        let e_prefill = backend.load_session(&artifacts.e_prefill)?;
         let f = backend.load_session(&artifacts.f)?;
         validate_sessions([&a, &b, &c, &d, &e, &f])?;
+        validate_e_prefill(&e_prefill)?;
         let tokenizer = SentencePieceTokenizer::load(&artifacts.bpe_model)?;
         let config = IndexTtsModelConfig::load(&artifacts, spec)?;
         let output_dir = env::var_os("LOCAL_DATA_DIR")
@@ -45,6 +48,7 @@ impl IndexTtsAdapter {
             c,
             d,
             e,
+            e_prefill,
             f,
             tokenizer,
             config,
@@ -86,6 +90,8 @@ impl IndexTtsAdapter {
         let reference_read_ms = reference_started.elapsed().as_millis() as u64;
         let frontend_started = std::time::Instant::now();
         let explicit_ids = explicit_text_token_ids_from_params(params)?;
+        let seed = indextts_seed_from_params(params)?;
+        let mut rng = SplitMix64::new(seed);
         let uses_explicit_ids = explicit_ids.is_some();
         if is_punctuation_only(text) && explicit_ids.is_none() {
             return Err(InfraError::BadRequest(
@@ -136,6 +142,7 @@ impl IndexTtsAdapter {
                 text_ids,
                 chunk_index,
                 chunks.len(),
+                &mut rng,
             )?;
             total_decode_steps += decode_steps;
             segment_audio.push(generated);
@@ -189,6 +196,7 @@ impl IndexTtsAdapter {
         text_ids: &[i32],
         chunk_index: usize,
         chunk_count: usize,
+        rng: &mut SplitMix64,
     ) -> Result<(Vec<i16>, usize)> {
         let chunk_started = std::time::Instant::now();
         let b_started = std::time::Instant::now();
@@ -213,6 +221,7 @@ impl IndexTtsAdapter {
             chunk_count,
             concat,
             c_start.next_gen_len,
+            rng,
         );
         // This loop includes each E invocation and continuation C invocation.
         let decode_loop_ms = e_started.elapsed().as_millis() as u64;
@@ -382,30 +391,14 @@ impl IndexTtsAdapter {
         chunk_count: usize,
         concat: ConcatState,
         mut gen_len: i64,
+        rng: &mut SplitMix64,
     ) -> Result<DecodeState> {
-        require_inputs(
-            &self.e,
-            &[
-                "history_len",
-                "repeat_penality",
-                "ids_len",
-                "hidden_state",
-                "attention_mask",
-            ],
-            "IndexTTS_E",
-        )?;
+        require_inputs(&self.e, &["hidden_state", "attention_mask"], "IndexTTS_E")?;
         let layer_count = infer_layer_count(self.e.outputs().len())?;
-        let mel_code_size = infer_repeat_penalty_width(&self.e, &self.config)?;
-        let mut keys = (0..layer_count)
-            .map(|idx| empty_cache(&self.e, &format!("in_key_{idx}")))
-            .collect::<Result<Vec<_>>>()?;
-        let mut values = (0..layer_count)
-            .map(|idx| empty_cache(&self.e, &format!("in_value_{idx}")))
-            .collect::<Result<Vec<_>>>()?;
-        let mut history = Vec::<i32>::new();
-        let mut repeat_penalty = vec![1.0_f32; mel_code_size];
+        let mut keys = Vec::new();
+        let mut values = Vec::new();
+        let mut history = vec![self.config.generation_start_token];
         let mut hidden_state = concat.hidden_state;
-        let mut history_len = 0_i64;
         let mut hidden_states = Vec::<OrtTensorOutput>::new();
         let mut silence_guard = SilenceRunGuard::default();
         let mut degeneration = TokenDegenerationObserver::default();
@@ -414,47 +407,45 @@ impl IndexTtsAdapter {
         let mut stopped = false;
         for step_index in 0..budget {
             let mut inputs = Vec::new();
-            for idx in 0..layer_count {
-                inputs.push(clone_as_input(&format!("in_key_{idx}"), &keys[idx])?);
-                inputs.push(clone_as_input(&format!("in_value_{idx}"), &values[idx])?);
-            }
             let first_step = step_index == 0;
-            let (history_len_input, ids_len_input) =
-                e_loop_control_lengths(first_step, concat.concat_len, history_len);
-            // ORT tensor construction in this adapter cannot represent zero-length cache tensors,
-            // so `empty_cache` materializes a one-token dummy cache for dynamic cache dimensions.
-            // Build the attention mask against the actual cache tensor length that the exported
-            // GPT receives as `past_key_values`, while keeping logical history_len/ids_len inputs
-            // unchanged for the E graph's own control flow.
-            let cache_len = cache_sequence_len(keys.first().ok_or_else(|| {
-                InfraError::Backend("IndexTTS_E has no key cache tensors".to_string())
-            })?)?;
-            let attention_mask_len = cache_len + ids_len_input;
-            let masked_prefix_len = if first_step { cache_len } else { 0 };
-            inputs.push(tensor_i64("history_len", vec![1], vec![history_len_input]));
-            inputs.push(tensor_f32(
-                "repeat_penality",
-                vec![1, mel_code_size],
-                repeat_penalty.clone(),
-            ));
-            inputs.push(tensor_i64("ids_len", vec![1], vec![ids_len_input]));
+            if !first_step {
+                for idx in 0..layer_count {
+                    inputs.push(clone_as_input(&format!("in_key_{idx}"), &keys[idx])?);
+                    inputs.push(clone_as_input(&format!("in_value_{idx}"), &values[idx])?);
+                }
+            }
+            let cache_len = if first_step {
+                0
+            } else {
+                cache_sequence_len(&keys[0])?
+            };
+            let ids_len = if first_step {
+                concat.concat_len as i64
+            } else {
+                1
+            };
             inputs.push(clone_as_input("hidden_state", &hidden_state)?);
             inputs.push(attention_mask_input(
-                &self.e,
-                attention_mask_len,
-                masked_prefix_len,
+                if first_step { &self.e_prefill } else { &self.e },
+                cache_len + ids_len,
+                0,
             )?);
 
-            let outputs = self
-                .e
-                .run_tensors(&inputs)
-                .map_err(|err| session_error("IndexTTS_E", &self.e, err))?;
-            let step = parse_e_outputs(outputs, layer_count, &self.e)?;
+            let session = if first_step {
+                &mut self.e_prefill
+            } else {
+                &mut self.e
+            };
+            let outputs = session.run_tensors(&inputs).map_err(|err| {
+                InfraError::Backend(format!("IndexTTS_E v2 execution failed: {err}"))
+            })?;
+            let step = parse_e_outputs(outputs, layer_count, session)?;
             keys = step.keys;
             values = step.values;
-            history_len = step.kv_seq_len;
             hidden_states.push(step.last_hidden_state.clone());
-            let token = step.max_logit_id;
+            let mut logits = raw_logits_f32(&step.raw_logits, DEFAULT_MEL_CODE_SIZE)?;
+            apply_repetition_penalty(&mut logits, &history, DEFAULT_REPEAT_PENALTY)?;
+            let token = sample_logits(&logits, 30, 0.8, 1.0, rng)?;
             let degeneration_milestone = degeneration.observe(token);
             if degeneration_milestone {
                 let snapshot = degeneration.snapshot();
@@ -560,13 +551,7 @@ impl IndexTtsAdapter {
                 stopped = true;
                 break;
             }
-            apply_repeat_penalty_token(
-                &mut repeat_penalty,
-                &mut history,
-                token,
-                DEFAULT_REPEAT_WINDOW,
-                DEFAULT_REPEAT_PENALTY,
-            );
+            history.push(token);
             let DecodeTokenAction::Continue(c_step) = decision else {
                 unreachable!("STOP handled above")
             };
@@ -804,9 +789,8 @@ pub(crate) struct CState {
 pub(crate) struct EStep {
     pub(crate) keys: Vec<OrtTensorOutput>,
     pub(crate) values: Vec<OrtTensorOutput>,
-    pub(crate) kv_seq_len: i64,
     pub(crate) last_hidden_state: OrtTensorOutput,
-    pub(crate) max_logit_id: i32,
+    pub(crate) raw_logits: OrtTensorOutput,
 }
 
 #[derive(Debug, Clone)]
@@ -945,13 +929,27 @@ fn log_token_degeneration(
 
 pub(crate) fn checked_decode_budget(
     max_generate_length: usize,
-    concat_len: usize,
+    _concat_len: usize,
 ) -> Result<usize> {
-    max_generate_length.checked_sub(concat_len).filter(|v| *v > 0).ok_or_else(|| {
-        InfraError::Backend(format!(
-            "IndexTTS has no decode budget: max_generate_length {max_generate_length}, concat_len {concat_len}"
-        ))
-    })
+    (max_generate_length > 0)
+        .then_some(max_generate_length)
+        .ok_or_else(|| {
+            InfraError::Backend(format!("IndexTTS max-new-token budget must be positive"))
+        })
+}
+
+pub(crate) fn indextts_seed_from_params(params: &BTreeMap<String, Value>) -> Result<u64> {
+    let Some(value) = params.get("indextts_seed") else {
+        return Ok(0);
+    };
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+        .ok_or_else(|| {
+            InfraError::BadRequest(format!(
+                "indextts_seed must be an unsigned 64-bit integer or decimal string, got {value}"
+            ))
+        })
 }
 
 pub(crate) fn plan_token_chunks(
