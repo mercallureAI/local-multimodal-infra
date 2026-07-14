@@ -1,13 +1,18 @@
-FROM rust:1.88.0-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 AS builder
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04@sha256:ac55d124da4882b497f732d8dfd9a702d5447a5f29d08d56da6f64f0a1eb34bc AS builder
 
 ARG ORT_CUDA_VERSION=12
 RUN test "${ORT_CUDA_VERSION}" = "12"
 ENV ORT_CUDA_VERSION=${ORT_CUDA_VERSION}
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates build-essential pkg-config \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends ca-certificates curl build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain 1.88.0 \
+    && rustc --version \
+    && cargo --version
 
 COPY . .
 # The cuda feature selects ort-sys' CUDA archive; --locked fixes all Cargo inputs.
@@ -17,9 +22,8 @@ RUN set -eux; \
     find /app/target -name 'libonnxruntime*.so*' ! -name '*tensorrt*' -exec cp -Lv {} /ort-libs/ \;; \
     test -e /ort-libs/libonnxruntime_providers_cuda.so
 
-# ort/ort-sys 2.0.0-rc.12 resolves CUDA 12 to ONNX Runtime 1.24.2's cu12
-# distribution. That provider links CUDA 12 and cuDNN 9. Ubuntu 24.04 also
-# supplies glibc 2.39, satisfying the provider's observed GLIBC_2.38 ceiling.
+# Use Ubuntu 24.04 for both stages: glibc 2.39 satisfies the CUDA archive's
+# GLIBC_2.38 symbols, while keeping the runtime CUDA and cuDNN versions fixed.
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04@sha256:ac55d124da4882b497f732d8dfd9a702d5447a5f29d08d56da6f64f0a1eb34bc
 
 WORKDIR /app
