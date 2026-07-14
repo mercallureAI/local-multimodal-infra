@@ -77,8 +77,7 @@ docker compose up --build
 上面的默认命令仍然使用 CPU 编译，并且不会申请 GPU。NVIDIA 部署需要先安装
 较新的 NVIDIA 驱动和
 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)，
-以及 Docker Compose **2.30.0 或更高版本**（`gpus` service key 的最低版本），
-并确认前置条件：
+以及 Docker Compose，并确认前置条件：
 
 ```bash
 docker compose version
@@ -94,7 +93,7 @@ ORT_CUDA_VERSION=12 docker compose -f docker-compose-nvidia.yml up --build
 
 `ORT_CUDA_VERSION` 默认为且目前仅支持 `12`，它在构建时选择 ORT 的 CUDA 12
 二进制包。该路径目前仅支持 Linux x86_64，与 rc.12 发布的 CUDA 包一致。
-只有 NVIDIA worker 获得 `gpus: all`，并使用独立的
+只有 NVIDIA worker 通过 `deploy.resources.reservations.devices` 预留一个 GPU，并使用独立的
 `local-multimodal-infra:nvidia-cuda12` 镜像；controller 继续使用 CPU 镜像且
 不会获得 GPU。
 

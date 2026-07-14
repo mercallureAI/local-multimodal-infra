@@ -44,7 +44,13 @@ services:
         <<: *proxy-build-args
         ORT_CUDA_VERSION: ${ORT_CUDA_VERSION:-12}
     image: local-multimodal-infra:nvidia-cuda12
-    gpus: all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     volumes:
       - ./workdir:/app/workdir
     environment:

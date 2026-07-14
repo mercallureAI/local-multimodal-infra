@@ -77,8 +77,7 @@ Real models are not baked into the image. After the first startup, download the 
 The default command above remains the CPU build and requests no GPU. For NVIDIA,
 install a current NVIDIA driver plus the
 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html),
-Docker Compose **2.30.0 or newer** (required for the `gpus` service key), and
-verify both prerequisites:
+and Docker Compose, then verify the prerequisites:
 
 ```bash
 docker compose version
@@ -94,7 +93,8 @@ ORT_CUDA_VERSION=12 docker compose -f docker-compose-nvidia.yml up --build
 
 `ORT_CUDA_VERSION` defaults to and currently supports `12`; it selects the
 CUDA 12 ORT archive at build time. This path is currently Linux x86_64 only,
-matching rc.12's published CUDA archive. The NVIDIA worker alone receives `gpus: all`
+matching rc.12's published CUDA archive. The NVIDIA worker alone reserves one GPU
+through `deploy.resources.reservations.devices`
 and uses a distinct `local-multimodal-infra:nvidia-cuda12` image; the controller
 continues to use the CPU image and receives no GPU.
 
