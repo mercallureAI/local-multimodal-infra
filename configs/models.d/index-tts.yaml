@@ -20,7 +20,8 @@ artifacts:
       - manifest.json
       - manifest.yaml
 runtime:
-  provider_order: [cpu]
+  # Root FP32 artifacts use CUDA when available and retain CPU fallback.
+  provider_order: [cuda, cpu]
   max_concurrency: 1
   idle_ttl_sec: 300
 resources:
@@ -35,6 +36,6 @@ metadata:
   model_family: index_tts
   task: text-to-speech
   experimental: true
-  precision: cpu-fp32
+  precision: fp32
   artifact_layout: IndexTTS_A.onnx through IndexTTS_F.onnx plus bpe.model and manifest.yaml/json at the artifact root; FP32-only. Existing q4/ or fp16/ cache directories are ignored and no longer documented as supported runtime targets.
-  mvp_status: Adapter validates FP32 artifacts materialized from Hugging Face or an equivalent artifact root, loads root A-F ORT sessions, uses a lightweight Rust text normalizer plus bpe.model SentencePiece tokenization, and requires FP32 artifact smoke. q4cpu/fp16gpu paths have been withdrawn.
+  mvp_status: Root FP32 A-F ORT sessions are configured for CUDA with CPU fallback. Real NVIDIA hardware execution remains unverified; q4cpu/fp16gpu paths remain withdrawn.

@@ -177,14 +177,14 @@ fn index_tts_default(model_dir: &Path) -> ModelSpec {
     metadata.insert("model_family".to_string(), json!("index_tts"));
     metadata.insert("task".to_string(), json!("text-to-speech"));
     metadata.insert("experimental".to_string(), json!(true));
-    metadata.insert("precision".to_string(), json!("cpu-fp32"));
+    metadata.insert("precision".to_string(), json!("fp32"));
     metadata.insert(
         "artifact_note".to_string(),
         json!("FP32 artifacts are materialized from ModaLeap/indextts-1.5-onnx or an equivalent artifact root. Runtime expects IndexTTS_A.onnx through IndexTTS_F.onnx plus bpe.model and manifest.yaml/json at the artifact root."),
     );
     metadata.insert(
         "mvp_status".to_string(),
-        json!("Adapter validates FP32 artifacts materialized from Hugging Face or an equivalent artifact root, loads root A-F ORT sessions, and uses a lightweight Rust text normalizer plus bpe.model SentencePiece tokenization; FP32 artifact smoke is still required. q4cpu/fp16gpu paths have been withdrawn."),
+        json!("Root FP32 A-F ORT sessions are configured for CUDA with CPU fallback. Real NVIDIA hardware execution remains unverified; q4cpu/fp16gpu paths remain withdrawn."),
     );
     ModelSpec {
         id: id.to_string(),
@@ -219,7 +219,7 @@ fn index_tts_default(model_dir: &Path) -> ModelSpec {
             metadata: BTreeMap::new(),
         }],
         runtime: RuntimePolicy {
-            provider_order: vec!["cpu".to_string()],
+            provider_order: vec!["cuda".to_string(), "cpu".to_string()],
             max_concurrency: 1,
             idle_ttl_sec: 300,
         },
@@ -311,7 +311,7 @@ fn qwen_asr_default(model_dir: &Path) -> ModelSpec {
             metadata: BTreeMap::new(),
         }],
         runtime: RuntimePolicy {
-            provider_order: vec!["cpu".to_string()],
+            provider_order: vec!["cuda".to_string(), "cpu".to_string()],
             max_concurrency: 1,
             idle_ttl_sec: 300,
         },
@@ -336,7 +336,7 @@ fn yolo_default(model_dir: &Path) -> ModelSpec {
     metadata.insert("used_storage_bytes".to_string(), json!(10_700_000));
     metadata.insert(
         "provider_note".to_string(),
-        json!("CPU is the default provider; CUDA is optional only when the backend feature/runtime supports it"),
+        json!("CUDA is preferred when compiled and available; CPU is the portable fallback"),
     );
     metadata.insert(
         "labels_source".to_string(),
@@ -376,7 +376,7 @@ fn yolo_default(model_dir: &Path) -> ModelSpec {
             },
         ],
         runtime: RuntimePolicy {
-            provider_order: vec!["cpu".to_string()],
+            provider_order: vec!["cuda".to_string(), "cpu".to_string()],
             max_concurrency: 4,
             idle_ttl_sec: 600,
         },
@@ -420,9 +420,13 @@ mod tests {
         assert!(!specs.is_empty());
         for spec in &specs {
             assert_eq!(
-                spec.runtime.provider_order.first().map(String::as_str),
-                Some("cpu"),
-                "{} must keep CPU as the primary provider",
+                spec.runtime
+                    .provider_order
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                ["cuda", "cpu"],
+                "{} must prefer CUDA then CPU",
                 spec.id
             );
             if spec.task_kinds.contains(&TaskKind::TtsSynthesize) {
@@ -442,16 +446,20 @@ mod tests {
     }
 
     #[test]
-    fn checked_in_yaml_models_are_cpu_primary_and_keep_tts_disabled() {
+    fn checked_in_yaml_models_are_cuda_first_with_cpu_fallback() {
         let models_conf_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs/models.d");
         let specs = load_yaml_specs(&models_conf_dir).expect("load checked-in YAML specs");
 
         assert!(!specs.is_empty());
         for spec in &specs {
             assert_eq!(
-                spec.runtime.provider_order.first().map(String::as_str),
-                Some("cpu"),
-                "{} must keep CPU as the primary provider",
+                spec.runtime
+                    .provider_order
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                ["cuda", "cpu"],
+                "{} must prefer CUDA then CPU",
                 spec.id
             );
             if spec.task_kinds.contains(&TaskKind::TtsSynthesize) {
@@ -467,6 +475,114 @@ mod tests {
                     .all(|artifact| artifact.repo_id.as_deref()
                         == Some("ModaLeap/indextts-1.5-onnx")));
             }
+        }
+    }
+
+    #[test]
+    fn nvidia_compose_static_contract_is_worker_only_cuda() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let nvidia_compose = std::fs::read_to_string(root.join("docker-compose-nvidia.yml"))
+            .expect("read NVIDIA compose");
+        let compose: serde_yaml::Value =
+            serde_yaml::from_str(&nvidia_compose).expect("parse NVIDIA compose YAML");
+        let services = compose
+            .get("services")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("services mapping");
+        let controller = services
+            .get(serde_yaml::Value::from("controller"))
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("controller service");
+        let worker = services
+            .get(serde_yaml::Value::from("worker"))
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("worker service");
+
+        assert!(!controller.contains_key(serde_yaml::Value::from("gpus")));
+        assert!(!controller.contains_key(serde_yaml::Value::from("deploy")));
+        assert_eq!(
+            worker
+                .get(serde_yaml::Value::from("gpus"))
+                .and_then(serde_yaml::Value::as_str),
+            Some("all")
+        );
+        let command_contains = |service: &serde_yaml::Mapping, expected: &str| {
+            service
+                .get(serde_yaml::Value::from("command"))
+                .and_then(serde_yaml::Value::as_sequence)
+                .is_some_and(|command| command.iter().any(|value| value.as_str() == Some(expected)))
+        };
+        assert!(command_contains(
+            controller,
+            "configs/docker-controller.yaml"
+        ));
+        assert!(command_contains(worker, "configs/docker-worker.yaml"));
+
+        let dockerfile = std::fs::read_to_string(root.join("Dockerfile.nvidia"))
+            .expect("read NVIDIA Dockerfile");
+        assert!(dockerfile
+            .contains("cargo build --locked --release -p local-cli --bin worker --features cuda"));
+        assert!(dockerfile.contains("ARG ORT_CUDA_VERSION=12"));
+        assert!(dockerfile.contains("test -x /usr/local/bin/worker"));
+        assert!(dockerfile.contains("test -e /usr/local/lib/libonnxruntime_providers_cuda.so"));
+        assert!(dockerfile.contains("ldd \"${file}\""));
+        assert!(!dockerfile
+            .to_ascii_lowercase()
+            .contains("--features tensorrt"));
+        assert!(dockerfile.contains("! -name '*tensorrt*'"));
+        assert_eq!(
+            worker
+                .get(serde_yaml::Value::from("platform"))
+                .and_then(serde_yaml::Value::as_str),
+            Some("linux/amd64")
+        );
+
+        let shared_specs =
+            load_yaml_specs(root.join("configs/models.d")).expect("load shared specs");
+        assert_eq!(shared_specs.len(), 3);
+        for spec in &shared_specs {
+            let order = spec
+                .runtime
+                .provider_order
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            assert!(
+                !order.iter().any(|provider| {
+                    provider.eq_ignore_ascii_case("trt")
+                        || provider.eq_ignore_ascii_case("tensorrt")
+                }),
+                "{} must not request TensorRT",
+                spec.id
+            );
+            match spec.id.as_str() {
+                "yolo11n.onnx" | "qwen3-asr-0.6b-onnx" | "indextts-1.5-onnx" => {
+                    assert_eq!(order, ["cuda", "cpu"], "{} provider order", spec.id);
+                    if spec.id == "indextts-1.5-onnx" {
+                        assert!(!spec.enabled, "IndexTTS must remain disabled by default");
+                    }
+                }
+                other => panic!("unexpected NVIDIA model spec {other}"),
+            }
+        }
+
+        let cpu_compose =
+            std::fs::read_to_string(root.join("docker-compose.yml")).expect("read CPU compose");
+        let cpu_compose: serde_yaml::Value =
+            serde_yaml::from_str(&cpu_compose).expect("parse CPU compose YAML");
+        let cpu_services = cpu_compose
+            .get("services")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("CPU services mapping");
+        for service in cpu_services
+            .values()
+            .filter_map(serde_yaml::Value::as_mapping)
+        {
+            assert!(
+                !service.contains_key(serde_yaml::Value::from("gpus"))
+                    && !service.contains_key(serde_yaml::Value::from("deploy")),
+                "CPU compose must not request GPUs"
+            );
         }
     }
 }

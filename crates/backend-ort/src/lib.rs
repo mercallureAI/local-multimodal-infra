@@ -10,6 +10,8 @@ use ort::{
     value::{DynTensor, Tensor, TensorElementType, ValueType},
 };
 use serde::{Deserialize, Serialize};
+#[cfg(any(feature = "cuda", test))]
+use std::sync::OnceLock;
 use std::{
     borrow::Cow,
     collections::HashSet,
@@ -107,23 +109,87 @@ pub fn probe_runtime_execution_provider_availability() -> RuntimeExecutionProvid
     }
 }
 
+#[cfg(feature = "cuda")]
+static CUDA_RUNTIME_USABILITY: OnceLock<bool> = OnceLock::new();
+
 fn probe_cuda_runtime_availability() -> bool {
     #[cfg(feature = "cuda")]
     {
-        match ort::ep::CUDA::default().is_available() {
-            Ok(available) => available,
-            Err(err) => {
-                let err = map_ort_err(err);
-                tracing::warn!(error = %err, "failed to probe CUDA ORT execution provider availability");
-                false
-            }
-        }
+        cached_cuda_runtime_usability_with(&CUDA_RUNTIME_USABILITY, || {
+            probe_cuda_runtime_usability_with(
+                || ort::ep::CUDA::default().is_available().map_err(map_ort_err),
+                create_cuda_usability_probe_session,
+            )
+        })
     }
 
     #[cfg(not(feature = "cuda"))]
     {
         false
     }
+}
+
+#[cfg(any(feature = "cuda", test))]
+fn cached_cuda_runtime_usability_with(
+    cache: &OnceLock<bool>,
+    probe: impl FnOnce() -> Result<()>,
+) -> bool {
+    *cache.get_or_init(|| match probe() {
+        Ok(()) => {
+            tracing::debug!(
+                "CUDA ORT execution provider passed process-level session creation probe"
+            );
+            true
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "CUDA ORT execution provider is compiled in but unusable; CUDA will be filtered before model loading"
+            );
+            false
+        }
+    })
+}
+
+#[cfg(any(feature = "cuda", test))]
+fn probe_cuda_runtime_usability_with(
+    check_compiled_provider: impl FnOnce() -> Result<bool>,
+    create_probe_session: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if !check_compiled_provider()? {
+        return Err(InfraError::Unsupported(
+            "CUDA execution provider is not included in the active ONNX Runtime binary".to_string(),
+        ));
+    }
+    create_probe_session()
+}
+
+#[cfg(feature = "cuda")]
+fn create_cuda_usability_probe_session() -> Result<()> {
+    // A deterministic one-node FP32 Identity graph. Loading it from memory avoids
+    // filesystem lifetime and cleanup concerns. Disabling graph optimization
+    // preserves the node while ORT registers and initializes the CUDA EP.
+    const CUDA_PROBE_ONNX: &[u8] = &[
+        0x08, 0x08, 0x12, 0x1c, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x2d, 0x62, 0x61, 0x63, 0x6b, 0x65,
+        0x6e, 0x64, 0x2d, 0x6f, 0x72, 0x74, 0x2d, 0x63, 0x75, 0x64, 0x61, 0x2d, 0x70, 0x72, 0x6f,
+        0x62, 0x65, 0x3a, 0x4a, 0x0a, 0x10, 0x0a, 0x01, 0x78, 0x12, 0x01, 0x79, 0x22, 0x08, 0x49,
+        0x64, 0x65, 0x6e, 0x74, 0x69, 0x74, 0x79, 0x12, 0x14, 0x63, 0x75, 0x64, 0x61, 0x5f, 0x75,
+        0x73, 0x61, 0x62, 0x69, 0x6c, 0x69, 0x74, 0x79, 0x5f, 0x70, 0x72, 0x6f, 0x62, 0x65, 0x5a,
+        0x0f, 0x0a, 0x01, 0x78, 0x12, 0x0a, 0x0a, 0x08, 0x08, 0x01, 0x12, 0x04, 0x0a, 0x02, 0x08,
+        0x01, 0x62, 0x0f, 0x0a, 0x01, 0x79, 0x12, 0x0a, 0x0a, 0x08, 0x08, 0x01, 0x12, 0x04, 0x0a,
+        0x02, 0x08, 0x01, 0x42, 0x02, 0x10, 0x0d,
+    ];
+
+    let cuda = ort::ep::CUDA::default();
+    Session::builder()
+        .map_err(map_ort_err)?
+        .with_execution_providers([cuda.build().error_on_failure()])
+        .map_err(map_ort_err)?
+        .with_optimization_level(GraphOptimizationLevel::Disable)
+        .map_err(map_ort_err)?
+        .commit_from_memory(CUDA_PROBE_ONNX)
+        .map_err(map_ort_err)?;
+    Ok(())
 }
 
 fn probe_dml_runtime_availability() -> bool {
@@ -384,6 +450,26 @@ impl OrtSession {
         selection: ProviderSelection,
         cpu_session_options: Option<CpuSessionOptions>,
     ) -> Result<Self> {
+        Self::load_with_provider_loaders(
+            model_path,
+            selection,
+            cpu_session_options,
+            RealSession::load_cpu,
+            RealSession::load_cuda,
+        )
+    }
+
+    fn load_with_provider_loaders<LoadCpu, LoadCuda>(
+        model_path: &Path,
+        selection: ProviderSelection,
+        cpu_session_options: Option<CpuSessionOptions>,
+        mut load_cpu: LoadCpu,
+        mut load_cuda: LoadCuda,
+    ) -> Result<Self>
+    where
+        LoadCpu: FnMut(&Path, Option<CpuSessionOptions>) -> Result<RealSession>,
+        LoadCuda: FnMut(&Path, &ProviderOptions) -> Result<RealSession>,
+    {
         if !model_path.exists() {
             return Err(InfraError::ModelNotConfigured {
                 model_id: "unknown".to_string(),
@@ -398,7 +484,7 @@ impl OrtSession {
             match provider.kind {
                 ProviderKind::Cpu => {
                     attempted_cpu = true;
-                    match RealSession::load_cpu(model_path, cpu_session_options) {
+                    match load_cpu(model_path, cpu_session_options) {
                         Ok(real) => {
                             return Ok(Self {
                                 model_path: model_path.to_path_buf(),
@@ -410,7 +496,7 @@ impl OrtSession {
                         Err(err) => errors.push(format!("cpu: {err}")),
                     }
                 }
-                ProviderKind::Cuda => match RealSession::load_cuda(model_path, provider) {
+                ProviderKind::Cuda => match load_cuda(model_path, provider) {
                     Ok(real) => {
                         return Ok(Self {
                             model_path: model_path.to_path_buf(),
@@ -457,7 +543,7 @@ impl OrtSession {
 
         if selection.fallback_to_cpu && !attempted_cpu {
             tracing::warn!("falling back to CPU provider after configured providers failed");
-            match RealSession::load_cpu(model_path, cpu_session_options) {
+            match load_cpu(model_path, cpu_session_options) {
                 Ok(real) => {
                     return Ok(Self {
                         model_path: model_path.to_path_buf(),
@@ -909,7 +995,56 @@ fn map_ort_err<R>(err: ort::Error<R>) -> InfraError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::{
+        fs,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    #[cfg(not(feature = "cuda"))]
+    #[test]
+    fn cuda_runtime_probe_is_false_without_cuda_feature() {
+        assert!(!probe_cuda_runtime_availability());
+    }
+
+    #[test]
+    fn cuda_usability_probe_rejects_compiled_provider_when_session_creation_fails() {
+        let cache = OnceLock::new();
+        let usable = cached_cuda_runtime_usability_with(&cache, || {
+            probe_cuda_runtime_usability_with(
+                || Ok(true),
+                || {
+                    Err(InfraError::Backend(
+                        "forced CUDA registration/session failure".to_string(),
+                    ))
+                },
+            )
+        });
+
+        assert!(!usable);
+    }
+
+    #[test]
+    fn cuda_usability_probe_accepts_successful_session_creation() {
+        let cache = OnceLock::new();
+        assert!(cached_cuda_runtime_usability_with(&cache, || {
+            probe_cuda_runtime_usability_with(|| Ok(true), || Ok(()))
+        }));
+    }
+
+    #[test]
+    fn cuda_usability_probe_result_is_cached_once_per_cache() {
+        let cache = OnceLock::new();
+        let attempts = AtomicUsize::new(0);
+
+        for _ in 0..3 {
+            assert!(!cached_cuda_runtime_usability_with(&cache, || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err(InfraError::Backend("forced failure".to_string()))
+            }));
+        }
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn parses_provider_order_with_cpu_fallback() {
@@ -995,6 +1130,41 @@ mod tests {
         assert_eq!(outputs[0].name, "y");
         assert_eq!(outputs[0].shape, vec![2]);
         assert_eq!(outputs[0].data, vec![1.5, -2.0]);
+    }
+
+    #[test]
+    fn cuda_load_failure_after_selection_records_cpu_fallback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model_path = dir.path().join("identity_f32.onnx");
+        fs::write(&model_path, identity_model(1)).expect("write model");
+        let selection = ProviderSelection::from_strings(&["cuda".into(), "cpu".into()]);
+        assert_eq!(
+            selection
+                .order
+                .iter()
+                .map(|provider| provider.kind)
+                .collect::<Vec<_>>(),
+            [ProviderKind::Cuda, ProviderKind::Cpu]
+        );
+        let mut cuda_attempted = false;
+
+        let session = OrtSession::load_with_provider_loaders(
+            &model_path,
+            selection,
+            None,
+            RealSession::load_cpu,
+            |_path, _provider| {
+                cuda_attempted = true;
+                Err(InfraError::Backend(
+                    "forced CUDA session creation failure".to_string(),
+                ))
+            },
+        )
+        .expect("CPU fallback after forced CUDA failure");
+
+        assert!(cuda_attempted, "CUDA loader must be attempted first");
+        assert_eq!(session.provider(), ProviderKind::Cpu);
+        assert!(session.cpu_fallback_used());
     }
 
     #[test]

@@ -23,8 +23,8 @@ artifacts:
       - added_tokens.json
       - vocab.json
 runtime:
-  # CPU is the portable default. Add cuda only after building/verifying the CUDA ORT EP.
-  provider_order: [cpu]
+  # CUDA is preferred when available; CPU remains the portable fallback.
+  provider_order: [cuda, cpu]
   max_concurrency: 1
   idle_ttl_sec: 300
 resources:

@@ -179,14 +179,15 @@ impl IndexTtsAdapter {
     }
 
     pub fn provider_report(&self) -> IndexTtsProviderReport {
-        IndexTtsProviderReport {
-            a: self.a.provider_report(),
-            b: self.b.provider_report(),
-            c: self.c.provider_report(),
-            d: self.d.provider_report(),
-            e: self.e.provider_report(),
-            f: self.f.provider_report(),
-        }
+        index_tts_provider_report_with(|session| match session {
+            IndexTtsSession::A => self.a.provider_report(),
+            IndexTtsSession::B => self.b.provider_report(),
+            IndexTtsSession::C => self.c.provider_report(),
+            IndexTtsSession::D => self.d.provider_report(),
+            IndexTtsSession::E => self.e.provider_report(),
+            IndexTtsSession::EPrefill => self.e_prefill.provider_report(),
+            IndexTtsSession::F => self.f.provider_report(),
+        })
     }
 
     fn run_bf(
@@ -688,6 +689,31 @@ impl IndexTtsAdapter {
         let mut file = FileRef::local(path);
         file.mime = Some("audio/wav".to_string());
         Ok(file)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IndexTtsSession {
+    A,
+    B,
+    C,
+    D,
+    E,
+    EPrefill,
+    F,
+}
+
+pub(crate) fn index_tts_provider_report_with(
+    mut report: impl FnMut(IndexTtsSession) -> SessionProviderReport,
+) -> IndexTtsProviderReport {
+    IndexTtsProviderReport {
+        a: report(IndexTtsSession::A),
+        b: report(IndexTtsSession::B),
+        c: report(IndexTtsSession::C),
+        d: report(IndexTtsSession::D),
+        e: report(IndexTtsSession::E),
+        e_prefill: report(IndexTtsSession::EPrefill),
+        f: report(IndexTtsSession::F),
     }
 }
 

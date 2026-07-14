@@ -72,6 +72,62 @@ docker compose up --build
 
 真实模型不会打包进镜像。首次启动后，需要通过管理接口下载默认模型，或提前把模型放入 `workdir/models`。
 
+### NVIDIA GPU Compose
+
+上面的默认命令仍然使用 CPU 编译，并且不会申请 GPU。NVIDIA 部署需要先安装
+较新的 NVIDIA 驱动和
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)，
+以及 Docker Compose **2.30.0 或更高版本**（`gpus` service key 的最低版本），
+并确认前置条件：
+
+```bash
+docker compose version
+nvidia-smi
+```
+
+然后运行：
+
+```bash
+cp .env.example .env
+ORT_CUDA_VERSION=12 docker compose -f docker-compose-nvidia.yml up --build
+```
+
+`ORT_CUDA_VERSION` 默认为且目前仅支持 `12`，它在构建时选择 ORT 的 CUDA 12
+二进制包。该路径目前仅支持 Linux x86_64，与 rc.12 发布的 CUDA 包一致。
+只有 NVIDIA worker 获得 `gpus: all`，并使用独立的
+`local-multimodal-infra:nvidia-cuda12` 镜像；controller 继续使用 CPU 镜像且
+不会获得 GPU。
+
+CPU 与 NVIDIA Compose 共同使用唯一的 `configs/models.d`。YOLO、Qwen ASR 和
+FP32 IndexTTS 表达 `[cuda, cpu]` 意图。session 加载前，runtime availability
+解析会在 CUDA 未编译时立即将其变为 `[cpu]`；CUDA 构建会执行并缓存一次微型
+CUDA session 探针，若 EP 无法注册和初始化，则不会尝试模型 CUDA session。
+探针成功时保持 CUDA 优先和 CPU 回退，但它不验证每个模型或算子，特定模型的
+CUDA 加载仍可能回退 CPU。IndexTTS policy 及 A、B、C、D、E、E-prefill、F
+共七个 session 都传递此顺序并报告实际 provider，但真实 NVIDIA 硬件与工件
+验证仍未完成。TensorRT 不受支持且不在本任务范围内。
+
+不要把 `/health` 当成 GPU 推理证明。先运行
+`docker compose -f docker-compose-nvidia.yml exec worker nvidia-smi` 验证容器
+可见 GPU。下载并启用 YOLO 工件后，把仓库样例复制到 worker 可见的共享
+workdir，再发送真实的受支持请求：
+
+```bash
+mkdir -p workdir/data
+cp scripts/assets/yolo-input.jpg workdir/data/yolo-input.jpg
+curl --fail-with-body http://127.0.0.1:17890/rpc/infer \
+  -H 'content-type: application/json' \
+  --data '{"jsonrpc":"2.0","id":"gpu-yolo","method":"object_detect","params":{"model":"yolo11n.onnx","image":{"path":"/app/workdir/data/yolo-input.jpg","mime":"image/jpeg"}}}'
+docker compose -f docker-compose-nvidia.yml logs worker |
+  grep 'lazy loading model'
+docker compose -f docker-compose-nvidia.yml exec worker nvidia-smi dmon -s pucvmet
+```
+
+在另一个终端中于请求期间启动 `nvidia-smi dmon`。lazy-load 日志显示 effective
+provider order，dmon 可显示同时段 GPU 活动；两者都不能证明逐节点 GPU placement。
+硬件快照中的 `has_cuda` 当前仍会是 `false`，因为控制面报告尚未探测 NVML；
+它不决定 ORT CUDA EP 的实际选择。
+
 ## 本地开发
 
 不使用 Docker 时，可以直接运行 controller 和 worker。具体命令、服务约束和 smoke harness 用法见 [AGENTS.md](AGENTS.md) 与 [Implementation notes](docs/implementation-notes.md)。
@@ -101,7 +157,8 @@ python -m scripts.local.smoke --tests all --workdir ./workdir --model-dir ./work
 
 - `workdir/models`：真实模型工件。
 - `workdir/data`：SQLite、上传文件、日志和生成结果。
-- `docker-compose.yml` / `Dockerfile`：可选的容器化启动入口。
+- `docker-compose.yml` / `Dockerfile`：CPU 容器启动入口。
+- `docker-compose-nvidia.yml` / `Dockerfile.nvidia`：NVIDIA CUDA 12 worker 启动入口。
 - `scripts/local/smoke.py`：本地 smoke harness。
 - `docs/implementation-notes.md`：更多实现细节。
 
@@ -120,6 +177,7 @@ python -m scripts.local.smoke --tests all --workdir ./workdir --model-dir ./work
 - [AGENTS.md](AGENTS.md)
 - [Dockerfile](Dockerfile)
 - [docker-compose.yml](docker-compose.yml)
+- [docker-compose-nvidia.yml](docker-compose-nvidia.yml)
 - [.env.example](.env.example)
 
 Release smoke examples:

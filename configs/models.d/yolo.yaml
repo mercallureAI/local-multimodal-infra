@@ -14,8 +14,8 @@ artifacts:
     url: https://raw.githubusercontent.com/ultralytics/ultralytics/main/ultralytics/cfg/datasets/coco.yaml
     # Labels are not in the HF repo; path materializes to <model_dir>/yolo11n.onnx/coco.yaml.
 runtime:
-  # CPU is the portable default. Add cuda only after building/verifying the CUDA ORT EP.
-  provider_order: [cpu]
+  # CUDA is preferred when available; CPU remains the portable fallback.
+  provider_order: [cuda, cpu]
   max_concurrency: 4
   idle_ttl_sec: 600
 resources:
@@ -28,5 +28,5 @@ load_policy:
 metadata:
   runtime: onnxruntime
   used_storage_bytes: 10700000
-  provider_note: CPU is the default provider; CUDA is optional only when the backend feature/runtime supports it.
+  provider_note: CUDA is preferred when compiled and available; CPU is the portable fallback.
   labels_source: COCO labels URL from Ultralytics, not from the HF model repo.

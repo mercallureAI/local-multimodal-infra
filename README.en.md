@@ -72,6 +72,67 @@ With Docker Compose you get:
 
 Real models are not baked into the image. After the first startup, download the default models through the admin interface or place artifacts under `workdir/models` yourself.
 
+### NVIDIA GPU Compose
+
+The default command above remains the CPU build and requests no GPU. For NVIDIA,
+install a current NVIDIA driver plus the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html),
+Docker Compose **2.30.0 or newer** (required for the `gpus` service key), and
+verify both prerequisites:
+
+```bash
+docker compose version
+nvidia-smi
+```
+
+Then run:
+
+```bash
+cp .env.example .env
+ORT_CUDA_VERSION=12 docker compose -f docker-compose-nvidia.yml up --build
+```
+
+`ORT_CUDA_VERSION` defaults to and currently supports `12`; it selects the
+CUDA 12 ORT archive at build time. This path is currently Linux x86_64 only,
+matching rc.12's published CUDA archive. The NVIDIA worker alone receives `gpus: all`
+and uses a distinct `local-multimodal-infra:nvidia-cuda12` image; the controller
+continues to use the CPU image and receives no GPU.
+
+CPU and NVIDIA Compose share the sole `configs/models.d` catalog. YOLO, Qwen
+ASR, and FP32 IndexTTS express `[cuda, cpu]` intent. Before loading sessions,
+runtime availability resolution turns this into `[cpu]` when CUDA is not
+compiled or when a cached process-level tiny CUDA session probe cannot register
+and initialize the EP, without attempting model CUDA sessions; when usable it
+remains CUDA-first with CPU fallback. This probe does not validate every model
+or operator, and a model-specific CUDA load can still fall back to CPU.
+IndexTTS policy and all seven A, B, C, D, E, E-prefill, and F sessions carry
+this order and report their selected provider, but real NVIDIA
+hardware/artifact validation is still outstanding.
+TensorRT is unsupported and out of scope.
+
+Do not use `/health` as proof of GPU inference. Verify container visibility
+with `docker compose -f docker-compose-nvidia.yml exec worker nvidia-smi`.
+After downloading/enabling the YOLO artifacts, copy the checked-in sample into
+the shared worker-visible workdir and send a real supported direct request:
+
+```bash
+mkdir -p workdir/data
+cp scripts/assets/yolo-input.jpg workdir/data/yolo-input.jpg
+curl --fail-with-body http://127.0.0.1:17890/rpc/infer \
+  -H 'content-type: application/json' \
+  --data '{"jsonrpc":"2.0","id":"gpu-yolo","method":"object_detect","params":{"model":"yolo11n.onnx","image":{"path":"/app/workdir/data/yolo-input.jpg","mime":"image/jpeg"}}}'
+docker compose -f docker-compose-nvidia.yml logs worker |
+  grep 'lazy loading model'
+docker compose -f docker-compose-nvidia.yml exec worker nvidia-smi dmon -s pucvmet
+```
+
+Start `nvidia-smi dmon` in another terminal during the request. The lazy-load
+log shows the effective provider order and dmon can show concurrent GPU
+activity; neither proves per-node GPU placement.
+The hardware snapshot's `has_cuda` currently remains `false` because
+control-plane reporting does not probe NVML; this does not determine ORT CUDA
+EP selection.
+
 ## Local development
 
 Without Docker, run the controller and worker directly. See [AGENTS.md](AGENTS.md) and [Implementation notes](docs/implementation-notes.md) for commands, service rules, and smoke harness details.
@@ -101,7 +162,8 @@ Common configuration entry points:
 
 - `workdir/models`: real model artifacts.
 - `workdir/data`: SQLite, uploads, logs, and generated outputs.
-- `docker-compose.yml` / `Dockerfile`: optional container startup path.
+- `docker-compose.yml` / `Dockerfile`: CPU container startup path.
+- `docker-compose-nvidia.yml` / `Dockerfile.nvidia`: NVIDIA CUDA 12 worker startup path.
 - `scripts/local/smoke.py`: local smoke harness.
 - `docs/implementation-notes.md`: implementation details.
 
@@ -120,6 +182,7 @@ Common configuration entry points:
 - [AGENTS.md](AGENTS.md)
 - [Dockerfile](Dockerfile)
 - [docker-compose.yml](docker-compose.yml)
+- [docker-compose-nvidia.yml](docker-compose-nvidia.yml)
 - [.env.example](.env.example)
 
 Release smoke examples:

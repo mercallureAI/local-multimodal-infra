@@ -1,4 +1,5 @@
 use super::*;
+use local_backend_ort::ProviderKind;
 use local_core::{
     AdapterKind, ArtifactKind, BackendKind, FileRef, InferenceOutput, ModelArtifact, ModelSpec,
     ResourceRequirement, RuntimePolicy,
@@ -1673,6 +1674,39 @@ fn concatenate_hidden_states_flattens_batch_token_hidden() {
 }
 
 #[test]
+fn provider_report_maps_all_seven_sessions_including_e_prefill() {
+    let mut observed = Vec::new();
+    let report = index_tts_provider_report_with(|session| {
+        observed.push(session);
+        SessionProviderReport {
+            provider: if session == IndexTtsSession::EPrefill {
+                ProviderKind::Cuda
+            } else {
+                ProviderKind::Cpu
+            },
+            cpu_fallback_used: session == IndexTtsSession::F,
+        }
+    });
+
+    assert_eq!(
+        observed,
+        [
+            IndexTtsSession::A,
+            IndexTtsSession::B,
+            IndexTtsSession::C,
+            IndexTtsSession::D,
+            IndexTtsSession::E,
+            IndexTtsSession::EPrefill,
+            IndexTtsSession::F,
+        ]
+    );
+    assert_eq!(report.e.provider, ProviderKind::Cpu);
+    assert_eq!(report.e_prefill.provider, ProviderKind::Cuda);
+    assert_eq!(report.f.provider, ProviderKind::Cpu);
+    assert!(report.f.cpu_fallback_used);
+}
+
+#[test]
 fn real_model_smoke_if_env_set() {
     let Ok(model_dir) = std::env::var("LOCAL_INDEXTTS_MODEL_DIR") else {
         return;
@@ -1702,7 +1736,7 @@ fn real_model_smoke_if_env_set() {
     };
     let report = adapter.provider_report();
     eprintln!(
-        "IndexTTS provider report: A={:?}/{} B={:?}/{} C={:?}/{} D={:?}/{} E={:?}/{} F={:?}/{}",
+        "IndexTTS provider report: A={:?}/{} B={:?}/{} C={:?}/{} D={:?}/{} E={:?}/{} E-prefill={:?}/{} F={:?}/{}",
         report.a.provider,
         report.a.cpu_fallback_used,
         report.b.provider,
@@ -1713,6 +1747,8 @@ fn real_model_smoke_if_env_set() {
         report.d.cpu_fallback_used,
         report.e.provider,
         report.e.cpu_fallback_used,
+        report.e_prefill.provider,
+        report.e_prefill.cpu_fallback_used,
         report.f.provider,
         report.f.cpu_fallback_used
     );

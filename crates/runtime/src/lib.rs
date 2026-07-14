@@ -479,22 +479,36 @@ fn effective_provider_order_for_model(
     stored_provider_order: &[String],
     availability: RuntimeProviderAvailability,
 ) -> Option<Vec<String>> {
-    if stored_provider_order.len() != 1 || !stored_provider_order[0].eq_ignore_ascii_case("cpu") {
-        return None;
-    }
-
     let validated = validated_runtime_providers_for_model(model_id)?;
     let mut effective = Vec::new();
-    for provider in ["trt", "cuda", "dml", "cpu"] {
+    let default_order;
+    let intended_order = if stored_provider_order.len() == 1
+        && stored_provider_order[0].eq_ignore_ascii_case("cpu")
+    {
+        default_order = ["trt", "cuda", "dml", "cpu"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        &default_order
+    } else {
+        stored_provider_order
+    };
+    for provider in intended_order {
+        let provider = provider.to_ascii_lowercase();
         let available = match provider {
-            "trt" => availability.tensorrt,
-            "cuda" => availability.cuda,
-            "dml" => availability.directml,
-            "cpu" => true,
+            ref name if name == "trt" || name == "tensorrt" => availability.tensorrt,
+            ref name if name == "cuda" => availability.cuda,
+            ref name if name == "dml" || name == "directml" => availability.directml,
+            ref name if name == "cpu" => true,
             _ => false,
         };
-        if available && validated.iter().any(|candidate| *candidate == provider) {
-            effective.push(provider.to_string());
+        let canonical = match provider.as_str() {
+            "tensorrt" => "trt",
+            "directml" => "dml",
+            provider => provider,
+        };
+        if available && validated.iter().any(|candidate| *candidate == canonical) {
+            effective.push(canonical.to_string());
         }
     }
 
@@ -509,9 +523,9 @@ fn validated_runtime_providers_for_model(model_id: &str) -> Option<&'static [&'s
         // Qwen ASR is a multi-session int4-first pipeline; keep this conservative
         // and only prefer CUDA above CPU until DML/TRT are validated end-to-end.
         "qwen3-asr-0.6b-onnx" => Some(&["cuda", "cpu"]),
-        // IndexTTS deliberately stays CPU-only for now; q4/fp16 paths were
-        // withdrawn and no GPU runtime path is currently validated.
-        "indextts-1.5-onnx" => Some(&["cpu"]),
+        // All A-F/prefill sessions receive the same provider selection. Root
+        // FP32 CUDA is policy-enabled, but still needs real NVIDIA validation.
+        "indextts-1.5-onnx" => Some(&["cuda", "cpu"]),
         _ => None,
     }
 }
@@ -1016,14 +1030,67 @@ mod tests {
     }
 
     #[test]
+    fn effective_provider_order_filters_unavailable_cuda_before_loading() {
+        let mut spec = test_spec(
+            "indextts-1.5-onnx",
+            AdapterKind::IndexTts,
+            true,
+            PathBuf::from("missing"),
+        );
+        spec.runtime.provider_order = vec!["cuda".to_string(), "cpu".to_string()];
+
+        let effective = effective_load_spec_with_availability(
+            &spec,
+            RuntimeProviderAvailability {
+                cuda: false,
+                directml: false,
+                tensorrt: false,
+            },
+        );
+
+        assert_eq!(effective.runtime.provider_order, vec!["cpu".to_string()]);
+        assert_eq!(
+            spec.runtime.provider_order,
+            vec!["cuda".to_string(), "cpu".to_string()]
+        );
+    }
+
+    #[test]
+    fn effective_provider_order_preserves_cuda_when_available() {
+        for (model_id, adapter) in [
+            ("yolo11n.onnx", AdapterKind::Yolo),
+            ("qwen3-asr-0.6b-onnx", AdapterKind::QwenAsr),
+            ("indextts-1.5-onnx", AdapterKind::IndexTts),
+        ] {
+            let mut spec = test_spec(model_id, adapter, true, PathBuf::from("missing"));
+            spec.runtime.provider_order = vec!["cuda".to_string(), "cpu".to_string()];
+
+            let effective = effective_load_spec_with_availability(
+                &spec,
+                RuntimeProviderAvailability {
+                    cuda: true,
+                    directml: false,
+                    tensorrt: false,
+                },
+            );
+
+            assert_eq!(
+                effective.runtime.provider_order,
+                vec!["cuda".to_string(), "cpu".to_string()],
+                "model {model_id}"
+            );
+        }
+    }
+
+    #[test]
     fn effective_provider_order_is_model_specific_and_conservative() {
-        let qwen = test_spec(
+        let mut qwen = test_spec(
             "qwen3-asr-0.6b-onnx",
             AdapterKind::QwenAsr,
             true,
             PathBuf::from("missing"),
         );
-        let indextts = test_spec(
+        let mut indextts = test_spec(
             "indextts-1.5-onnx",
             AdapterKind::IndexTts,
             true,
@@ -1034,6 +1101,8 @@ mod tests {
             directml: true,
             tensorrt: true,
         };
+        qwen.runtime.provider_order = vec!["cuda".to_string(), "cpu".to_string()];
+        indextts.runtime.provider_order = vec!["cuda".to_string(), "cpu".to_string()];
 
         assert_eq!(
             effective_load_spec_with_availability(&qwen, availability)
@@ -1045,7 +1114,7 @@ mod tests {
             effective_load_spec_with_availability(&indextts, availability)
                 .runtime
                 .provider_order,
-            vec!["cpu".to_string()]
+            vec!["cuda".to_string(), "cpu".to_string()]
         );
     }
 

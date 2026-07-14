@@ -4,19 +4,103 @@
 
 This MVP intentionally implements only the ORT backend seam. Candle, Python, C++, sidecar, and external-process alternatives are not implemented. If a path would require a non-ORT backend it must return `Unsupported`, `NeedUserConfirmation`, or `NeedImplementation`.
 
-The `ort` crate is configured with downloaded/copied CPU binaries so build/check does not require a system-wide ONNX Runtime install. The backend remains ORT-specific at the API/config layer; CUDA/DML provider features are opt-in and must be validated against the local ORT execution providers before use.
+The `ort` crate is configured with downloaded/copied binaries so build/check does not require a system-wide ONNX Runtime install. The CPU Dockerfile resolves the CPU distribution; `Dockerfile.nvidia` enables the CUDA feature and defaults `ORT_CUDA_VERSION` to `12`. The backend remains ORT-specific at the API/config layer; CUDA/DML provider features are opt-in and must be validated against the active ORT execution providers before use.
 
 
 ## Providers: CPU, CUDA, DML, TensorRT
 
 `backend-ort` exposes `ProviderKind::{Cpu,Cuda,Dml,Trt}`, `ProviderOptions`, and `ProviderSelection`.
 
-- CPU: supported as the default and primary provider in built-in and checked-in YAML model specs.
-- CUDA: configurable only as an opt-in provider after building the backend feature and validating ORT CUDA EP availability. CUDA failures return an explicit reason and fall back to CPU only when CPU fallback is configured.
+- CPU: the portable fallback in the shared checked-in model specs.
+- CUDA: preferred by shared YOLO, Qwen ASR, and IndexTTS specs when runtime availability confirms it.
 - DML: configurable as an opt-in provider on Windows builds with the backend feature enabled. Failures return an explicit reason and can fall back to CPU when configured.
-- TensorRT: optional behind a backend cargo feature. Parser spellings `trt` and `tensorrt` are accepted. Session loading mirrors CUDA/DML in the ORT backend, but the runtime does **not** yet model a same-session TensorRT+CUDA stack, so provider order should usually be `[trt, cuda, cpu]` rather than expecting both EPs to coexist within one session registration.
+- TensorRT: an existing optional backend feature, but it is not enabled, configured, or included by the NVIDIA Compose deployment.
 
-Model/provider differences are handled by model config `runtime.provider_order`. The checked-in Qwen ASR, YOLO, and IndexTTS specs keep `[cpu]` on disk by policy. At runtime, the executor may derive an effective provider order for those known integrated model ids when the stored order is exactly `[cpu]`: it prefers only providers that are both conservatively validated for that model in this repo and actually available in the active ORT runtime process (not merely enabled by cargo features), while leaving the stored spec/YAML unchanged and preserving any explicit non-default order.
+Model/provider differences are handled by model config `runtime.provider_order`. CPU and NVIDIA Compose use the sole `configs/models.d`, where YOLO, Qwen ASR, and FP32 IndexTTS use `[cuda, cpu]`. Before any adapter/session is constructed, runtime availability resolution filters providers against actual ORT usability: no CUDA feature becomes `[cpu]` immediately; a CUDA build performs and caches one process-level probe that registers the CUDA EP and creates a tiny in-memory FP32 session. Missing CUDA runtime dependencies, driver/device access, or provider registration therefore becomes `[cpu]` without a model CUDA load attempt, while a successful probe preserves `[cuda, cpu]`. The tiny probe does not validate every model/operator or prove graph-node CUDA placement. If a particular CUDA model session subsequently fails, the backend's existing provider loop selects CPU and records `cpu_fallback_used=true`. TensorRT is unsupported and out of scope for this deployment.
+
+### NVIDIA Compose and ORT binary compatibility
+
+`docker compose -f docker-compose-nvidia.yml up --build` builds only the worker
+with `cargo build --locked --release -p local-cli --bin worker --features cuda`;
+its `ORT_CUDA_VERSION` build argument defaults to `12`. The controller uses the
+ordinary CPU Dockerfile/image and has no GPU request. Only the worker declares
+Compose `gpus: all`, which requires Docker Compose 2.30.0 or newer; check with
+`docker compose version`. The worker is constrained to Linux x86_64 because
+that is the CUDA target published in rc.12's distribution table.
+
+The locked `ort-sys` 2.0.0-rc.12 package embeds an exact distribution row for
+`ms@1.24.2/x86_64-unknown-linux-gnu+cu12` (SHA-256
+`6e7848acdb7284feb44e2781583a90e820839767459ad8fa2abf7dd63b731fd9`).
+Inspection of that provider shows dependencies on `libcudart.so.12`,
+`libcublas.so.12`, `libcublasLt.so.12`, `libcufft.so.11`,
+`libcurand.so.10`, and `libcudnn.so.9`, with a maximum observed glibc symbol
+version of `GLIBC_2.38`. Therefore the runtime is pinned to NVIDIA's real full
+tag `nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04` and manifest digest
+`sha256:ac55d124da4882b497f732d8dfd9a702d5447a5f29d08d56da6f64f0a1eb34bc`.
+It supplies CUDA 12, cuDNN 9, and Ubuntu 24.04 glibc 2.39. ONNX Runtime's CUDA
+EP documentation states that CUDA 12.x builds are compatible within the CUDA
+12 major family while cuDNN major versions must match.
+
+The rc.12 Linux CUDA archive contains a static `libonnxruntime.a`, not a
+runtime `libonnxruntime.so`; the worker therefore contains the ORT core through
+static linking. The final image checks the worker itself and the dynamically
+loaded CUDA provider with `ldd`, and fails the build if either reports a missing
+library. It also requires `libonnxruntime_providers_cuda.so` to be present.
+
+Evidence:
+
+- rc.12 package distribution metadata: <https://docs.rs/crate/ort-sys/2.0.0-rc.12/source/build/download/dist.txt>
+- ONNX Runtime CUDA/cuDNN compatibility: <https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements>
+- Official NVIDIA image/tag and Container Toolkit requirement: <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/cuda/12.8.1-cudnn-runtime-ubuntu24.04>
+- NVIDIA CUDA minor-version/driver compatibility: <https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html>
+
+Reproducible metadata inspection used for this choice:
+
+```bash
+# From the ort-sys 2.0.0-rc.12 crate source:
+grep '^cu12.*x86_64-unknown-linux-gnu' ort-sys-2.0.0-rc.12/build/download/dist.txt
+# Download the URL printed above and verify its embedded checksum:
+sha256sum x86_64-unknown-linux-gnu+cu12.tar.lzma2
+# ort-sys uses raw LZMA2 with a 64 MiB dictionary:
+python -c "import lzma,pathlib; p=pathlib.Path('x86_64-unknown-linux-gnu+cu12.tar.lzma2'); pathlib.Path('ort-cu12.tar').write_bytes(lzma.decompress(p.read_bytes(),format=lzma.FORMAT_RAW,filters=[{'id':lzma.FILTER_LZMA2,'dict_size':1<<26}]))"
+tar -xf ort-cu12.tar
+readelf -d libonnxruntime_providers_cuda.so | grep NEEDED
+readelf --version-info libonnxruntime_providers_cuda.so | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1
+# Resolve the official tag's multi-arch manifest digest:
+docker buildx imagetools inspect nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
+```
+
+The pinned digest is the multi-architecture manifest-list digest. Compose sets
+`platform: linux/amd64`, so Docker selects its amd64 child manifest while the
+tag+digest still pins the official immutable manifest list.
+
+The host needs an NVIDIA driver compatible with CUDA 12 (NVIDIA documents
+driver 525 or newer for the CUDA 12 family) and NVIDIA Container Toolkit.
+`/health` proves only service health. Verify GPU visibility with
+`docker compose -f docker-compose-nvidia.yml exec worker nvidia-smi`, then run
+a real YOLO request against the running Compose deployment:
+
+```bash
+mkdir -p workdir/data
+cp scripts/assets/yolo-input.jpg workdir/data/yolo-input.jpg
+curl --fail-with-body http://127.0.0.1:17890/rpc/infer \
+  -H 'content-type: application/json' \
+  --data '{"jsonrpc":"2.0","id":"gpu-yolo","method":"object_detect","params":{"model":"yolo11n.onnx","image":{"path":"/app/workdir/data/yolo-input.jpg","mime":"image/jpeg"}}}'
+docker compose -f docker-compose-nvidia.yml logs worker |
+  grep 'lazy loading model'
+```
+
+This requires downloaded/enabled YOLO artifacts. Run
+`docker compose -f docker-compose-nvidia.yml exec worker nvidia-smi dmon -s pucvmet`
+concurrently to sample GPU activity. The lazy-load log exposes the effective
+provider order and dmon can show activity, but neither proves per-node GPU
+placement. IndexTTS CUDA policy is enabled because all seven A, B, C, D, E,
+E-prefill, and F sessions
+are created from the same provider selection and no concrete code/operator
+blocker is known; real NVIDIA artifact smoke remains unverified. TensorRT is not
+built or configured. The control-plane hardware snapshot still reports
+`has_cuda: false` because it does not probe NVML; that reporting limitation is
+independent of actual ORT EP selection.
 
 
 ## Qwen ASR limitations
@@ -26,7 +110,7 @@ The adapter validates the known `qwen3-asr-0.6b-onnx` artifact layout and establ
 
 ## IndexTTS FP32 and text normalization boundary
 
-IndexTTS ONNX support is FP32-only. The default catalog downloads the explicit `IndexTTS_A.onnx` through `IndexTTS_F.onnx`, `bpe.model`, and manifest files from `ModaLeap/indextts-1.5-onnx` into `workdir/models/indextts-1.5-onnx`; export/package tooling can also write the same root layout. Runtime validation loads that root directly and no longer auto-selects `fp16/` for CUDA or `q4/` for CPU. Existing `q4/` or `fp16/` model caches may remain on disk but are ignored by current code and docs.
+IndexTTS ONNX support uses root FP32 artifacts with CUDA-first, CPU-fallback intent. The default catalog downloads the explicit `IndexTTS_A.onnx` through `IndexTTS_F.onnx`, including the separate E-prefill graph, `bpe.model`, and manifest files from `ModaLeap/indextts-1.5-onnx` into `workdir/models/indextts-1.5-onnx`; export/package tooling can also write the same root layout. Runtime validation loads that root directly and no longer auto-selects `fp16/` for CUDA or `q4/` for CPU. Existing `q4/` or `fp16/` model caches may remain on disk but are ignored by current code and docs. All seven A, B, C, D, E, E-prefill, and F sessions are loaded from one `OrtBackend` built from `spec.runtime.provider_order` and are included in its provider report; code/policy support is present, while real NVIDIA hardware validation is not.
 
 The official IndexTTS 1.5 frontend (`workdir/models/index-tts-v1.5/indextts/utils/front.py` and `common.py`) uses WeTextProcessing/pynini TN when available, but its tokenizer path does **not** convert arbitrary Hanzi to pinyin. It protects explicit tone-number pinyin and Chinese-name placeholders around TN, expands a small English `'s` contraction pattern, applies a punctuation replacement map, then calls `tokenize_by_CJK_char`, which splits each CJK character and uppercases non-CJK segments before SentencePiece.
 

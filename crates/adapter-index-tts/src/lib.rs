@@ -44,6 +44,7 @@ pub struct IndexTtsProviderReport {
     pub c: SessionProviderReport,
     pub d: SessionProviderReport,
     pub e: SessionProviderReport,
+    pub e_prefill: SessionProviderReport,
     pub f: SessionProviderReport,
 }
 

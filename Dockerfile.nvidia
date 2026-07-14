@@ -1,0 +1,46 @@
+FROM rust:1.88.0-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 AS builder
+
+ARG ORT_CUDA_VERSION=12
+RUN test "${ORT_CUDA_VERSION}" = "12"
+ENV ORT_CUDA_VERSION=${ORT_CUDA_VERSION}
+
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . .
+# The cuda feature selects ort-sys' CUDA archive; --locked fixes all Cargo inputs.
+RUN cargo build --locked --release -p local-cli --bin worker --features cuda
+RUN set -eux; \
+    mkdir -p /ort-libs; \
+    find /app/target -name 'libonnxruntime*.so*' ! -name '*tensorrt*' -exec cp -Lv {} /ort-libs/ \;; \
+    test -e /ort-libs/libonnxruntime_providers_cuda.so
+
+# ort/ort-sys 2.0.0-rc.12 resolves CUDA 12 to ONNX Runtime 1.24.2's cu12
+# distribution. That provider links CUDA 12 and cuDNN 9. Ubuntu 24.04 also
+# supplies glibc 2.39, satisfying the provider's observed GLIBC_2.38 ceiling.
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04@sha256:ac55d124da4882b497f732d8dfd9a702d5447a5f29d08d56da6f64f0a1eb34bc
+
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libgomp1 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /app/workdir/models
+
+COPY --from=builder /app/target/release/worker /usr/local/bin/worker
+COPY --from=builder /ort-libs/ /usr/local/lib/
+COPY configs ./configs
+RUN set -eux; \
+    ldconfig; \
+    test -x /usr/local/bin/worker; \
+    test -e /usr/local/lib/libonnxruntime_providers_cuda.so; \
+    for file in \
+        /usr/local/bin/worker \
+        /usr/local/lib/libonnxruntime_providers_cuda.so; do \
+        ldd "${file}" | tee /tmp/ldd.txt; \
+        ! grep -q 'not found' /tmp/ldd.txt; \
+    done
+
+ENV ORT_CUDA_VERSION=12
+ENV RUST_LOG=info

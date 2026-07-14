@@ -1,0 +1,62 @@
+x-proxy-build-args: &proxy-build-args
+  HTTP_PROXY: ${HTTP_PROXY:-}
+  HTTPS_PROXY: ${HTTPS_PROXY:-}
+  ALL_PROXY: ${ALL_PROXY:-}
+  NO_PROXY: ${NO_PROXY:-}
+  http_proxy: ${http_proxy:-}
+  https_proxy: ${https_proxy:-}
+  all_proxy: ${all_proxy:-}
+  no_proxy: ${no_proxy:-}
+
+services:
+  controller:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
+      args: *proxy-build-args
+    image: local-multimodal-infra:local
+    volumes:
+      - ./workdir:/app/workdir
+    environment:
+      LOCAL_WORKER_REGISTRATION_TOKEN: ${LOCAL_WORKER_REGISTRATION_TOKEN:?set in .env}
+      LOCAL_UPLOAD_SIGNING_SECRET: ${LOCAL_UPLOAD_SIGNING_SECRET:?set in .env}
+      LOCAL_ADMIN_TOKEN: ${LOCAL_ADMIN_TOKEN:?set in .env}
+      LOCAL_PUBLIC_BASE_URL: ${LOCAL_PUBLIC_BASE_URL:?set in .env}
+    command:
+      - /usr/local/bin/controller
+      - configs/docker-controller.yaml
+      - --workdir
+      - /app/workdir
+      - --model-dir
+      - /app/workdir/models
+    ports:
+      - "17890:17890"
+
+  worker:
+    # ort-sys rc.12 publishes the Linux CUDA 12 archive for x86_64.
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile.nvidia
+      network: host
+      args:
+        <<: *proxy-build-args
+        ORT_CUDA_VERSION: ${ORT_CUDA_VERSION:-12}
+    image: local-multimodal-infra:nvidia-cuda12
+    gpus: all
+    volumes:
+      - ./workdir:/app/workdir
+    environment:
+      LOCAL_WORKER_REGISTRATION_TOKEN: ${LOCAL_WORKER_REGISTRATION_TOKEN:?set in .env}
+    depends_on:
+      - controller
+    command:
+      - /usr/local/bin/worker
+      - configs/docker-worker.yaml
+      - --workdir
+      - /app/workdir
+      - --model-dir
+      - /app/workdir/models
+    ports:
+      - "17891:17891"
