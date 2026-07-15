@@ -81,3 +81,29 @@ Compare intra-thread values 1, 2, 4, 6, and 8 with inter-thread fixed at 1.
 Choose only from target measurements; this change does not assert an unproven
 new thread default. A near-zero queue wait plus high E time/steps indicates a
 decode tail; high queue wait indicates same-model admission backlog.
+
+## CUDA-resident E KV cache experiment
+
+On eligible CUDA builds, IndexTTS E/E-prefill uses I/O Binding by default so the
+48 FP32 KV cache tensors remain on the selected CUDA device between decode
+steps. Set `LOCAL_INDEXTTS_RESIDENT_KV=0` for a host-cache A/B run or emergency
+rollback. Accepted explicit false values are `0`, `false`, `no`, and `off`;
+accepted true values are `1`, `true`, `yes`, and `on` (case-insensitive and
+whitespace-trimmed). Unset, empty, and unknown values remain enabled; a
+non-empty unknown value emits a warning so typos are visible.
+
+The adapter enables the resident path only when E and E-prefill are
+CUDA-selected without a whole-session CPU retry and use the same device ID.
+CPU and other ineligible provider selections quietly use host caches. Actual
+bound KV placement, type, shape, progression, and device ID are validated on
+every generation. ORT may still intentionally assign ordinary shape/control
+nodes to CPU; this is not the whole-session fallback reported by the provider
+status. A setup/prefill failure before sampling transparently reruns the
+existing host path, while a failure after sampling has started fails that
+request and disables the resident path for later requests on the loaded
+adapter. Keep `max_concurrency: 1`.
+
+The current performance and device-wide 200 ms VRAM evidence comes from an
+RTX4090 and does not validate the production RTX3060 12 GB margin. Monitor VRAM
+and request failures after rollout; use `LOCAL_INDEXTTS_RESIDENT_KV=0` as the
+immediate rollback while validating 12 GB deployment behavior.

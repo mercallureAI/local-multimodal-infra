@@ -1707,6 +1707,161 @@ fn provider_report_maps_all_seven_sessions_including_e_prefill() {
 }
 
 #[test]
+fn resident_kv_is_default_enabled_and_only_explicit_false_disables() {
+    assert_eq!(
+        resident_kv_setting_from_value(None),
+        ResidentKvSetting::DefaultEnabled
+    );
+    assert_eq!(
+        resident_kv_setting_from_value(Some("  ")),
+        ResidentKvSetting::DefaultEnabled
+    );
+    for disabled in ["0", "false", "FALSE", " no ", "Off"] {
+        assert_eq!(
+            resident_kv_setting_from_value(Some(disabled)),
+            ResidentKvSetting::ExplicitDisabled
+        );
+    }
+    for enabled in ["1", "true", "TRUE", " yes ", "on"] {
+        assert_eq!(
+            resident_kv_setting_from_value(Some(enabled)),
+            ResidentKvSetting::ExplicitEnabled
+        );
+    }
+    assert_eq!(
+        resident_kv_setting_from_value(Some("typo")),
+        ResidentKvSetting::UnknownEnabled
+    );
+}
+
+#[test]
+fn resident_kv_effective_device_is_cpu_safe_and_disable_first() {
+    let cuda = SessionProviderReport {
+        provider: ProviderKind::Cuda,
+        cpu_fallback_used: false,
+    };
+    let cpu = SessionProviderReport {
+        provider: ProviderKind::Cpu,
+        cpu_fallback_used: false,
+    };
+    assert_eq!(
+        resident_kv_effective_device(
+            ResidentKvSetting::DefaultEnabled,
+            cuda,
+            Some(0),
+            cuda,
+            Some(0)
+        ),
+        Some(0)
+    );
+    assert_eq!(
+        resident_kv_effective_device(
+            ResidentKvSetting::ExplicitDisabled,
+            cuda,
+            Some(0),
+            cuda,
+            Some(0)
+        ),
+        None
+    );
+    assert_eq!(
+        resident_kv_effective_device(ResidentKvSetting::DefaultEnabled, cpu, None, cpu, None),
+        None
+    );
+    assert_eq!(
+        resident_kv_effective_device(
+            ResidentKvSetting::DefaultEnabled,
+            cuda,
+            Some(0),
+            cuda,
+            Some(1)
+        ),
+        None
+    );
+    assert_eq!(
+        resident_kv_effective_device(
+            ResidentKvSetting::DefaultEnabled,
+            SessionProviderReport {
+                provider: ProviderKind::Cuda,
+                cpu_fallback_used: true,
+            },
+            Some(0),
+            cuda,
+            Some(0)
+        ),
+        None
+    );
+}
+
+#[test]
+fn resident_cache_progression_is_checked_from_hidden_token_count() {
+    let hidden = tensor_f32("hidden_state", vec![1, 59, 1280], vec![0.0; 59 * 1280]);
+    assert_eq!(hidden_state_token_count(&hidden).unwrap(), 59);
+    assert_eq!(expected_cache_sequence_len(None, 59).unwrap(), 59);
+    assert_eq!(expected_cache_sequence_len(Some(59), 1).unwrap(), 60);
+    assert!(expected_cache_sequence_len(Some(1), 0).is_err());
+    assert!(expected_cache_sequence_len(Some(usize::MAX), 1).is_err());
+
+    assert!(validate_cache_sequence_lengths(&vec![59; 48], 59).is_ok());
+    for bad in [0, 58, 60] {
+        let mut lengths = vec![59; 48];
+        lengths[17] = bad;
+        assert!(validate_cache_sequence_lengths(&lengths, 59).is_err());
+    }
+    assert!(validate_cache_sequence_lengths(&vec![59; 47], 59).is_err());
+    assert!(validate_cache_sequence_lengths(&vec![0; 48], 0).is_err());
+}
+
+#[test]
+fn resident_precommit_failure_restores_rng_retries_once_and_disables() {
+    let mut rng = SplitMix64::new(42);
+    let saved = rng.clone();
+    let _ = sample_logits(&[0.0, 1.0], 2, 1.0, 1.0, &mut rng).unwrap();
+    let expected = sample_logits(&[0.0, 1.0], 2, 1.0, 1.0, &mut saved.clone()).unwrap();
+    let mut disabled = false;
+    let mut host_calls = 0;
+    let value = finish_resident_attempt(
+        &mut disabled,
+        &mut rng,
+        saved,
+        Err(ResidentDecodeError::BeforeCommit(InfraError::Backend(
+            "prefill".to_string(),
+        ))),
+        |rng| {
+            host_calls += 1;
+            sample_logits(&[0.0, 1.0], 2, 1.0, 1.0, rng)
+        },
+    )
+    .unwrap();
+    assert_eq!(value, expected);
+    assert_eq!(host_calls, 1);
+    assert!(disabled);
+}
+
+#[test]
+fn resident_postcommit_failure_never_retries_host_and_disables() {
+    let mut rng = SplitMix64::new(42);
+    let saved = rng.clone();
+    let mut disabled = false;
+    let mut host_calls = 0;
+    let result = finish_resident_attempt::<i32>(
+        &mut disabled,
+        &mut rng,
+        saved,
+        Err(ResidentDecodeError::AfterCommit(InfraError::Backend(
+            "decode".to_string(),
+        ))),
+        |_| {
+            host_calls += 1;
+            Ok(7)
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(host_calls, 0);
+    assert!(disabled);
+}
+
+#[test]
 fn real_model_smoke_if_env_set() {
     let Ok(model_dir) = std::env::var("LOCAL_INDEXTTS_MODEL_DIR") else {
         return;

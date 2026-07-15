@@ -8,7 +8,8 @@
 
 use local_backend_ort::{
     CpuSessionOptions, OrtBackend, OrtSession, OrtTensorData, OrtTensorInput, OrtTensorOutput,
-    ProviderSelection, SessionMetadata, SessionProviderReport, TensorElement, TensorMetadata,
+    ProviderKind, ProviderSelection, ResidentCudaTensor, ResidentIoBinding, ResidentTensorInput,
+    SessionMetadata, SessionProviderReport, TensorElement, TensorMetadata,
 };
 use local_core::{FileRef, InferenceOutput, ModelSpec};
 use local_error::{InfraError, Result};

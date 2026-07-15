@@ -18,6 +18,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod io_binding;
+pub use io_binding::{
+    ResidentBindingOutputs, ResidentCudaTensor, ResidentIoBinding, ResidentTensorInput,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
@@ -437,6 +442,7 @@ pub struct OrtSession {
     model_path: PathBuf,
     provider: ProviderKind,
     cpu_fallback_used: bool,
+    device_id: Option<u32>,
     real: RealSession,
 }
 
@@ -490,6 +496,7 @@ impl OrtSession {
                                 model_path: model_path.to_path_buf(),
                                 provider: ProviderKind::Cpu,
                                 cpu_fallback_used: !errors.is_empty(),
+                                device_id: None,
                                 real,
                             });
                         }
@@ -502,6 +509,7 @@ impl OrtSession {
                             model_path: model_path.to_path_buf(),
                             provider: ProviderKind::Cuda,
                             cpu_fallback_used: false,
+                            device_id: Some(provider.device_id.unwrap_or(0)),
                             real,
                         });
                     }
@@ -516,6 +524,7 @@ impl OrtSession {
                             model_path: model_path.to_path_buf(),
                             provider: ProviderKind::Dml,
                             cpu_fallback_used: false,
+                            device_id: provider.device_id,
                             real,
                         });
                     }
@@ -530,6 +539,7 @@ impl OrtSession {
                             model_path: model_path.to_path_buf(),
                             provider: ProviderKind::Trt,
                             cpu_fallback_used: false,
+                            device_id: provider.device_id,
                             real,
                         });
                     }
@@ -549,6 +559,7 @@ impl OrtSession {
                         model_path: model_path.to_path_buf(),
                         provider: ProviderKind::Cpu,
                         cpu_fallback_used: true,
+                        device_id: None,
                         real,
                     });
                 }
@@ -568,6 +579,17 @@ impl OrtSession {
     }
     pub fn cpu_fallback_used(&self) -> bool {
         self.cpu_fallback_used
+    }
+    /// Whether selecting this session required abandoning a requested
+    /// execution provider and recreating the whole session on CPU.
+    ///
+    /// This does not claim that every node in a CUDA-selected graph executes
+    /// on CUDA. ORT may intentionally assign shape/control nodes to CPU.
+    pub fn whole_session_cpu_fallback_used(&self) -> bool {
+        self.cpu_fallback_used
+    }
+    pub fn device_id(&self) -> Option<u32> {
+        self.device_id
     }
     pub fn provider_report(&self) -> SessionProviderReport {
         SessionProviderReport {
@@ -882,32 +904,45 @@ impl RealSession {
             .collect()
     }
 
-    fn validate_inputs(&self, inputs: &[OrtTensorInput]) -> Result<()> {
-        let available = self
-            .metadata
-            .inputs
-            .iter()
-            .map(|input| input.name.as_str())
-            .collect::<HashSet<_>>();
-        let requested = inputs
-            .iter()
-            .map(|input| input.name.as_str())
-            .collect::<Vec<_>>();
-
-        for input in inputs {
-            if !available.contains(input.name.as_str()) {
-                return Err(input_name_error(&self.metadata, &requested, &input.name));
-            }
-        }
-
-        for input in &self.metadata.inputs {
-            if !requested.iter().any(|name| *name == input.name) {
-                return Err(input_name_error(&self.metadata, &requested, &input.name));
-            }
-        }
-
-        Ok(())
+    fn validate_input_names<'a>(&self, requested: impl IntoIterator<Item = &'a str>) -> Result<()> {
+        validate_requested_input_names(&self.metadata, requested)
     }
+
+    fn validate_inputs(&self, inputs: &[OrtTensorInput]) -> Result<()> {
+        self.validate_input_names(inputs.iter().map(|input| input.name.as_str()))
+    }
+}
+
+fn validate_requested_input_names<'a>(
+    metadata: &SessionMetadata,
+    requested: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    let requested = requested.into_iter().collect::<Vec<_>>();
+    let mut unique = HashSet::with_capacity(requested.len());
+    for name in &requested {
+        if !unique.insert(*name) {
+            return Err(InfraError::Backend(format!(
+                "duplicate input name `{name}`; requested inputs: {}",
+                format_names(requested.iter().copied())
+            )));
+        }
+    }
+    let available = metadata
+        .inputs
+        .iter()
+        .map(|input| input.name.as_str())
+        .collect::<HashSet<_>>();
+    for name in &requested {
+        if !available.contains(name) {
+            return Err(input_name_error(metadata, &requested, name));
+        }
+    }
+    for input in &metadata.inputs {
+        if !requested.iter().any(|name| *name == input.name) {
+            return Err(input_name_error(metadata, &requested, &input.name));
+        }
+    }
+    Ok(())
 }
 
 fn tensor_metadata(outlet: &ort::value::Outlet) -> TensorMetadata {
@@ -1319,6 +1354,36 @@ mod tests {
         assert!(msg.contains("available inputs: x"), "{msg}");
         assert!(msg.contains("requested inputs: wrong"), "{msg}");
         assert!(msg.contains("available outputs: y"), "{msg}");
+    }
+
+    #[test]
+    fn combined_input_names_reject_duplicates_before_native_binding() {
+        let metadata = SessionMetadata {
+            inputs: vec![
+                TensorMetadata {
+                    name: "host".to_string(),
+                    element_type: TensorElement::F32,
+                    shape: vec![1],
+                    dimension_symbols: vec![None],
+                },
+                TensorMetadata {
+                    name: "resident".to_string(),
+                    element_type: TensorElement::F32,
+                    shape: vec![1],
+                    dimension_symbols: vec![None],
+                },
+            ],
+            outputs: Vec::new(),
+        };
+        assert!(validate_requested_input_names(&metadata, ["host", "resident"]).is_ok());
+        for names in [
+            vec!["host", "host"],
+            vec!["host", "resident", "resident"],
+            vec!["host", "resident", "host"],
+        ] {
+            let err = validate_requested_input_names(&metadata, names).unwrap_err();
+            assert!(err.to_string().contains("duplicate input name"));
+        }
     }
 
     fn identity_model(elem_type: u64) -> Vec<u8> {

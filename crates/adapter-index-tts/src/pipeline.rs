@@ -14,6 +14,8 @@ pub struct IndexTtsAdapter {
     tokenizer: SentencePieceTokenizer,
     config: IndexTtsModelConfig,
     output_dir: PathBuf,
+    resident_kv_device_id: Option<u32>,
+    resident_kv_disabled: bool,
 }
 
 impl IndexTtsAdapter {
@@ -40,6 +42,32 @@ impl IndexTtsAdapter {
         let output_dir = env::var_os("LOCAL_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("workdir/data"));
+        let resident_kv_setting = resident_kv_setting_from_env();
+        let resident_kv_device_id = resident_kv_effective_device(
+            resident_kv_setting,
+            e.provider_report(),
+            e.device_id(),
+            e_prefill.provider_report(),
+            e_prefill.device_id(),
+        );
+        if let Some(device_id) = resident_kv_device_id {
+            tracing::info!(
+                env = "LOCAL_INDEXTTS_RESIDENT_KV",
+                device_id,
+                source = resident_kv_setting.source(),
+                "IndexTTS resident CUDA KV cache path enabled"
+            );
+        } else if matches!(resident_kv_setting, ResidentKvSetting::ExplicitDisabled) {
+            tracing::info!(
+                env = "LOCAL_INDEXTTS_RESIDENT_KV",
+                "IndexTTS resident CUDA KV cache path explicitly disabled"
+            );
+        } else {
+            tracing::debug!(
+                env = "LOCAL_INDEXTTS_RESIDENT_KV",
+                "IndexTTS resident CUDA KV cache path unavailable for selected E sessions; using host caches"
+            );
+        }
         Ok(Self {
             model_id: spec.id.clone(),
             artifacts,
@@ -53,6 +81,8 @@ impl IndexTtsAdapter {
             tokenizer,
             config,
             output_dir,
+            resident_kv_device_id,
+            resident_kv_disabled: false,
         })
     }
 
@@ -391,6 +421,60 @@ impl IndexTtsAdapter {
         chunk_index: usize,
         chunk_count: usize,
         concat: ConcatState,
+        gen_len: i64,
+        rng: &mut SplitMix64,
+    ) -> Result<DecodeState> {
+        if let Some(device_id) = self
+            .resident_kv_device_id
+            .filter(|_| !self.resident_kv_disabled)
+        {
+            let saved_rng = rng.clone();
+            let attempt = self.run_e_loop_resident(
+                request_id,
+                chunk_index,
+                chunk_count,
+                &concat,
+                gen_len,
+                rng,
+                device_id,
+            );
+            match &attempt {
+                Ok(_) => {}
+                Err(ResidentDecodeError::BeforeCommit(err)) => {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        chunk_index = chunk_index + 1,
+                        chunk_count,
+                        error = %err,
+                        "IndexTTS resident KV setup/prefill failed before sampling; disabling it and rerunning the unchanged host path"
+                    );
+                }
+                Err(ResidentDecodeError::AfterCommit(err)) => {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        chunk_index = chunk_index + 1,
+                        chunk_count,
+                        error = %err,
+                        "IndexTTS resident KV decode failed after token generation began; disabling it for later requests"
+                    );
+                }
+            }
+            let mut disabled = self.resident_kv_disabled;
+            let result = finish_resident_attempt(&mut disabled, rng, saved_rng, attempt, |rng| {
+                self.run_e_loop_host(request_id, chunk_index, chunk_count, concat, gen_len, rng)
+            });
+            self.resident_kv_disabled = disabled;
+            return result;
+        }
+        self.run_e_loop_host(request_id, chunk_index, chunk_count, concat, gen_len, rng)
+    }
+
+    fn run_e_loop_host(
+        &mut self,
+        request_id: Uuid,
+        chunk_index: usize,
+        chunk_count: usize,
+        concat: ConcatState,
         mut gen_len: i64,
         rng: &mut SplitMix64,
     ) -> Result<DecodeState> {
@@ -634,6 +718,166 @@ impl IndexTtsAdapter {
         })
     }
 
+    fn run_e_loop_resident(
+        &mut self,
+        request_id: Uuid,
+        chunk_index: usize,
+        chunk_count: usize,
+        concat: &ConcatState,
+        mut gen_len: i64,
+        rng: &mut SplitMix64,
+        device_id: u32,
+    ) -> std::result::Result<DecodeState, ResidentDecodeError> {
+        let mut decoder = ResidentEDecoder::new(&self.e_prefill, &self.e, device_id)
+            .map_err(ResidentDecodeError::BeforeCommit)?;
+        let hidden = clone_as_input("hidden_state", &concat.hidden_state)
+            .map_err(ResidentDecodeError::BeforeCommit)?;
+        let prefill_increment =
+            hidden_state_token_count(&hidden).map_err(ResidentDecodeError::BeforeCommit)?;
+        let mask = attention_mask_input(&self.e_prefill, concat.concat_len as i64, 0)
+            .map_err(ResidentDecodeError::BeforeCommit)?;
+        let mut step = decoder
+            .prefill(&mut self.e_prefill, hidden, mask, prefill_increment)
+            .map_err(ResidentDecodeError::BeforeCommit)?;
+
+        let budget = checked_decode_budget(self.config.max_generate_length, concat.concat_len)
+            .map_err(ResidentDecodeError::BeforeCommit)?;
+        let mut history = vec![self.config.generation_start_token];
+        let mut hidden_states = Vec::<OrtTensorOutput>::new();
+        let mut silence_guard = SilenceRunGuard::default();
+        let mut degeneration = TokenDegenerationObserver::default();
+        let mut stopped = false;
+        let mut committed = false;
+
+        for step_index in 0..budget {
+            hidden_states.push(step.last_hidden_state.clone());
+            let mut logits = raw_logits_f32(&step.raw_logits, DEFAULT_MEL_CODE_SIZE)
+                .map_err(|err| resident_stage_error(committed, err))?;
+            apply_repetition_penalty(&mut logits, &history, DEFAULT_REPEAT_PENALTY)
+                .map_err(|err| resident_stage_error(committed, err))?;
+            let token = sample_logits(&logits, 30, 0.8, 1.0, rng)
+                .map_err(|err| resident_stage_error(committed, err))?;
+            committed = true;
+            let degeneration_milestone = degeneration.observe(token);
+            if degeneration_milestone {
+                let snapshot = degeneration.snapshot();
+                log_token_degeneration(
+                    request_id,
+                    chunk_index,
+                    chunk_count,
+                    "milestone",
+                    &snapshot,
+                );
+            }
+            let decision = process_decode_token(
+                &mut silence_guard,
+                token,
+                self.config.generation_stop_token,
+                self.config.max_consecutive_silence_tokens,
+                |token| self.run_c_token(token, gen_len),
+            );
+            let decision = match decision {
+                Ok(decision) => decision,
+                Err(DecodeTokenError::PathologicalSilence {
+                    consecutive,
+                    threshold,
+                    silence_token_count,
+                }) => {
+                    return Err(ResidentDecodeError::AfterCommit(InfraError::Backend(
+                        format!(
+                            "IndexTTS request {request_id} chunk {}/{} decode rejected: pathological silence loop (silence_token {SILENCE_TOKEN}, consecutive {consecutive}, threshold {threshold}, silence_token_count {silence_token_count})",
+                            chunk_index + 1,
+                            chunk_count
+                        ),
+                    )));
+                }
+                Err(DecodeTokenError::Continuation(source)) => {
+                    return Err(ResidentDecodeError::AfterCommit(InfraError::Backend(
+                        format!(
+                            "IndexTTS request {request_id} chunk {}/{} decode rejected: continuation failed: {source}",
+                            chunk_index + 1,
+                            chunk_count
+                        ),
+                    )));
+                }
+            };
+            if step_index < 8
+                || step_index.is_power_of_two()
+                || token == self.config.generation_stop_token
+            {
+                tracing::debug!(
+                    request_id = %request_id,
+                    chunk_index = chunk_index + 1,
+                    step = step_index + 1,
+                    token_id = token,
+                    is_stop = token == self.config.generation_stop_token,
+                    is_silence = token == SILENCE_TOKEN,
+                    consecutive_silence = silence_guard.consecutive(),
+                    resident_kv = true,
+                    "IndexTTS decode token"
+                );
+            }
+            if matches!(decision, DecodeTokenAction::Stop) {
+                stopped = true;
+                break;
+            }
+            history.push(token);
+            let DecodeTokenAction::Continue(c_step) = decision else {
+                unreachable!("STOP handled above")
+            };
+            gen_len = c_step.next_gen_len;
+            let cache_len = i64::try_from(step.cache_sequence_len()).map_err(|_| {
+                ResidentDecodeError::AfterCommit(InfraError::Backend(
+                    "resident KV sequence length exceeds i64".to_string(),
+                ))
+            })?;
+            let mask = attention_mask_input(&self.e, cache_len + 1, 0)
+                .map_err(ResidentDecodeError::AfterCommit)?;
+            let hidden = clone_as_input("hidden_state", &c_step.gpt_hidden_state)
+                .map_err(ResidentDecodeError::AfterCommit)?;
+            let decode_increment =
+                hidden_state_token_count(&hidden).map_err(ResidentDecodeError::AfterCommit)?;
+            step = decoder
+                .decode(&mut self.e, step, hidden, mask, decode_increment)
+                .map_err(ResidentDecodeError::AfterCommit)?;
+        }
+        if !stopped {
+            return Err(ResidentDecodeError::AfterCommit(InfraError::Backend(
+                format!(
+                    "IndexTTS request {request_id} chunk {}/{} decode rejected: exhausted budget {budget} without STOP (concat_len {}, max_generate_length {})",
+                    chunk_index + 1,
+                    chunk_count,
+                    concat.concat_len,
+                    self.config.max_generate_length
+                ),
+            )));
+        }
+        if hidden_states.len() < 2 {
+            return Err(ResidentDecodeError::AfterCommit(InfraError::Backend(
+                format!(
+                    "IndexTTS request {request_id} chunk {}/{} decode rejected: STOP after only {} decode step(s); refusing incomplete/blank synthesis",
+                    chunk_index + 1,
+                    chunk_count,
+                    hidden_states.len()
+                ),
+            )));
+        }
+        let degeneration = degeneration.snapshot();
+        log_token_degeneration(request_id, chunk_index, chunk_count, "stop", &degeneration);
+        let save_hidden_state =
+            concatenate_hidden_states(&hidden_states).map_err(ResidentDecodeError::AfterCommit)?;
+        let f_input_rows = save_hidden_state.shape.first().copied().unwrap_or(0);
+        Ok(DecodeState {
+            save_hidden_state,
+            generated_steps: hidden_states.len(),
+            stopped,
+            silence_token_count: silence_guard.silence_token_count(),
+            max_silence_run: silence_guard.max_run(),
+            degeneration,
+            f_input_rows,
+        })
+    }
+
     fn run_f(
         &mut self,
         reference: &ReferenceState,
@@ -817,6 +1061,228 @@ pub(crate) struct EStep {
     pub(crate) values: Vec<OrtTensorOutput>,
     pub(crate) last_hidden_state: OrtTensorOutput,
     pub(crate) raw_logits: OrtTensorOutput,
+}
+
+#[derive(Debug)]
+pub(crate) enum ResidentDecodeError {
+    BeforeCommit(InfraError),
+    AfterCommit(InfraError),
+}
+
+pub(crate) fn finish_resident_attempt<T>(
+    disabled: &mut bool,
+    rng: &mut SplitMix64,
+    saved_rng: SplitMix64,
+    attempt: std::result::Result<T, ResidentDecodeError>,
+    host: impl FnOnce(&mut SplitMix64) -> Result<T>,
+) -> Result<T> {
+    match attempt {
+        Ok(value) => Ok(value),
+        Err(ResidentDecodeError::BeforeCommit(_)) => {
+            *disabled = true;
+            *rng = saved_rng;
+            host(rng)
+        }
+        Err(ResidentDecodeError::AfterCommit(err)) => {
+            *disabled = true;
+            Err(err)
+        }
+    }
+}
+
+fn resident_stage_error(committed: bool, err: InfraError) -> ResidentDecodeError {
+    if committed {
+        ResidentDecodeError::AfterCommit(err)
+    } else {
+        ResidentDecodeError::BeforeCommit(err)
+    }
+}
+
+#[derive(Debug)]
+struct ResidentEStep {
+    caches: Vec<ResidentCudaTensor>,
+    last_hidden_state: OrtTensorOutput,
+    raw_logits: OrtTensorOutput,
+}
+
+impl ResidentEStep {
+    fn cache_sequence_len(&self) -> usize {
+        self.caches
+            .first()
+            .map(ResidentCudaTensor::sequence_len)
+            .unwrap_or(0)
+    }
+}
+
+pub(crate) fn hidden_state_token_count(input: &OrtTensorInput) -> Result<usize> {
+    if input.name != "hidden_state" {
+        return Err(InfraError::Backend(format!(
+            "resident E expected hidden_state input, got `{}`",
+            input.name
+        )));
+    }
+    match input.shape.as_slice() {
+        [1, tokens, 1280] if *tokens > 0 => Ok(*tokens),
+        shape => Err(InfraError::Backend(format!(
+            "resident E hidden_state must have shape [1, nonzero_tokens, 1280], got {shape:?}"
+        ))),
+    }
+}
+
+pub(crate) fn expected_cache_sequence_len(
+    previous: Option<usize>,
+    hidden_token_count: usize,
+) -> Result<usize> {
+    if hidden_token_count == 0 {
+        return Err(InfraError::Backend(
+            "resident E hidden-state token increment must be nonzero".to_string(),
+        ));
+    }
+    previous
+        .unwrap_or(0)
+        .checked_add(hidden_token_count)
+        .ok_or_else(|| InfraError::Backend("resident E KV sequence length overflow".to_string()))
+}
+
+pub(crate) fn validate_cache_sequence_lengths(actual: &[usize], expected: usize) -> Result<()> {
+    if actual.len() != 48 {
+        return Err(InfraError::Backend(format!(
+            "resident IndexTTS_E expected 48 KV tensors, got {}",
+            actual.len()
+        )));
+    }
+    if expected == 0 {
+        return Err(InfraError::Backend(
+            "resident IndexTTS_E expected KV sequence length must be nonzero".to_string(),
+        ));
+    }
+    for (index, actual) in actual.iter().enumerate() {
+        if *actual != expected {
+            return Err(InfraError::Backend(format!(
+                "resident IndexTTS_E KV tensor {index} sequence length {actual} differs from expected {expected}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ResidentEDecoder {
+    prefill: ResidentIoBinding,
+    decode: [ResidentIoBinding; 2],
+    cache_input_names: Vec<String>,
+    cache_output_names: Vec<String>,
+    next_decode_binding: usize,
+}
+
+impl ResidentEDecoder {
+    fn new(prefill: &OrtSession, decode: &OrtSession, device_id: u32) -> Result<Self> {
+        let mut cache_input_names = Vec::with_capacity(48);
+        let mut cache_output_names = Vec::with_capacity(48);
+        for index in 0..24 {
+            cache_input_names.push(format!("in_key_{index}"));
+            cache_input_names.push(format!("in_value_{index}"));
+            cache_output_names.push(format!("out_key_{index}"));
+            cache_output_names.push(format!("out_value_{index}"));
+        }
+        let cpu_outputs = vec!["last_hidden_state".to_string(), "raw_logits".to_string()];
+        let prefill_binding =
+            prefill.create_resident_cuda_binding(device_id, &cache_output_names, &cpu_outputs)?;
+        let decode_a =
+            decode.create_resident_cuda_binding(device_id, &cache_output_names, &cpu_outputs)?;
+        let decode_b =
+            decode.create_resident_cuda_binding(device_id, &cache_output_names, &cpu_outputs)?;
+        Ok(Self {
+            prefill: prefill_binding,
+            decode: [decode_a, decode_b],
+            cache_input_names,
+            cache_output_names,
+            next_decode_binding: 0,
+        })
+    }
+
+    fn prefill(
+        &mut self,
+        session: &mut OrtSession,
+        hidden_state: OrtTensorInput,
+        attention_mask: OrtTensorInput,
+        hidden_token_count: usize,
+    ) -> Result<ResidentEStep> {
+        let expected = expected_cache_sequence_len(None, hidden_token_count)?;
+        let outputs = session.run_resident_binding(
+            &mut self.prefill,
+            vec![hidden_state, attention_mask],
+            &[],
+        )?;
+        self.collect_step(outputs, expected)
+    }
+
+    fn decode(
+        &mut self,
+        session: &mut OrtSession,
+        current: ResidentEStep,
+        hidden_state: OrtTensorInput,
+        attention_mask: OrtTensorInput,
+        hidden_token_count: usize,
+    ) -> Result<ResidentEStep> {
+        if current.caches.len() != self.cache_input_names.len() {
+            return Err(InfraError::Backend(format!(
+                "resident IndexTTS_E expected {} current KV tensors, got {}",
+                self.cache_input_names.len(),
+                current.caches.len()
+            )));
+        }
+        let sequence_len = current.cache_sequence_len();
+        let expected = expected_cache_sequence_len(Some(sequence_len), hidden_token_count)?;
+        for (index, cache) in current.caches.iter().enumerate() {
+            if cache.shape() != [1, 20, sequence_len, 64] {
+                return Err(InfraError::Backend(format!(
+                    "resident IndexTTS_E cache {} shape {:?} differs from [1, 20, {sequence_len}, 64]",
+                    self.cache_input_names[index],
+                    cache.shape()
+                )));
+            }
+        }
+        let resident_inputs = self
+            .cache_input_names
+            .iter()
+            .zip(&current.caches)
+            .map(|(name, tensor)| ResidentTensorInput::new(name, tensor))
+            .collect::<Vec<_>>();
+        let binding_index = self.next_decode_binding;
+        self.next_decode_binding ^= 1;
+        let outputs = session.run_resident_binding(
+            &mut self.decode[binding_index],
+            vec![hidden_state, attention_mask],
+            &resident_inputs,
+        )?;
+        // `run_resident_binding` cleared the consumer inputs. Dropping `current`
+        // here releases the previous generation before this ping-pong binding
+        // can be selected again.
+        drop(resident_inputs);
+        drop(current);
+        self.collect_step(outputs, expected)
+    }
+
+    fn collect_step(
+        &self,
+        mut outputs: local_backend_ort::ResidentBindingOutputs,
+        expected_sequence_len: usize,
+    ) -> Result<ResidentEStep> {
+        let mut caches = Vec::with_capacity(self.cache_output_names.len());
+        let mut sequence_lengths = Vec::with_capacity(self.cache_output_names.len());
+        for name in &self.cache_output_names {
+            let cache = outputs.take_cuda(name)?;
+            sequence_lengths.push(cache.sequence_len());
+            caches.push(cache);
+        }
+        validate_cache_sequence_lengths(&sequence_lengths, expected_sequence_len)?;
+        Ok(ResidentEStep {
+            caches,
+            last_hidden_state: outputs.take_cpu("last_hidden_state")?,
+            raw_logits: outputs.take_cpu("raw_logits")?,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1245,4 +1711,74 @@ fn index_tts_cpu_session_options_from_env() -> Result<CpuSessionOptions> {
         env::var("LOCAL_INDEXTTS_ORT_INTER_THREADS").ok().as_deref(),
         logical_cpus,
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResidentKvSetting {
+    DefaultEnabled,
+    ExplicitEnabled,
+    ExplicitDisabled,
+    UnknownEnabled,
+}
+
+impl ResidentKvSetting {
+    fn enabled(self) -> bool {
+        !matches!(self, Self::ExplicitDisabled)
+    }
+
+    fn source(self) -> &'static str {
+        match self {
+            Self::DefaultEnabled => "default",
+            Self::ExplicitEnabled => "environment_true",
+            Self::ExplicitDisabled => "environment_false",
+            Self::UnknownEnabled => "environment_unknown",
+        }
+    }
+}
+
+fn resident_kv_setting_from_env() -> ResidentKvSetting {
+    let value = env::var("LOCAL_INDEXTTS_RESIDENT_KV").ok();
+    let setting = resident_kv_setting_from_value(value.as_deref());
+    if setting == ResidentKvSetting::UnknownEnabled {
+        tracing::warn!(
+            env = "LOCAL_INDEXTTS_RESIDENT_KV",
+            value = value.as_deref().unwrap_or_default().trim(),
+            "unknown resident KV setting; resident CUDA KV remains enabled because only explicit false values disable it"
+        );
+    }
+    setting
+}
+
+pub(crate) fn resident_kv_setting_from_value(value: Option<&str>) -> ResidentKvSetting {
+    let Some(value) = value else {
+        return ResidentKvSetting::DefaultEnabled;
+    };
+    let value = value.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "0" | "false" | "no" | "off" => ResidentKvSetting::ExplicitDisabled,
+        "1" | "true" | "yes" | "on" => ResidentKvSetting::ExplicitEnabled,
+        "" => ResidentKvSetting::DefaultEnabled,
+        _ => ResidentKvSetting::UnknownEnabled,
+    }
+}
+
+pub(crate) fn resident_kv_effective_device(
+    setting: ResidentKvSetting,
+    e: SessionProviderReport,
+    e_device_id: Option<u32>,
+    prefill: SessionProviderReport,
+    prefill_device_id: Option<u32>,
+) -> Option<u32> {
+    if !setting.enabled()
+        || e.provider != ProviderKind::Cuda
+        || e.cpu_fallback_used
+        || prefill.provider != ProviderKind::Cuda
+        || prefill.cpu_fallback_used
+    {
+        return None;
+    }
+    match (e_device_id, prefill_device_id) {
+        (Some(e), Some(prefill)) if e == prefill => Some(e),
+        _ => None,
+    }
 }
