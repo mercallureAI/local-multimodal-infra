@@ -532,6 +532,49 @@ def run_assets(data_dir: Path, timestamp: str, timeout: float) -> None:
     assets = list_payload.get("assets") or []
     if not any(asset.get("uri") == uri for asset in assets):
         raise SmokeError(f"uploaded asset not found in list/search: {list_payload}")
+    task = rpc_create_task(
+        {
+            "task_kind": "asr.transcribe",
+            "files": [
+                {
+                    "name": "duplicate.txt",
+                    "mime": "text/plain; charset=utf-8",
+                    "role": "audio",
+                    "required": True,
+                }
+            ],
+            "params": {},
+        },
+        f"smoke-assets-dedup-create-{timestamp}",
+        timeout,
+    )
+    task_upload = first_upload(task, "audio")
+    requested_uri = task_upload.get("asset_uri") or ""
+    status, dedup_payload = raw_request(
+        "POST",
+        task_upload["upload_url"],
+        body,
+        {"Content-Type": "text/plain; charset=utf-8"},
+        timeout,
+    )
+    if status != 200 or dedup_payload.get("uri") != uri:
+        raise SmokeError(f"task material upload was not hash-reused status={status}: {dedup_payload}")
+    task_status_code, task_status_payload = rpc_infer(
+        "get_task",
+        {"task_id": task["task_id"]},
+        f"smoke-assets-dedup-get-{timestamp}",
+        timeout,
+    )
+    assert_rpc_success(task_status_code, task_status_payload, "legacy RPC get deduplicated task")
+    task_status = task_status_payload.get("result") or {}
+    reused_upload = first_upload(task_status, "audio")
+    if task_status.get("state") != "ready" or not reused_upload.get("uploaded") or reused_upload.get("asset_uri") != uri:
+        raise SmokeError(f"deduplicated task slot was not retargeted to reused material: {task_status}")
+    requested_prefix = "assets://material/"
+    if requested_uri.startswith(requested_prefix):
+        duplicate_payload_path = data_dir / "assets" / "material" / requested_uri[len(requested_prefix) :]
+        if duplicate_payload_path.exists():
+            raise SmokeError(f"deduplicated task upload still wrote a second payload: {duplicate_payload_path}")
     status, _downloaded, _headers = raw_bytes_request("GET", f"{CONTROLLER_URL}/assets/material/{path}", None, {}, timeout)
     if status == 200:
         raise SmokeError("unsigned asset download unexpectedly succeeded")
@@ -551,7 +594,17 @@ def run_assets(data_dir: Path, timestamp: str, timeout: float) -> None:
     if status != 404:
         raise SmokeError(f"deleted asset remained downloadable: HTTP {status}")
     out = data_dir / f"smoke-assets-{timestamp}.json"
-    save_json(out, {"uri": uri, "list_count": len(assets), "deleted": True, "signed_batch": signed})
+    save_json(
+        out,
+        {
+            "uri": uri,
+            "list_count": len(assets),
+            "deleted": True,
+            "signed_batch": signed,
+            "deduplicated_task_id": task["task_id"],
+            "deduplicated_requested_uri": requested_uri,
+        },
+    )
     print(f"[smoke] assets saved {out}")
 
 

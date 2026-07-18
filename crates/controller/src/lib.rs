@@ -41,6 +41,7 @@ const DEFAULT_ASSET_URL_TTL_SECS: i64 = 600;
 const DEFAULT_MATERIAL_ASSET_TTL_SECS: i64 = 10 * 60;
 const DEFAULT_ARTIFACT_ASSET_TTL_SECS: i64 = 24 * 60 * 60;
 const DEFAULT_ASSET_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const MATERIAL_FAST_HASH_MAX_BYTES: usize = 100 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct ControllerState {
@@ -517,20 +518,41 @@ impl ControllerState {
                     .and_then(|value| value.to_str().ok())
                     .map(str::to_string)
             });
-        let mut record = self
-            .assets
-            .put(kind, &path, content_type, expires_at, body.as_ref())?;
+        let requested_uri = asset_uri(kind, &path);
+        let reuse_by_hash = is_fast_hash_material_input(kind, &path, body.len());
+        let (mut record, reused) = if reuse_by_hash {
+            self.assets.put_or_reuse_by_sha256(
+                kind,
+                &path,
+                content_type,
+                expires_at,
+                body.as_ref(),
+                sha256_hex(body.as_ref()),
+            )?
+        } else {
+            (
+                self.assets
+                    .put(kind, &path, content_type, expires_at, body.as_ref())?,
+                false,
+            )
+        };
+        tracing::info!(
+            kind = kind.as_str(),
+            requested_uri = %requested_uri,
+            resolved_uri = %record.uri,
+            upload_bytes = body.len(),
+            reuse_by_hash,
+            reused,
+            "controller material upload stored or reused"
+        );
         self.decorate_asset(&mut record);
-        self.mark_uploaded_asset(&record).await?;
+        self.mark_uploaded_asset(&requested_uri, &record).await?;
         Ok(record)
     }
 
-    async fn mark_uploaded_asset(&self, record: &AssetRecord) -> Result<()> {
-        let Some(task_id) = record
-            .path
-            .strip_prefix("tasks/")
-            .and_then(|rest| rest.split('/').next())
-            .map(str::to_string)
+    async fn mark_uploaded_asset(&self, requested_uri: &str, record: &AssetRecord) -> Result<()> {
+        let (_, requested_path) = parse_asset_uri(requested_uri)?;
+        let Some(task_id) = task_id_from_material_input_path(&requested_path).map(str::to_string)
         else {
             return Ok(());
         };
@@ -539,7 +561,8 @@ impl ControllerState {
         };
         let mut changed = false;
         for upload in &mut status.uploads {
-            if upload.asset_uri.as_deref() == Some(record.uri.as_str()) {
+            if upload.asset_uri.as_deref() == Some(requested_uri) {
+                upload.asset_uri = Some(record.uri.clone());
                 upload.uploaded = true;
                 upload.uploaded_at = Some(Utc::now());
                 upload.mime = upload.mime.clone().or_else(|| record.content_type.clone());
@@ -1429,6 +1452,24 @@ fn is_reserved_asset_upload_path(path: &str) -> bool {
         path.split('/').next().unwrap_or_default(),
         "tasks" | "system" | ".metadata"
     )
+}
+
+fn task_id_from_material_input_path(path: &str) -> Option<&str> {
+    let mut parts = path.split('/');
+    if parts.next() != Some("tasks") {
+        return None;
+    }
+    let task_id = parts.next().filter(|value| !value.is_empty())?;
+    if parts.next() != Some("inputs") || parts.next().is_none() {
+        return None;
+    }
+    Some(task_id)
+}
+
+fn is_fast_hash_material_input(kind: AssetKind, path: &str, size: usize) -> bool {
+    kind == AssetKind::Material
+        && size <= MATERIAL_FAST_HASH_MAX_BYTES
+        && task_id_from_material_input_path(path).is_some()
 }
 
 impl ControllerState {

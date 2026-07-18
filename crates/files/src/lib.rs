@@ -55,6 +55,62 @@ impl AssetsStore {
     ) -> Result<AssetRecord> {
         self.cleanup_expired_before_access("put");
         let relative = normalize_asset_path(path)?;
+        let sha256 = sha256_bytes(bytes);
+        self.write_asset(kind, relative, content_type, expires_at, bytes, sha256)
+    }
+
+    pub fn put_or_reuse_by_sha256(
+        &self,
+        kind: AssetKind,
+        path: &str,
+        content_type: Option<String>,
+        expires_at: Option<DateTime<Utc>>,
+        bytes: &[u8],
+        sha256: String,
+    ) -> Result<(AssetRecord, bool)> {
+        self.cleanup_expired_before_access("put_or_reuse_by_sha256");
+        let relative = normalize_asset_path(path)?;
+        let size = bytes.len() as u64;
+        let query = AssetListQuery {
+            kind: Some(kind),
+            ..AssetListQuery::default()
+        };
+        let existing = self
+            .list_without_cleanup(&query)?
+            .assets
+            .into_iter()
+            .find(|record| {
+                record.sha256.as_deref() == Some(sha256.as_str())
+                    && record.size == size
+                    && fs::metadata(self.asset_path(record.kind, &record.path))
+                        .is_ok_and(|metadata| metadata.is_file() && metadata.len() == size)
+            });
+        if let Some(mut record) = existing {
+            let refreshed_expiry = extend_expiry(record.expires_at, expires_at);
+            let refreshed_content_type = record.content_type.clone().or(content_type);
+            if record.expires_at != refreshed_expiry
+                || record.content_type != refreshed_content_type
+            {
+                record.expires_at = refreshed_expiry;
+                record.content_type = refreshed_content_type;
+                self.write_record(&record)?;
+            }
+            return Ok((record, true));
+        }
+
+        self.write_asset(kind, relative, content_type, expires_at, bytes, sha256)
+            .map(|record| (record, false))
+    }
+
+    fn write_asset(
+        &self,
+        kind: AssetKind,
+        relative: String,
+        content_type: Option<String>,
+        expires_at: Option<DateTime<Utc>>,
+        bytes: &[u8],
+        sha256: String,
+    ) -> Result<AssetRecord> {
         let asset_path = self.asset_path(kind, &relative);
         if let Some(parent) = asset_path.parent() {
             fs::create_dir_all(parent)
@@ -64,7 +120,6 @@ impl AssetsStore {
             File::create(&asset_path).map_err(|e| InfraError::io(Some(asset_path.clone()), e))?;
         file.write_all(bytes)
             .map_err(|e| InfraError::io(Some(asset_path.clone()), e))?;
-        let sha256 = sha256_bytes(bytes);
         let record = AssetRecord {
             uri: asset_uri(kind, &relative),
             kind,
@@ -216,7 +271,11 @@ impl AssetsStore {
 
     fn list_without_cleanup(&self, query: &AssetListQuery) -> Result<AssetListResponse> {
         let mut assets = Vec::new();
-        for kind in [AssetKind::Material, AssetKind::Artifact] {
+        let kinds = query.kind.map_or_else(
+            || vec![AssetKind::Material, AssetKind::Artifact],
+            |kind| vec![kind],
+        );
+        for kind in kinds {
             let meta_root = self.meta_root(kind);
             if meta_root.exists() {
                 self.collect_records(kind, &meta_root, &mut assets)?;
@@ -303,6 +362,16 @@ fn is_expired(record: &AssetRecord) -> bool {
     record
         .expires_at
         .is_some_and(|expires| expires <= Utc::now())
+}
+
+fn extend_expiry(
+    existing: Option<DateTime<Utc>>,
+    requested: Option<DateTime<Utc>>,
+) -> Option<DateTime<Utc>> {
+    match (existing, requested) {
+        (None, _) | (_, None) => None,
+        (Some(existing), Some(requested)) => Some(existing.max(requested)),
+    }
 }
 
 fn remove_file_if_exists(path: &Path) -> Result<()> {
@@ -396,6 +465,73 @@ mod tests {
         assert!(matches!(err, InfraError::NotFound(_)), "{err}");
         assert!(!store.asset_path(record.kind, &record.path).exists());
         assert!(!store.meta_path(record.kind, &record.path).exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn matching_hash_reuses_material_without_second_payload_and_extends_expiry() {
+        let root = test_data_dir();
+        let store = AssetsStore::new(&root);
+        let bytes = b"same material";
+        let sha256 = sha256_bytes(bytes);
+        let initial_expiry = Utc::now() + Duration::seconds(10);
+        let existing = store
+            .put(
+                AssetKind::Material,
+                "library/original.wav",
+                None,
+                Some(initial_expiry),
+                bytes,
+            )
+            .expect("put original material");
+        let refreshed_expiry = initial_expiry + Duration::minutes(10);
+
+        let (reused, was_reused) = store
+            .put_or_reuse_by_sha256(
+                AssetKind::Material,
+                "tasks/new-task/inputs/copy.wav",
+                Some("audio/wav".to_string()),
+                Some(refreshed_expiry),
+                bytes,
+                sha256,
+            )
+            .expect("reuse matching material");
+
+        assert!(was_reused);
+        assert_eq!(reused.uri, existing.uri);
+        assert_eq!(reused.expires_at, Some(refreshed_expiry));
+        assert_eq!(reused.content_type.as_deref(), Some("audio/wav"));
+        assert!(!store
+            .asset_path(AssetKind::Material, "tasks/new-task/inputs/copy.wav")
+            .exists());
+        assert!(store.asset_path(existing.kind, &existing.path).exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unmatched_hash_writes_requested_material_once() {
+        let root = test_data_dir();
+        let store = AssetsStore::new(&root);
+        let bytes = b"new material";
+        let (stored, was_reused) = store
+            .put_or_reuse_by_sha256(
+                AssetKind::Material,
+                "tasks/new-task/inputs/new.wav",
+                Some("audio/wav".to_string()),
+                None,
+                bytes,
+                sha256_bytes(bytes),
+            )
+            .expect("store unmatched material");
+
+        assert!(!was_reused);
+        assert_eq!(stored.path, "tasks/new-task/inputs/new.wav");
+        assert_eq!(
+            fs::read(store.asset_path(stored.kind, &stored.path)).unwrap(),
+            bytes
+        );
 
         let _ = fs::remove_dir_all(root);
     }

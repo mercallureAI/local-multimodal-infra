@@ -447,6 +447,111 @@ async fn create_task_existing_required_asset_uri_is_ready_and_new_material_ttl_i
     cleanup_test_controller(&controller);
 }
 
+#[tokio::test]
+async fn small_task_input_reuses_existing_material_and_refreshes_expiry() {
+    let controller = test_controller_with_temp_data_dir();
+    let bytes = Bytes::from_static(b"reusable audio bytes");
+    let existing = controller
+        .assets
+        .put(
+            AssetKind::Material,
+            "library/reference.wav",
+            None,
+            Some(Utc::now() + chrono::Duration::seconds(5)),
+            bytes.as_ref(),
+        )
+        .expect("put reusable material");
+    let created = controller
+        .create_generic_task(CreateTaskRequest {
+            task_kind: TaskKind::AsrTranscribe,
+            model: None,
+            model_id: None,
+            files: vec![local_core::TaskFileRequirement {
+                name: "copy.wav".to_string(),
+                mime: Some("audio/wav".to_string()),
+                role: Some("audio".to_string()),
+                asset_uri: None,
+                required: true,
+            }],
+            params: BTreeMap::new(),
+            wait_timeout_sec: None,
+        })
+        .await
+        .expect("create task requiring reusable upload");
+    let slot = &created.uploads[0];
+    let requested_uri = slot.asset_uri.clone().expect("requested asset uri");
+    let (_, requested_path) = parse_asset_uri(&requested_uri).expect("parse requested uri");
+    let query = signed_url_query(&slot.upload_url);
+    let signed_expiry = query
+        .get("asset_expires")
+        .expect("asset_expires")
+        .parse::<i64>()
+        .expect("asset expiry timestamp");
+
+    let record = controller
+        .upload_asset_bytes(
+            AssetKind::Material,
+            requested_path.clone(),
+            query,
+            HeaderMap::new(),
+            bytes,
+        )
+        .await
+        .expect("reuse task input upload");
+
+    assert_eq!(record.uri, existing.uri);
+    assert_eq!(
+        record.expires_at.expect("refreshed expiry").timestamp(),
+        signed_expiry
+    );
+    assert_eq!(record.content_type.as_deref(), Some("audio/wav"));
+    assert!(!controller
+        .data_dir
+        .join("assets")
+        .join("material")
+        .join(&requested_path)
+        .exists());
+    let status = controller
+        .load_task(&created.task_id)
+        .await
+        .expect("load retargeted task");
+    assert_eq!(status.state, GenericTaskState::Ready);
+    assert!(status.uploads[0].uploaded);
+    assert!(status.uploads[0].uploaded_at.is_some());
+    assert_eq!(
+        status.uploads[0].asset_uri.as_deref(),
+        Some(existing.uri.as_str())
+    );
+
+    cleanup_test_controller(&controller);
+}
+
+#[test]
+fn fast_hash_reuse_is_limited_to_small_material_task_inputs() {
+    let path = "tasks/task-id/inputs/audio.wav";
+    assert!(is_fast_hash_material_input(AssetKind::Material, path, 0));
+    assert!(is_fast_hash_material_input(
+        AssetKind::Material,
+        path,
+        MATERIAL_FAST_HASH_MAX_BYTES
+    ));
+    assert!(!is_fast_hash_material_input(
+        AssetKind::Material,
+        path,
+        MATERIAL_FAST_HASH_MAX_BYTES + 1
+    ));
+    assert!(!is_fast_hash_material_input(
+        AssetKind::Artifact,
+        path,
+        1024
+    ));
+    assert!(!is_fast_hash_material_input(
+        AssetKind::Material,
+        "user/audio.wav",
+        1024
+    ));
+}
+
 #[test]
 fn tts_local_output_is_registered_as_downloadable_artifact_asset() {
     let controller = test_controller_with_temp_data_dir();
