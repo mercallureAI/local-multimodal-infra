@@ -1,10 +1,18 @@
 use super::*;
 
-// Remote waveform captures place the click inside the final 20 ms: a steep DC
-// excursion occurs a few milliseconds before the non-zero endpoint. A 20 ms
-// quadratic taper suppresses that interior transient much more strongly than
-// the ordinary 10 ms linear edge fade without deleting audible speech.
-const BIGVGAN_TAIL_TAPER_MS: u32 = 20;
+// Remote waveform captures show a terminal bipolar lobe followed by a non-zero
+// endpoint. Its position varies with generated length, so locate the final lobe
+// from zero crossings instead of deleting a fixed speech duration.
+const BIGVGAN_ZERO_CROSSING_SEARCH_MS: u32 = 40;
+const BIGVGAN_ZERO_CROSSING_TAPER_MS: u32 = 2;
+const BIGVGAN_FALLBACK_TAPER_MS: u32 = 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BoundaryTailDeclick {
+    pub(crate) silenced_samples: usize,
+    pub(crate) tapered_samples: usize,
+    pub(crate) used_zero_crossing: bool,
+}
 
 #[derive(Debug)]
 pub struct IndexTtsAdapter {
@@ -289,8 +297,7 @@ impl IndexTtsAdapter {
                 chunk_count
             ))
         })?;
-        let vocoder_tail_tapered_samples =
-            taper_bigvgan_boundary_tail(&mut wav, TARGET_SAMPLE_RATE);
+        let boundary_declick = declick_bigvgan_boundary_tail(&mut wav, TARGET_SAMPLE_RATE);
         validate_generated_audio(&wav, decode.generated_steps)?;
         tracing::info!(
             request_id = %request_id,
@@ -306,8 +313,10 @@ impl IndexTtsAdapter {
             raw_samples = waveform.raw_samples,
             final_samples = waveform.final_samples,
             trimmed_samples = waveform.trimmed_samples,
-            vocoder_tail_tapered_samples,
-            post_vocoder_taper_samples = wav.len(),
+            vocoder_tail_silenced_samples = boundary_declick.silenced_samples,
+            vocoder_tail_tapered_samples = boundary_declick.tapered_samples,
+            vocoder_tail_zero_crossing = boundary_declick.used_zero_crossing,
+            post_vocoder_declick_samples = wav.len(),
             trailing_quiet_samples = waveform.trailing_quiet_samples,
             peak = waveform.peak,
             rms = waveform.rms,
@@ -1681,27 +1690,75 @@ pub(crate) fn concatenate_segment_audio(
     Ok(output)
 }
 
-pub(crate) fn taper_bigvgan_boundary_tail(samples: &mut [i16], sample_rate: u32) -> usize {
-    let requested =
-        usize::try_from(u64::from(sample_rate) * u64::from(BIGVGAN_TAIL_TAPER_MS) / 1000)
-            .unwrap_or(usize::MAX);
-    let taper_len = requested.min(samples.len().div_ceil(2));
-    if taper_len == 0 {
-        return 0;
-    }
-    if taper_len == 1 {
-        *samples.last_mut().expect("non-empty taper") = 0;
-        return 1;
+pub(crate) fn declick_bigvgan_boundary_tail(
+    samples: &mut [i16],
+    sample_rate: u32,
+) -> BoundaryTailDeclick {
+    let search_len =
+        samples_for_ms(sample_rate, BIGVGAN_ZERO_CROSSING_SEARCH_MS).min(samples.len().div_ceil(2));
+    let search_start = samples.len().saturating_sub(search_len);
+    let mut crossings = Vec::new();
+    let mut previous_nonzero = None::<(usize, bool)>;
+    for index in search_start..samples.len() {
+        let sample = samples[index];
+        if sample == 0 {
+            continue;
+        }
+        let positive = sample > 0;
+        if let Some((previous_index, previous_positive)) = previous_nonzero {
+            if positive != previous_positive {
+                let crossing = (previous_index..=index)
+                    .min_by_key(|candidate| i32::from(samples[*candidate]).abs())
+                    .expect("non-empty crossing span");
+                if crossings.last().copied() != Some(crossing) {
+                    crossings.push(crossing);
+                }
+            }
+        }
+        previous_nonzero = Some((index, positive));
     }
 
-    let start = samples.len() - taper_len;
-    let denominator = i64::try_from(taper_len - 1).expect("taper length");
+    if let Some(cut) = crossings.get(crossings.len().saturating_sub(2)).copied() {
+        let taper_len = samples_for_ms(sample_rate, BIGVGAN_ZERO_CROSSING_TAPER_MS).min(cut);
+        let taper_start = cut - taper_len;
+        apply_quadratic_taper(&mut samples[taper_start..cut]);
+        samples[cut..].fill(0);
+        return BoundaryTailDeclick {
+            silenced_samples: samples.len() - cut,
+            tapered_samples: taper_len,
+            used_zero_crossing: true,
+        };
+    }
+
+    let taper_len =
+        samples_for_ms(sample_rate, BIGVGAN_FALLBACK_TAPER_MS).min(samples.len().div_ceil(2));
+    let taper_start = samples.len() - taper_len;
+    apply_quadratic_taper(&mut samples[taper_start..]);
+    BoundaryTailDeclick {
+        silenced_samples: 0,
+        tapered_samples: taper_len,
+        used_zero_crossing: false,
+    }
+}
+
+fn samples_for_ms(sample_rate: u32, duration_ms: u32) -> usize {
+    usize::try_from(u64::from(sample_rate) * u64::from(duration_ms) / 1000).unwrap_or(usize::MAX)
+}
+
+fn apply_quadratic_taper(samples: &mut [i16]) {
+    if samples.is_empty() {
+        return;
+    }
+    if samples.len() == 1 {
+        samples[0] = 0;
+        return;
+    }
+    let denominator = i64::try_from(samples.len() - 1).expect("taper length");
     let denominator_squared = denominator * denominator;
-    for (offset, sample) in samples[start..].iter_mut().enumerate() {
+    for (offset, sample) in samples.iter_mut().enumerate() {
         let remaining = denominator - i64::try_from(offset).expect("taper offset");
         *sample = (i64::from(*sample) * remaining * remaining / denominator_squared) as i16;
     }
-    taper_len
 }
 
 /// TTS decoder chunks are not guaranteed to end at a zero crossing. Joining

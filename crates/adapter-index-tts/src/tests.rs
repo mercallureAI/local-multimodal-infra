@@ -761,18 +761,20 @@ fn segment_audio_declicks_even_without_an_intentional_gap() {
 }
 
 #[test]
-fn bigvgan_last_twenty_ms_quadratically_suppresses_terminal_excursion() {
+fn bigvgan_terminal_lobe_is_removed_from_second_last_zero_crossing() {
     let mut segment = vec![2_000; 48_000];
-    segment[47_952..].fill(-30_000);
+    segment[47_800..47_880].fill(-2_000);
+    segment[47_880..47_950].fill(20_000);
+    segment[47_950..].fill(-30_000);
 
-    assert_eq!(
-        taper_bigvgan_boundary_tail(&mut segment, TARGET_SAMPLE_RATE),
-        480
-    );
+    let report = declick_bigvgan_boundary_tail(&mut segment, TARGET_SAMPLE_RATE);
+    assert_eq!(report.silenced_samples, 121);
+    assert_eq!(report.tapered_samples, 48);
+    assert!(report.used_zero_crossing);
     assert_eq!(segment.len(), 48_000);
-    assert_eq!(segment[47_519], 2_000);
-    assert_eq!(segment[47_520], 2_000);
-    assert!(segment[47_952].abs() <= 300, "{}", segment[47_952]);
+    assert_eq!(segment[47_830], -2_000);
+    assert_eq!(segment[47_878], 0);
+    assert!(segment[47_879..].iter().all(|sample| *sample == 0));
     assert_eq!(segment.last(), Some(&0));
 
     let output = concatenate_segment_audio(&[segment], TARGET_SAMPLE_RATE, 200).expect("audio");
@@ -781,15 +783,30 @@ fn bigvgan_last_twenty_ms_quadratically_suppresses_terminal_excursion() {
 }
 
 #[test]
-fn bigvgan_tail_taper_never_consumes_more_than_half_a_short_output() {
+fn bigvgan_tail_declick_falls_back_to_bounded_taper_without_crossing() {
     let mut short = vec![1_000; 600];
-    assert_eq!(
-        taper_bigvgan_boundary_tail(&mut short, TARGET_SAMPLE_RATE),
-        300
-    );
+    let report = declick_bigvgan_boundary_tail(&mut short, TARGET_SAMPLE_RATE);
+    assert_eq!(report.silenced_samples, 0);
+    assert_eq!(report.tapered_samples, 300);
+    assert!(!report.used_zero_crossing);
     assert!(short[..300].iter().all(|sample| *sample == 1_000));
     assert_eq!(short[300], 1_000);
     assert_eq!(short.last(), Some(&0));
+}
+
+#[test]
+fn bigvgan_tail_declick_tracks_each_generated_length_from_its_endpoint() {
+    for len in [24_000, 48_000, 96_000] {
+        let mut segment = vec![2_000; len];
+        segment[len - 200..len - 120].fill(-2_000);
+        segment[len - 120..len - 50].fill(20_000);
+        segment[len - 50..].fill(-30_000);
+
+        let report = declick_bigvgan_boundary_tail(&mut segment, TARGET_SAMPLE_RATE);
+        assert_eq!(report.silenced_samples, 121, "len={len}");
+        assert!(report.used_zero_crossing, "len={len}");
+        assert!(segment[len - 121..].iter().all(|sample| *sample == 0));
+    }
 }
 
 fn voiced(samples: usize) -> Vec<i16> {
