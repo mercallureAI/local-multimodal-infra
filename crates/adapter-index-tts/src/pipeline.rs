@@ -1,5 +1,10 @@
 use super::*;
 
+// The official inference path retains a commented `wav[:, :-512]` workaround.
+// This removes two 256-sample vocoder output hops, whose boundary tail can
+// contain a transient before the endpoint fade begins.
+const BIGVGAN_TAIL_TRIM_SAMPLES: usize = 512;
+
 #[derive(Debug)]
 pub struct IndexTtsAdapter {
     model_id: String,
@@ -261,7 +266,7 @@ impl IndexTtsAdapter {
             self.run_f(reference_state, &decode.save_hidden_state)
         })?;
         let f_ms = f_started.elapsed().as_millis() as u64;
-        let (wav, waveform) = finalize_decoder_waveform(&raw_wav).map_err(|err| {
+        let (mut wav, waveform) = finalize_decoder_waveform(&raw_wav).map_err(|err| {
             tracing::warn!(
                 request_id = %request_id,
                 chunk_index = chunk_index + 1,
@@ -283,6 +288,7 @@ impl IndexTtsAdapter {
                 chunk_count
             ))
         })?;
+        let vocoder_tail_trimmed_samples = trim_bigvgan_boundary_tail(&mut wav);
         validate_generated_audio(&wav, decode.generated_steps)?;
         tracing::info!(
             request_id = %request_id,
@@ -298,6 +304,8 @@ impl IndexTtsAdapter {
             raw_samples = waveform.raw_samples,
             final_samples = waveform.final_samples,
             trimmed_samples = waveform.trimmed_samples,
+            vocoder_tail_trimmed_samples,
+            post_vocoder_trim_samples = wav.len(),
             trailing_quiet_samples = waveform.trailing_quiet_samples,
             peak = waveform.peak,
             rms = waveform.rms,
@@ -1669,6 +1677,15 @@ pub(crate) fn concatenate_segment_audio(
         append_with_edge_fades(&mut output, segment, edge_fade_len);
     }
     Ok(output)
+}
+
+pub(crate) fn trim_bigvgan_boundary_tail(samples: &mut Vec<i16>) -> usize {
+    // Keep at least one full trim window so malformed/tiny outputs still reach
+    // the ordinary generated-audio validation instead of being emptied here.
+    let trim =
+        BIGVGAN_TAIL_TRIM_SAMPLES.min(samples.len().saturating_sub(BIGVGAN_TAIL_TRIM_SAMPLES));
+    samples.truncate(samples.len() - trim);
+    trim
 }
 
 /// TTS decoder chunks are not guaranteed to end at a zero crossing. Joining

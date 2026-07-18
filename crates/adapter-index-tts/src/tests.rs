@@ -760,6 +760,27 @@ fn segment_audio_declicks_even_without_an_intentional_gap() {
     assert_eq!(&output[478..482], &[50, 0, 0, -50]);
 }
 
+#[test]
+fn bigvgan_two_hop_tail_is_removed_before_endpoint_fade() {
+    let mut segment = vec![2_000; 2_048];
+    segment[1_536..].fill(30_000);
+
+    assert_eq!(trim_bigvgan_boundary_tail(&mut segment), 512);
+    assert_eq!(segment.len(), 1_536);
+    assert!(segment.iter().all(|sample| *sample == 2_000));
+
+    let output = concatenate_segment_audio(&[segment], TARGET_SAMPLE_RATE, 200).expect("audio");
+    assert_eq!(output.len(), 1_536);
+    assert_eq!(output.last(), Some(&0));
+}
+
+#[test]
+fn bigvgan_tail_trim_does_not_empty_tiny_malformed_output() {
+    let mut samples = vec![1; 512];
+    assert_eq!(trim_bigvgan_boundary_tail(&mut samples), 0);
+    assert_eq!(samples.len(), 512);
+}
+
 fn voiced(samples: usize) -> Vec<i16> {
     (0..samples)
         .map(|index| if index % 16 < 8 { 2_000 } else { -2_000 })
