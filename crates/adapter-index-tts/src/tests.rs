@@ -761,24 +761,41 @@ fn segment_audio_declicks_even_without_an_intentional_gap() {
 }
 
 #[test]
-fn bigvgan_two_hop_tail_is_removed_before_endpoint_fade() {
-    let mut segment = vec![2_000; 2_048];
-    segment[1_536..].fill(30_000);
+fn bigvgan_last_half_second_is_replaced_with_a_click_free_transition() {
+    let mut segment = vec![2_000; 48_000];
+    segment[36_000..].fill(30_000);
 
-    assert_eq!(trim_bigvgan_boundary_tail(&mut segment), 512);
-    assert_eq!(segment.len(), 1_536);
-    assert!(segment.iter().all(|sample| *sample == 2_000));
+    assert_eq!(
+        suppress_bigvgan_boundary_tail(&mut segment, TARGET_SAMPLE_RATE),
+        12_000
+    );
+    assert_eq!(segment.len(), 48_000);
+    assert_eq!(segment[35_999], 2_000);
+    assert_eq!(segment[36_000], 2_000);
+    assert_eq!(segment[36_239], 0);
+    assert!(segment[36_239..].iter().all(|sample| *sample == 0));
 
     let output = concatenate_segment_audio(&[segment], TARGET_SAMPLE_RATE, 200).expect("audio");
-    assert_eq!(output.len(), 1_536);
+    assert_eq!(output.len(), 48_000);
     assert_eq!(output.last(), Some(&0));
 }
 
 #[test]
-fn bigvgan_tail_trim_does_not_empty_tiny_malformed_output() {
-    let mut samples = vec![1; 512];
-    assert_eq!(trim_bigvgan_boundary_tail(&mut samples), 0);
-    assert_eq!(samples.len(), 512);
+fn bigvgan_tail_suppression_preserves_at_least_half_a_second() {
+    let mut exact_minimum = vec![1; 12_000];
+    assert_eq!(
+        suppress_bigvgan_boundary_tail(&mut exact_minimum, TARGET_SAMPLE_RATE),
+        0
+    );
+    assert!(exact_minimum.iter().all(|sample| *sample == 1));
+
+    let mut short = vec![1; 18_000];
+    assert_eq!(
+        suppress_bigvgan_boundary_tail(&mut short, TARGET_SAMPLE_RATE),
+        6_000
+    );
+    assert!(short[..12_000].iter().all(|sample| *sample == 1));
+    assert_eq!(short.last(), Some(&0));
 }
 
 fn voiced(samples: usize) -> Vec<i16> {

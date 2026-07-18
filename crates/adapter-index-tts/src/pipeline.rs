@@ -1,9 +1,10 @@
 use super::*;
 
-// The official inference path retains a commented `wav[:, :-512]` workaround.
-// This removes two 256-sample vocoder output hops, whose boundary tail can
-// contain a transient before the endpoint fade begins.
-const BIGVGAN_TAIL_TRIM_SAMPLES: usize = 512;
+// The official `wav[:, :-512]` workaround was not sufficient in remote
+// segmented synthesis. Replace a much wider tail window while preserving the
+// segment length so vocoder transients cannot survive immediately before a gap.
+const BIGVGAN_TAIL_SUPPRESSION_MS: u32 = 500;
+const BIGVGAN_TAIL_TRANSITION_MS: u32 = 10;
 
 #[derive(Debug)]
 pub struct IndexTtsAdapter {
@@ -288,7 +289,8 @@ impl IndexTtsAdapter {
                 chunk_count
             ))
         })?;
-        let vocoder_tail_trimmed_samples = trim_bigvgan_boundary_tail(&mut wav);
+        let vocoder_tail_suppressed_samples =
+            suppress_bigvgan_boundary_tail(&mut wav, TARGET_SAMPLE_RATE);
         validate_generated_audio(&wav, decode.generated_steps)?;
         tracing::info!(
             request_id = %request_id,
@@ -304,8 +306,8 @@ impl IndexTtsAdapter {
             raw_samples = waveform.raw_samples,
             final_samples = waveform.final_samples,
             trimmed_samples = waveform.trimmed_samples,
-            vocoder_tail_trimmed_samples,
-            post_vocoder_trim_samples = wav.len(),
+            vocoder_tail_suppressed_samples,
+            post_vocoder_suppression_samples = wav.len(),
             trailing_quiet_samples = waveform.trailing_quiet_samples,
             peak = waveform.peak,
             rms = waveform.rms,
@@ -1679,13 +1681,37 @@ pub(crate) fn concatenate_segment_audio(
     Ok(output)
 }
 
-pub(crate) fn trim_bigvgan_boundary_tail(samples: &mut Vec<i16>) -> usize {
-    // Keep at least one full trim window so malformed/tiny outputs still reach
-    // the ordinary generated-audio validation instead of being emptied here.
-    let trim =
-        BIGVGAN_TAIL_TRIM_SAMPLES.min(samples.len().saturating_sub(BIGVGAN_TAIL_TRIM_SAMPLES));
-    samples.truncate(samples.len() - trim);
-    trim
+pub(crate) fn suppress_bigvgan_boundary_tail(samples: &mut [i16], sample_rate: u32) -> usize {
+    let requested =
+        usize::try_from(u64::from(sample_rate) * u64::from(BIGVGAN_TAIL_SUPPRESSION_MS) / 1000)
+            .unwrap_or(usize::MAX);
+    // Preserve at least 500 ms of short outputs instead of silencing an entire
+    // malformed or unusually short segment.
+    let replace_len = requested.min(samples.len().saturating_sub(requested));
+    if replace_len == 0 {
+        return 0;
+    }
+
+    let start = samples.len() - replace_len;
+    let transition_len =
+        usize::try_from(u64::from(sample_rate) * u64::from(BIGVGAN_TAIL_TRANSITION_MS) / 1000)
+            .unwrap_or(usize::MAX)
+            .min(replace_len);
+    let trusted_sample = samples[start - 1];
+    if transition_len == 1 {
+        samples[start] = 0;
+    } else if transition_len > 1 {
+        let denominator = i64::try_from(transition_len - 1).expect("transition length");
+        for (offset, sample) in samples[start..start + transition_len]
+            .iter_mut()
+            .enumerate()
+        {
+            let numerator = denominator - i64::try_from(offset).expect("transition offset");
+            *sample = (i64::from(trusted_sample) * numerator / denominator) as i16;
+        }
+    }
+    samples[start + transition_len..].fill(0);
+    replace_len
 }
 
 /// TTS decoder chunks are not guaranteed to end at a zero crossing. Joining
