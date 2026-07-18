@@ -761,19 +761,19 @@ fn segment_audio_declicks_even_without_an_intentional_gap() {
 }
 
 #[test]
-fn bigvgan_last_half_second_is_replaced_with_a_click_free_transition() {
+fn bigvgan_last_twenty_ms_quadratically_suppresses_terminal_excursion() {
     let mut segment = vec![2_000; 48_000];
-    segment[36_000..].fill(30_000);
+    segment[47_952..].fill(-30_000);
 
     assert_eq!(
-        suppress_bigvgan_boundary_tail(&mut segment, TARGET_SAMPLE_RATE),
-        12_000
+        taper_bigvgan_boundary_tail(&mut segment, TARGET_SAMPLE_RATE),
+        480
     );
     assert_eq!(segment.len(), 48_000);
-    assert_eq!(segment[35_999], 2_000);
-    assert_eq!(segment[36_000], 2_000);
-    assert_eq!(segment[36_239], 0);
-    assert!(segment[36_239..].iter().all(|sample| *sample == 0));
+    assert_eq!(segment[47_519], 2_000);
+    assert_eq!(segment[47_520], 2_000);
+    assert!(segment[47_952].abs() <= 300, "{}", segment[47_952]);
+    assert_eq!(segment.last(), Some(&0));
 
     let output = concatenate_segment_audio(&[segment], TARGET_SAMPLE_RATE, 200).expect("audio");
     assert_eq!(output.len(), 48_000);
@@ -781,20 +781,14 @@ fn bigvgan_last_half_second_is_replaced_with_a_click_free_transition() {
 }
 
 #[test]
-fn bigvgan_tail_suppression_preserves_at_least_half_a_second() {
-    let mut exact_minimum = vec![1; 12_000];
+fn bigvgan_tail_taper_never_consumes_more_than_half_a_short_output() {
+    let mut short = vec![1_000; 600];
     assert_eq!(
-        suppress_bigvgan_boundary_tail(&mut exact_minimum, TARGET_SAMPLE_RATE),
-        0
+        taper_bigvgan_boundary_tail(&mut short, TARGET_SAMPLE_RATE),
+        300
     );
-    assert!(exact_minimum.iter().all(|sample| *sample == 1));
-
-    let mut short = vec![1; 18_000];
-    assert_eq!(
-        suppress_bigvgan_boundary_tail(&mut short, TARGET_SAMPLE_RATE),
-        6_000
-    );
-    assert!(short[..12_000].iter().all(|sample| *sample == 1));
+    assert!(short[..300].iter().all(|sample| *sample == 1_000));
+    assert_eq!(short[300], 1_000);
     assert_eq!(short.last(), Some(&0));
 }
 

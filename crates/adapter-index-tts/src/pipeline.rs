@@ -1,10 +1,10 @@
 use super::*;
 
-// The official `wav[:, :-512]` workaround was not sufficient in remote
-// segmented synthesis. Replace a much wider tail window while preserving the
-// segment length so vocoder transients cannot survive immediately before a gap.
-const BIGVGAN_TAIL_SUPPRESSION_MS: u32 = 500;
-const BIGVGAN_TAIL_TRANSITION_MS: u32 = 10;
+// Remote waveform captures place the click inside the final 20 ms: a steep DC
+// excursion occurs a few milliseconds before the non-zero endpoint. A 20 ms
+// quadratic taper suppresses that interior transient much more strongly than
+// the ordinary 10 ms linear edge fade without deleting audible speech.
+const BIGVGAN_TAIL_TAPER_MS: u32 = 20;
 
 #[derive(Debug)]
 pub struct IndexTtsAdapter {
@@ -289,8 +289,8 @@ impl IndexTtsAdapter {
                 chunk_count
             ))
         })?;
-        let vocoder_tail_suppressed_samples =
-            suppress_bigvgan_boundary_tail(&mut wav, TARGET_SAMPLE_RATE);
+        let vocoder_tail_tapered_samples =
+            taper_bigvgan_boundary_tail(&mut wav, TARGET_SAMPLE_RATE);
         validate_generated_audio(&wav, decode.generated_steps)?;
         tracing::info!(
             request_id = %request_id,
@@ -306,8 +306,8 @@ impl IndexTtsAdapter {
             raw_samples = waveform.raw_samples,
             final_samples = waveform.final_samples,
             trimmed_samples = waveform.trimmed_samples,
-            vocoder_tail_suppressed_samples,
-            post_vocoder_suppression_samples = wav.len(),
+            vocoder_tail_tapered_samples,
+            post_vocoder_taper_samples = wav.len(),
             trailing_quiet_samples = waveform.trailing_quiet_samples,
             peak = waveform.peak,
             rms = waveform.rms,
@@ -1681,37 +1681,27 @@ pub(crate) fn concatenate_segment_audio(
     Ok(output)
 }
 
-pub(crate) fn suppress_bigvgan_boundary_tail(samples: &mut [i16], sample_rate: u32) -> usize {
+pub(crate) fn taper_bigvgan_boundary_tail(samples: &mut [i16], sample_rate: u32) -> usize {
     let requested =
-        usize::try_from(u64::from(sample_rate) * u64::from(BIGVGAN_TAIL_SUPPRESSION_MS) / 1000)
+        usize::try_from(u64::from(sample_rate) * u64::from(BIGVGAN_TAIL_TAPER_MS) / 1000)
             .unwrap_or(usize::MAX);
-    // Preserve at least 500 ms of short outputs instead of silencing an entire
-    // malformed or unusually short segment.
-    let replace_len = requested.min(samples.len().saturating_sub(requested));
-    if replace_len == 0 {
+    let taper_len = requested.min(samples.len().div_ceil(2));
+    if taper_len == 0 {
         return 0;
     }
-
-    let start = samples.len() - replace_len;
-    let transition_len =
-        usize::try_from(u64::from(sample_rate) * u64::from(BIGVGAN_TAIL_TRANSITION_MS) / 1000)
-            .unwrap_or(usize::MAX)
-            .min(replace_len);
-    let trusted_sample = samples[start - 1];
-    if transition_len == 1 {
-        samples[start] = 0;
-    } else if transition_len > 1 {
-        let denominator = i64::try_from(transition_len - 1).expect("transition length");
-        for (offset, sample) in samples[start..start + transition_len]
-            .iter_mut()
-            .enumerate()
-        {
-            let numerator = denominator - i64::try_from(offset).expect("transition offset");
-            *sample = (i64::from(trusted_sample) * numerator / denominator) as i16;
-        }
+    if taper_len == 1 {
+        *samples.last_mut().expect("non-empty taper") = 0;
+        return 1;
     }
-    samples[start + transition_len..].fill(0);
-    replace_len
+
+    let start = samples.len() - taper_len;
+    let denominator = i64::try_from(taper_len - 1).expect("taper length");
+    let denominator_squared = denominator * denominator;
+    for (offset, sample) in samples[start..].iter_mut().enumerate() {
+        let remaining = denominator - i64::try_from(offset).expect("taper offset");
+        *sample = (i64::from(*sample) * remaining * remaining / denominator_squared) as i16;
+    }
+    taper_len
 }
 
 /// TTS decoder chunks are not guaranteed to end at a zero crossing. Joining
