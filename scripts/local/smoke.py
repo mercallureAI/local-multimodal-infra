@@ -41,11 +41,16 @@ TEST_ALIASES = {
     "qwen-asr",
     "indextts",
     "indextts_asr",
+    "embedding",
+    "rerank",
+    "text",
     "mcp_standard",
 }
-RPC_TESTS = {"assets", "yolo", "qwen-asr", "indextts", "indextts_asr"}
+RPC_TESTS = {"assets", "yolo", "qwen-asr", "indextts", "indextts_asr", "embedding", "rerank"}
 MCP_TESTS = {"mcp_standard"}
 INDEXTTS_MODEL_ID = "indextts-1.5-onnx"
+EMBEDDING_MODEL_ID = "multilingual-e5-small-onnx"
+RERANK_MODEL_ID = "mmarco-minilm-l12-onnx"
 ADMIN_TOKEN = "local-smoke-admin-token"
 INDEXTTS_REQUIRED = [
     "IndexTTS_A.onnx",
@@ -218,6 +223,18 @@ def main(argv: list[str] | None = None) -> int:
             except SmokeError as exc:
                 failures.append(f"indextts_asr: {exc}")
 
+        if "embedding" in requested_tests:
+            try:
+                run_embedding(data_dir, timestamp, args.request_timeout)
+            except SmokeError as exc:
+                failures.append(f"embedding: {exc}")
+
+        if "rerank" in requested_tests:
+            try:
+                run_rerank(data_dir, timestamp, args.request_timeout)
+            except SmokeError as exc:
+                failures.append(f"rerank: {exc}")
+
     except KeyboardInterrupt:
         print("[smoke] interrupted; cleaning up launched services", file=sys.stderr)
         failures.append("interrupted")
@@ -267,7 +284,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         default="assets,yolo,qwen-asr,indextts",
         help=(
             "Comma-separated smoke tests or groups: rpc,mcp,all,assets,yolo,qwen-asr,indextts,"
-            "indextts_asr,mcp_standard. "
+            "indextts_asr,embedding,rerank,text,mcp_standard. "
             "rpc expands to legacy JSON-RPC coverage on /rpc/admin and /rpc/infer. "
             "mcp expands to standard MCP SDK coverage on http://127.0.0.1:17892/mcp. "
             "all runs both groups. OCR smoke aliases were removed after withdrawal."
@@ -334,7 +351,9 @@ def selected_tests(args: argparse.Namespace) -> set[str]:
         tests.update(RPC_TESTS)
     if "mcp" in raw_tests:
         tests.update(MCP_TESTS)
-    tests.difference_update({"all", "rpc", "mcp"})
+    if "text" in raw_tests:
+        tests.update({"embedding", "rerank"})
+    tests.difference_update({"all", "rpc", "mcp", "text"})
     if args.skip_yolo:
         tests.discard("yolo")
     if args.skip_asr_qwen:
@@ -624,6 +643,70 @@ def image_mime(path: Path | str) -> str:
     if suffix == ".bmp":
         return "image/bmp"
     return "application/octet-stream"
+
+def run_embedding(data_dir: Path, timestamp: str, timeout: float) -> None:
+    payload = checked_json_request(
+        "POST",
+        f"{CONTROLLER_URL}/v1/embeddings",
+        {
+            "model": EMBEDDING_MODEL_ID,
+            "input": ["今天天气很好。", "Local ONNX inference works."],
+            "input_type": "passage",
+            "encoding_format": "float",
+        },
+        timeout,
+    )
+    if payload.get("object") != "list" or payload.get("model") != EMBEDDING_MODEL_ID:
+        raise SmokeError(f"OpenAI embeddings response envelope mismatch: {payload}")
+    data = payload.get("data")
+    if not isinstance(data, list) or len(data) != 2:
+        raise SmokeError(f"OpenAI embeddings response must preserve batch size/order: {payload}")
+    for index, item in enumerate(data):
+        embedding = item.get("embedding") if isinstance(item, dict) else None
+        if item.get("index") != index or item.get("object") != "embedding":
+            raise SmokeError(f"OpenAI embedding item {index} has wrong metadata: {item}")
+        if not isinstance(embedding, list) or len(embedding) != 384:
+            raise SmokeError(f"OpenAI embedding item {index} is not 384-dimensional")
+        norm = sum(float(value) ** 2 for value in embedding) ** 0.5
+        if abs(norm - 1.0) > 1e-3:
+            raise SmokeError(f"OpenAI embedding item {index} is not L2-normalized: norm={norm}")
+    usage = payload.get("usage", {})
+    if not isinstance(usage.get("prompt_tokens"), int) or usage["prompt_tokens"] <= 0:
+        raise SmokeError(f"OpenAI embeddings usage is missing prompt token count: {payload}")
+    save_json(data_dir / f"smoke-embedding-{timestamp}.json", payload)
+
+
+def run_rerank(data_dir: Path, timestamp: str, timeout: float) -> None:
+    request = {
+        "model": RERANK_MODEL_ID,
+        "query": "法国的首都是什么？",
+        "documents": [
+            "巴西的首都是巴西利亚。",
+            "法国的首都是巴黎。",
+            "马和牛都是动物。",
+        ],
+        "top_n": 2,
+    }
+    payload = checked_json_request(
+        "POST", f"{CONTROLLER_URL}/v1/rerank", request, timeout
+    )
+    if payload.get("model") != RERANK_MODEL_ID or not str(payload.get("id", "")).startswith("rerank-"):
+        raise SmokeError(f"vLLM rerank response envelope mismatch: {payload}")
+    results = payload.get("results")
+    if not isinstance(results, list) or len(results) != 2:
+        raise SmokeError(f"vLLM rerank top_n was not honored: {payload}")
+    if results[0].get("index") != 1 or results[0].get("document", {}).get("text") != request["documents"][1]:
+        raise SmokeError(f"vLLM rerank did not rank the relevant document first: {payload}")
+    scores = [result.get("relevance_score") for result in results]
+    if not all(isinstance(score, (int, float)) and 0.0 <= score <= 1.0 for score in scores):
+        raise SmokeError(f"vLLM rerank scores must be activated probabilities: {payload}")
+    if scores != sorted(scores, reverse=True):
+        raise SmokeError(f"vLLM rerank results are not score-sorted: {payload}")
+    usage = payload.get("usage", {})
+    if not isinstance(usage.get("total_tokens"), int) or usage["total_tokens"] <= 0:
+        raise SmokeError(f"vLLM rerank usage is missing total token count: {payload}")
+    save_json(data_dir / f"smoke-rerank-{timestamp}.json", payload)
+
 
 def run_yolo(image: Path, data_dir: Path, timestamp: str, timeout: float) -> None:
     if not image.exists():

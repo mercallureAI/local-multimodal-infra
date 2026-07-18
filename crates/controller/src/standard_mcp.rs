@@ -115,7 +115,8 @@ impl StandardMcpServer {
                     InferenceApi::sign_assets(&self.state, request).await?
                 ))
             }
-            "asr_transcribe" | "object_detect" | "tts_synthesize" => {
+            "asr_transcribe" | "object_detect" | "tts_synthesize" | "text_embed"
+            | "text_rerank" => {
                 let task = task_from_method(name, &arguments)?;
                 Ok(json!(InferenceApi::dispatch(&self.state, task).await?))
             }
@@ -219,10 +220,79 @@ fn task_from_method(method: &str, params: &Value) -> Result<InferenceTask> {
                 .unwrap_or_default();
             Ok(task)
         }
+        "text_embed" => {
+            let texts = value_text_list(params, &["input", "texts", "text"])?;
+            let input_type = params
+                .get("input_type")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()?
+                .unwrap_or_default();
+            Ok(InferenceTask::new(
+                local_core::TaskKind::TextEmbed,
+                model_id,
+                InferenceInput::TextEmbed { texts, input_type },
+            ))
+        }
+        "text_rerank" => {
+            let query = params
+                .get("query")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    InfraError::BadRequest("text_rerank params.query is required".to_string())
+                })?
+                .to_string();
+            let documents = value_text_list(params, &["documents"])?;
+            let top_n = params
+                .get("top_n")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize);
+            Ok(InferenceTask::new(
+                local_core::TaskKind::TextRerank,
+                model_id,
+                InferenceInput::TextRerank {
+                    query,
+                    documents,
+                    top_n,
+                },
+            ))
+        }
         other => Err(InfraError::BadRequest(format!(
             "unknown MCP tool `{other}`"
         ))),
     }
+}
+
+fn value_text_list(params: &Value, keys: &[&str]) -> Result<Vec<String>> {
+    let value = keys
+        .iter()
+        .find_map(|key| params.get(*key))
+        .ok_or_else(|| InfraError::BadRequest(format!("params.{} is required", keys[0])))?;
+    let texts = match value {
+        Value::String(text) => vec![text.clone()],
+        Value::Array(values) => values
+            .iter()
+            .map(|value| {
+                value.as_str().map(str::to_string).ok_or_else(|| {
+                    InfraError::BadRequest(format!("params.{} must contain strings", keys[0]))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        _ => {
+            return Err(InfraError::BadRequest(format!(
+                "params.{} must be a string or array of strings",
+                keys[0]
+            )))
+        }
+    };
+    if texts.is_empty() || texts.iter().any(|text| text.trim().is_empty()) {
+        return Err(InfraError::BadRequest(format!(
+            "params.{} must contain non-empty strings",
+            keys[0]
+        )));
+    }
+    Ok(texts)
 }
 
 fn file_ref(value: &Value) -> Result<FileRef> {
@@ -366,6 +436,29 @@ fn tool_definitions() -> Vec<Tool> {
                 ("reference_path", string_schema()),
             ]),
         ),
+        tool(
+            "text_embed",
+            "Create multilingual E5 embeddings for input/texts with query or passage input_type.",
+            object_schema(&[
+                ("model", string_schema()),
+                ("model_id", string_schema()),
+                ("input", array_schema()),
+                ("texts", array_schema()),
+                ("text", string_schema()),
+                ("input_type", string_schema()),
+            ]),
+        ),
+        tool(
+            "text_rerank",
+            "Rerank documents for a query with mMARCO MiniLM.",
+            object_schema(&[
+                ("model", string_schema()),
+                ("model_id", string_schema()),
+                ("query", string_schema()),
+                ("documents", array_schema()),
+                ("top_n", number_schema()),
+            ]),
+        ),
         tool("list_models", "List configured models.", object_schema(&[])),
         tool(
             "get_model",
@@ -484,4 +577,57 @@ fn typed_schema(kind: &str) -> JsonObject {
     let mut schema = Map::new();
     schema.insert("type".to_string(), json!(kind));
     schema
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use local_core::{EmbeddingInputType, TaskKind};
+
+    #[test]
+    fn text_tools_are_registered() {
+        let names = tool_definitions()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        assert!(names.iter().any(|name| name == "text_embed"));
+        assert!(names.iter().any(|name| name == "text_rerank"));
+    }
+
+    #[test]
+    fn text_tools_map_to_core_tasks() {
+        let embed = task_from_method(
+            "text_embed",
+            &json!({
+                "model": "multilingual-e5-small-onnx",
+                "input": ["q"],
+                "input_type": "query"
+            }),
+        )
+        .expect("embed task");
+        assert_eq!(embed.kind, TaskKind::TextEmbed);
+        assert!(matches!(
+            embed.input,
+            InferenceInput::TextEmbed {
+                input_type: EmbeddingInputType::Query,
+                ..
+            }
+        ));
+
+        let rerank = task_from_method(
+            "text_rerank",
+            &json!({
+                "model": "mmarco-minilm-l12-onnx",
+                "query": "q",
+                "documents": ["a", "b"],
+                "top_n": 1
+            }),
+        )
+        .expect("rerank task");
+        assert_eq!(rerank.kind, TaskKind::TextRerank);
+        assert!(matches!(
+            rerank.input,
+            InferenceInput::TextRerank { top_n: Some(1), .. }
+        ));
+    }
 }

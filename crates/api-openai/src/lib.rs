@@ -6,7 +6,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use local_core::{FileRef, InferenceInput, InferenceOutput, InferenceTask, ModelSpec, TaskKind};
+use local_core::{
+    EmbeddingInputType, FileRef, InferenceInput, InferenceOutput, InferenceTask, ModelSpec,
+    TaskKind,
+};
 use local_error::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -28,7 +31,180 @@ pub fn router(state: OpenAiApiState) -> Router {
         .route("/v1/models", get(list_models))
         .route("/v1/audio/transcriptions", post(transcriptions))
         .route("/v1/audio/speech", post(speech))
+        .route("/v1/embeddings", post(embeddings))
+        .route("/rerank", post(rerank))
+        .route("/v1/rerank", post(rerank))
+        .route("/v2/rerank", post(rerank))
         .with_state(state)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum EmbeddingInput {
+    Single(String),
+    Batch(Vec<String>),
+}
+
+impl EmbeddingInput {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::Single(text) => vec![text],
+            Self::Batch(texts) => texts,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EmbeddingsRequest {
+    pub model: String,
+    pub input: EmbeddingInput,
+    #[serde(default)]
+    pub encoding_format: Option<String>,
+    #[serde(default)]
+    pub dimensions: Option<usize>,
+    #[serde(default)]
+    pub input_type: EmbeddingInputType,
+}
+
+#[derive(Debug, Serialize)]
+struct EmbeddingObject {
+    object: &'static str,
+    embedding: Vec<f32>,
+    index: usize,
+}
+
+async fn embeddings(
+    State(state): State<OpenAiApiState>,
+    Json(req): Json<EmbeddingsRequest>,
+) -> impl IntoResponse {
+    if req
+        .encoding_format
+        .as_deref()
+        .is_some_and(|value| value != "float")
+    {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "only encoding_format=float is supported".to_string(),
+        );
+    }
+    if req.dimensions.is_some_and(|dimensions| dimensions != 384) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "multilingual-e5-small has a fixed 384-dimensional output".to_string(),
+        );
+    }
+    let texts = req.input.into_vec();
+    if texts.is_empty() || texts.iter().any(|text| text.trim().is_empty()) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "input must contain one or more non-empty strings".to_string(),
+        );
+    }
+    let model = req.model;
+    let task = InferenceTask::new(
+        TaskKind::TextEmbed,
+        Some(model.clone()),
+        InferenceInput::TextEmbed {
+            texts,
+            input_type: req.input_type,
+        },
+    );
+    match state.service.dispatch(task).await {
+        Ok(InferenceOutput::TextEmbeddings {
+            embeddings,
+            prompt_tokens,
+        }) => {
+            let data = embeddings
+                .into_iter()
+                .enumerate()
+                .map(|(index, embedding)| EmbeddingObject {
+                    object: "embedding",
+                    embedding,
+                    index,
+                })
+                .collect::<Vec<_>>();
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "object": "list",
+                    "data": data,
+                    "model": model,
+                    "usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "total_tokens": prompt_tokens
+                    }
+                })),
+            )
+                .into_response()
+        }
+        Ok(other) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("unexpected inference output: {other:?}"),
+        ),
+        Err(err) => error_response(StatusCode::NOT_IMPLEMENTED, err.to_string()),
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RerankRequest {
+    pub model: String,
+    pub query: String,
+    pub documents: Vec<String>,
+    #[serde(default)]
+    pub top_n: Option<usize>,
+}
+
+async fn rerank(
+    State(state): State<OpenAiApiState>,
+    Json(req): Json<RerankRequest>,
+) -> impl IntoResponse {
+    if req.query.trim().is_empty()
+        || req.documents.is_empty()
+        || req
+            .documents
+            .iter()
+            .any(|document| document.trim().is_empty())
+    {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "query and documents must contain non-empty strings".to_string(),
+        );
+    }
+    let model = req.model;
+    let task = InferenceTask::new(
+        TaskKind::TextRerank,
+        Some(model.clone()),
+        InferenceInput::TextRerank {
+            query: req.query,
+            documents: req.documents,
+            top_n: req.top_n,
+        },
+    );
+    let response_id = format!("rerank-{}", task.id);
+    match state.service.dispatch(task).await {
+        Ok(InferenceOutput::TextRerank {
+            results,
+            total_tokens,
+        }) => (
+            StatusCode::OK,
+            Json(json!({
+                "id": response_id,
+                "model": model,
+                "usage": { "total_tokens": total_tokens },
+                "results": results.into_iter().map(|result| json!({
+                    "index": result.index,
+                    "document": { "text": result.document },
+                    "relevance_score": result.relevance_score
+                })).collect::<Vec<_>>()
+            })),
+        )
+            .into_response(),
+        Ok(other) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("unexpected inference output: {other:?}"),
+        ),
+        Err(err) => error_response(StatusCode::NOT_IMPLEMENTED, err.to_string()),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -224,6 +400,18 @@ mod tests {
                 TaskKind::ObjectDetect => InferenceOutput::ObjectDetections {
                     objects: Vec::new(),
                 },
+                TaskKind::TextEmbed => InferenceOutput::TextEmbeddings {
+                    embeddings: vec![vec![0.25; 384]],
+                    prompt_tokens: 3,
+                },
+                TaskKind::TextRerank => InferenceOutput::TextRerank {
+                    results: vec![local_core::RerankResult {
+                        index: 0,
+                        relevance_score: 0.9,
+                        document: "doc".to_string(),
+                    }],
+                    total_tokens: 5,
+                },
             })
         }
     }
@@ -327,5 +515,69 @@ mod tests {
             }
             other => panic!("unexpected input: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn embeddings_route_is_openai_compatible() {
+        let service = std::sync::Arc::new(RecordingOpenAiApi::default());
+        let app = router(OpenAiApiState {
+            service: service.clone(),
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/embeddings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"multilingual-e5-small-onnx","input":["hello"],"input_type":"query"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(payload["object"], "list");
+        assert_eq!(payload["data"][0]["object"], "embedding");
+        assert_eq!(
+            payload["data"][0]["embedding"].as_array().unwrap().len(),
+            384
+        );
+        assert_eq!(payload["usage"]["prompt_tokens"], 3);
+        let tasks = service.tasks.lock().expect("tasks");
+        assert_eq!(tasks[0].kind, TaskKind::TextEmbed);
+    }
+
+    #[tokio::test]
+    async fn rerank_route_matches_vllm_shape() {
+        let service = std::sync::Arc::new(RecordingOpenAiApi::default());
+        let app = router(OpenAiApiState {
+            service: service.clone(),
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rerank")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"mmarco-minilm-l12-onnx","query":"q","documents":["doc"],"top_n":1}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert!(payload["id"].as_str().unwrap().starts_with("rerank-"));
+        assert_eq!(payload["results"][0]["document"]["text"], "doc");
+        assert_eq!(payload["usage"]["total_tokens"], 5);
     }
 }

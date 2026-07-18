@@ -1,4 +1,6 @@
+use local_adapter_e5_embedding::E5EmbeddingAdapter;
 use local_adapter_index_tts::IndexTtsAdapter;
+use local_adapter_mmarco_reranker::MmarcoRerankerAdapter;
 use local_adapter_qwen_asr::QwenAsrAdapter;
 use local_adapter_yolo::YoloAdapter;
 use local_backend_ort::probe_runtime_execution_provider_availability;
@@ -443,7 +445,36 @@ impl LoadedEntry {
             AdapterKind::Yolo => LoadedModel::Yolo(YoloAdapter::load(&spec)?),
             AdapterKind::QwenAsr => LoadedModel::QwenAsr(QwenAsrAdapter::load(&spec)?),
             AdapterKind::IndexTts => LoadedModel::IndexTts(IndexTtsAdapter::load(&spec)?),
+            AdapterKind::E5Embedding => LoadedModel::E5Embedding(E5EmbeddingAdapter::load(&spec)?),
+            AdapterKind::MmarcoReranker => {
+                LoadedModel::MmarcoReranker(MmarcoRerankerAdapter::load(&spec)?)
+            }
         };
+        match &model {
+            LoadedModel::E5Embedding(adapter) => {
+                let report = adapter.provider_report();
+                tracing::info!(
+                    model_id = spec.id,
+                    model_path = %adapter.artifacts().model.display(),
+                    provider = ?report.provider,
+                    cpu_fallback_used = report.cpu_fallback_used,
+                    graph_has_pooling = adapter.graph_has_pooling(),
+                    pinned_cuda_io_enabled = adapter.pinned_cuda_io_enabled(),
+                    "text model ORT session loaded"
+                );
+            }
+            LoadedModel::MmarcoReranker(adapter) => {
+                let report = adapter.provider_report();
+                tracing::info!(
+                    model_id = spec.id,
+                    model_path = %adapter.artifacts().model.display(),
+                    provider = ?report.provider,
+                    cpu_fallback_used = report.cpu_fallback_used,
+                    "text model ORT session loaded"
+                );
+            }
+            _ => {}
+        }
         let now = Instant::now();
         Ok(Self {
             model,
@@ -526,6 +557,8 @@ fn validated_runtime_providers_for_model(model_id: &str) -> Option<&'static [&'s
         // All A-F/prefill sessions receive the same provider selection. Root
         // FP32 CUDA is policy-enabled, but still needs real NVIDIA validation.
         "indextts-1.5-onnx" => Some(&["cuda", "cpu"]),
+        "multilingual-e5-small-onnx" => Some(&["cuda", "cpu"]),
+        "mmarco-minilm-l12-onnx" => Some(&["cuda", "cpu"]),
         _ => None,
     }
 }
@@ -535,6 +568,8 @@ enum LoadedModel {
     Yolo(YoloAdapter),
     QwenAsr(QwenAsrAdapter),
     IndexTts(IndexTtsAdapter),
+    E5Embedding(E5EmbeddingAdapter),
+    MmarcoReranker(MmarcoRerankerAdapter),
     #[cfg(test)]
     Test {
         cache_releases: Arc<std::sync::atomic::AtomicUsize>,
@@ -577,6 +612,20 @@ impl LoadedModel {
                 reference_audio.as_ref(),
                 &task.params,
             ),
+            (
+                LoadedModel::E5Embedding(adapter),
+                TaskKind::TextEmbed,
+                InferenceInput::TextEmbed { texts, input_type },
+            ) => adapter.embed(texts, *input_type),
+            (
+                LoadedModel::MmarcoReranker(adapter),
+                TaskKind::TextRerank,
+                InferenceInput::TextRerank {
+                    query,
+                    documents,
+                    top_n,
+                },
+            ) => adapter.rerank(query, documents, *top_n),
             (_, kind, _) => Err(InfraError::Unsupported(format!(
                 "loaded adapter does not support task {kind:?}"
             ))),
@@ -585,7 +634,11 @@ impl LoadedModel {
 
     fn release_idle_cache(&mut self, model_id: &str) {
         match self {
-            LoadedModel::Yolo(_) | LoadedModel::QwenAsr(_) | LoadedModel::IndexTts(_) => {
+            LoadedModel::Yolo(_)
+            | LoadedModel::QwenAsr(_)
+            | LoadedModel::IndexTts(_)
+            | LoadedModel::E5Embedding(_)
+            | LoadedModel::MmarcoReranker(_) => {
                 tracing::debug!(
                     model_id,
                     "idle cache release hook reached; adapters currently keep no reusable per-request cache separate from the loaded model/session"
@@ -1164,6 +1217,8 @@ mod tests {
             AdapterKind::Yolo => vec![TaskKind::ObjectDetect],
             AdapterKind::QwenAsr => vec![TaskKind::AsrTranscribe],
             AdapterKind::IndexTts => vec![TaskKind::TtsSynthesize],
+            AdapterKind::E5Embedding => vec![TaskKind::TextEmbed],
+            AdapterKind::MmarcoReranker => vec![TaskKind::TextRerank],
         };
         ModelSpec {
             id: id.to_string(),

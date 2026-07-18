@@ -19,6 +19,8 @@ members = [
     "crates/adapter-index-tts",
     "crates/adapter-yolo",
     "crates/adapter-qwen-asr",
+    "crates/adapter-e5-embedding",
+    "crates/adapter-mmarco-reranker",
     "crates/telemetry",
     "crates/cli",
 ]

@@ -97,8 +97,10 @@ ORT_CUDA_VERSION=12 docker compose -f docker-compose-nvidia.yml up --build
 `local-multimodal-infra:nvidia-cuda12` 镜像；controller 继续使用 CPU 镜像且
 不会获得 GPU。
 
-CPU 与 NVIDIA Compose 共同使用唯一的 `configs/models.d`。YOLO、Qwen ASR 和
-FP32 IndexTTS 表达 `[cuda, cpu]` 意图。session 加载前，runtime availability
+CPU 与 NVIDIA Compose 共同使用唯一的 `configs/models.d`。YOLO、Qwen ASR、
+FP32 IndexTTS、multilingual-e5-small 和 mMARCO MiniLM reranker 表达
+`[cuda, cpu]` 意图。E5 在 CPU 上优先选择派生的 INT8 pooled 图，在可用 CUDA
+上优先选择派生的 O4 pooled 图；mMARCO 仍直接选择官方对应量化图。session 加载前，runtime availability
 解析会在 CUDA 未编译时立即将其变为 `[cpu]`；CUDA 构建会执行并缓存一次微型
 CUDA session 探针，若 EP 无法注册和初始化，则不会尝试模型 CUDA session。
 探针成功时保持 CUDA 优先和 CPU 回退，但它不验证每个模型或算子，特定模型的
@@ -136,6 +138,7 @@ Smoke harness 常用别名：
 - `mcp`：运行标准 MCP SDK 组：通过 `http://127.0.0.1:17892/mcp` 和官方 Python `mcp` SDK 验证工具列表、admin/catalog/assets、generic task flow，以及本地资源可用时的 direct inference；不会把 `/rpc/*` 当成 MCP。
 - `all`：同时展开 `rpc` 和 `mcp` 两组，并继续尊重 `--skip-yolo`、`--skip-qwen-asr`、`--skip-indextts` 等跳过参数。
 - `mcp_standard`：只用官方 Python MCP SDK 验证标准 MCP 工具列表、admin/catalog/assets、generic/direct 工具调用，不向 `/rpc/*` 伪装 MCP。
+- `text`：用真实模型验证 OpenAI `/v1/embeddings` 和 vLLM `/v1/rerank`，包括 384 维、归一化、batch 顺序、`top_n`、相关性排序和 token usage。
 
 
 示例：
@@ -144,6 +147,46 @@ Smoke harness 常用别名：
 python -m scripts.local.smoke --tests rpc --workdir ./workdir --model-dir ./workdir/models
 python -m scripts.local.smoke --tests mcp --workdir ./workdir --model-dir ./workdir/models
 python -m scripts.local.smoke --tests all --workdir ./workdir --model-dir ./workdir/models
+python -m scripts.local.smoke --tests text --workdir ./workdir --model-dir ./workdir/models
+```
+
+下载 E5 官方图后，生成把 masked mean pooling 与 L2 normalization 合入图内的
+派生文件。原图不会被覆盖；若派生文件不存在，adapter 会兼容回退到 Rust host
+pooling：
+
+```bash
+uv run --with onnx --python 3.12 \
+  python -m scripts.local.e5_pooling_export --model-dir workdir/models
+```
+
+CUDA pooled 图使用固定 shape 的 pinned-host I/O binding，输入/输出缓冲在重复请求间
+复用。按 batch 与文本长度运行 release 端到端基准：
+
+```bash
+python -m scripts.local.benchmark_text_embeddings --mode cpu \
+  --controller-bin target/release/controller --worker-bin target/release/worker
+python -m scripts.local.benchmark_text_embeddings --mode gpu \
+  --controller-bin target/release/controller --worker-bin target-cuda/release/worker
+```
+
+## 文本检索 API
+
+Embedding 使用 OpenAI 兼容端点；`input_type` 是 E5 的可选扩展，取值为
+`query` 或 `passage`，默认 `passage`：
+
+```bash
+curl http://127.0.0.1:17890/v1/embeddings \
+  -H 'content-type: application/json' \
+  --data '{"model":"multilingual-e5-small-onnx","input":["你好","hello"],"input_type":"query"}'
+```
+
+Rerank 兼容 vLLM/Jina/Cohere 形状，并注册 `/rerank`、`/v1/rerank`、
+`/v2/rerank` 三个别名：
+
+```bash
+curl http://127.0.0.1:17890/v1/rerank \
+  -H 'content-type: application/json' \
+  --data '{"model":"mmarco-minilm-l12-onnx","query":"法国首都","documents":["巴黎","巴西利亚"],"top_n":1}'
 ```
 
 常用配置入口：
@@ -159,6 +202,8 @@ python -m scripts.local.smoke --tests all --workdir ./workdir --model-dir ./work
 - `docker-compose.yml` / `Dockerfile`：CPU 容器启动入口。
 - `docker-compose-nvidia.yml` / `Dockerfile.nvidia`：NVIDIA CUDA 12 worker 启动入口。
 - `scripts/local/smoke.py`：本地 smoke harness。
+- `scripts/local/e5_pooling_export.py`：生成 E5 图内 pooling/L2 派生图。
+- `scripts/local/benchmark_text_embeddings.py`：batch/长度矩阵 release 基准。
 - `docs/implementation-notes.md`：更多实现细节。
 
 ## 路线图

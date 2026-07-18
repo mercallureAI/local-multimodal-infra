@@ -1,0 +1,36 @@
+id: mmarco-minilm-l12-onnx
+name: mMARCO MiniLM L12 ONNX reranker
+enabled: true
+task_kinds:
+  - text.rerank
+adapter: mmarco_reranker
+backend: ort
+artifacts:
+  - type: hugging_face
+    repo_id: cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+    revision: 1427fd652930e4ba29e8149678df786c240d8825
+    files:
+      - onnx/model_O4.onnx
+      - onnx/model_quint8_avx2.onnx
+      - tokenizer.json
+      - tokenizer_config.json
+      - special_tokens_map.json
+      - config.json
+runtime:
+  provider_order: [cuda, cpu]
+  max_concurrency: 1
+  idle_ttl_sec: 600
+resources:
+  min_ram_mb: 1024
+  min_vram_mb: 0
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  runtime: onnxruntime
+  model_family: mmarco_minilm
+  task: text-ranking
+  max_length: 512
+  hf_current_sha: 1427fd652930e4ba29e8149678df786c240d8825
+  artifact_policy: CUDA uses the official O4 graph; x86 CPU uses the official AVX2 uint8 graph.

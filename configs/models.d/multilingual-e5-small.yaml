@@ -1,0 +1,38 @@
+id: multilingual-e5-small-onnx
+name: multilingual-e5-small ONNX
+enabled: true
+task_kinds:
+  - text.embed
+adapter: e5_embedding
+backend: ort
+artifacts:
+  - type: hugging_face
+    repo_id: intfloat/multilingual-e5-small
+    revision: 614241f622f53c4eeff9890bdc4f31cfecc418b3
+    files:
+      - onnx/model_O4.onnx
+      - onnx/model_qint8_avx512_vnni.onnx
+      - tokenizer.json
+      - tokenizer_config.json
+      - special_tokens_map.json
+      - config.json
+runtime:
+  provider_order: [cuda, cpu]
+  max_concurrency: 1
+  idle_ttl_sec: 600
+resources:
+  min_ram_mb: 1024
+  min_vram_mb: 0
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  runtime: onnxruntime
+  model_family: multilingual_e5
+  task: feature-extraction
+  embedding_dimension: 384
+  max_length: 512
+  hf_current_sha: 614241f622f53c4eeff9890bdc4f31cfecc418b3
+  artifact_policy: CUDA prefers the derived O4 pooled graph; CPU prefers the derived qint8 pooled graph; official upstream graphs remain compatibility fallbacks.
+  pooling_export: uv run --with onnx --python 3.12 python -m scripts.local.e5_pooling_export --model-dir workdir/models

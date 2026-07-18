@@ -68,6 +68,8 @@ impl WorkerState {
                 AdapterKind::Yolo,
                 AdapterKind::QwenAsr,
                 AdapterKind::IndexTts,
+                AdapterKind::E5Embedding,
+                AdapterKind::MmarcoReranker,
             ],
             resources: local_hardware::snapshot(),
         }

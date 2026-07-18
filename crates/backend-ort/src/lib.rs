@@ -20,7 +20,8 @@ use std::{
 
 mod io_binding;
 pub use io_binding::{
-    ResidentBindingOutputs, ResidentCudaTensor, ResidentIoBinding, ResidentTensorInput,
+    PinnedCudaIoBinding, ResidentBindingOutputs, ResidentCudaTensor, ResidentIoBinding,
+    ResidentTensorInput,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -16,6 +16,8 @@ pub enum AdapterKind {
     Yolo,
     QwenAsr,
     IndexTts,
+    E5Embedding,
+    MmarcoReranker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -26,6 +28,18 @@ pub enum TaskKind {
     ObjectDetect,
     #[serde(rename = "tts.synthesize")]
     TtsSynthesize,
+    #[serde(rename = "text.embed")]
+    TextEmbed,
+    #[serde(rename = "text.rerank")]
+    TextRerank,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingInputType {
+    Query,
+    #[default]
+    Passage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -454,15 +468,49 @@ pub enum InferenceInput {
         text: String,
         reference_audio: Option<FileRef>,
     },
+    TextEmbed {
+        texts: Vec<String>,
+        #[serde(default)]
+        input_type: EmbeddingInputType,
+    },
+    TextRerank {
+        query: String,
+        documents: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top_n: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InferenceOutput {
-    AsrTranscription { text: String },
-    ObjectDetections { objects: Vec<DetectedObject> },
-    TtsAudio { audio: FileRef },
-    Accepted { job_id: String },
+    AsrTranscription {
+        text: String,
+    },
+    ObjectDetections {
+        objects: Vec<DetectedObject>,
+    },
+    TtsAudio {
+        audio: FileRef,
+    },
+    TextEmbeddings {
+        embeddings: Vec<Vec<f32>>,
+        prompt_tokens: usize,
+    },
+    TextRerank {
+        results: Vec<RerankResult>,
+        total_tokens: usize,
+    },
+    Accepted {
+        job_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RerankResult {
+    pub index: usize,
+    pub relevance_score: f32,
+    pub document: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

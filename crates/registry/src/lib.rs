@@ -166,7 +166,128 @@ pub fn default_catalog(model_dir: impl AsRef<Path>) -> Vec<ModelSpec> {
         qwen_asr_default(model_dir),
         yolo_default(model_dir),
         index_tts_default(model_dir),
+        e5_embedding_default(model_dir),
+        mmarco_reranker_default(model_dir),
     ]
+}
+
+fn e5_embedding_default(model_dir: &Path) -> ModelSpec {
+    let id = "multilingual-e5-small-onnx";
+    let root = model_dir.join(id);
+    let revision = "614241f622f53c4eeff9890bdc4f31cfecc418b3";
+    let mut metadata = BTreeMap::new();
+    metadata.insert("runtime".to_string(), json!("onnxruntime"));
+    metadata.insert("model_family".to_string(), json!("multilingual_e5"));
+    metadata.insert("task".to_string(), json!("feature-extraction"));
+    metadata.insert("embedding_dimension".to_string(), json!(384));
+    metadata.insert("max_length".to_string(), json!(512));
+    metadata.insert("hf_current_sha".to_string(), json!(revision));
+    metadata.insert(
+        "artifact_policy".to_string(),
+        json!("CUDA prefers the derived O4 pooled graph; CPU prefers the derived qint8 pooled graph; official upstream graphs remain compatibility fallbacks"),
+    );
+    metadata.insert(
+        "pooling_export".to_string(),
+        json!("uv run --with onnx --python 3.12 python -m scripts.local.e5_pooling_export --model-dir workdir/models"),
+    );
+    ModelSpec {
+        id: id.to_string(),
+        name: "multilingual-e5-small ONNX".to_string(),
+        enabled: true,
+        task_kinds: vec![TaskKind::TextEmbed],
+        adapter: AdapterKind::E5Embedding,
+        backend: BackendKind::Ort,
+        artifacts: vec![ModelArtifact {
+            kind: ArtifactKind::HuggingFace,
+            path: root,
+            source_path: None,
+            sha256: None,
+            url: None,
+            repo_id: Some("intfloat/multilingual-e5-small".to_string()),
+            revision: Some(revision.to_string()),
+            files: [
+                "onnx/model_O4.onnx",
+                "onnx/model_qint8_avx512_vnni.onnx",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "special_tokens_map.json",
+                "config.json",
+            ]
+            .iter()
+            .map(|value| value.to_string())
+            .collect(),
+            allow_patterns: Vec::new(),
+            metadata: BTreeMap::new(),
+        }],
+        runtime: RuntimePolicy {
+            provider_order: vec!["cuda".to_string(), "cpu".to_string()],
+            max_concurrency: 1,
+            idle_ttl_sec: 600,
+        },
+        resources: ResourceRequirement {
+            min_ram_mb: 1024,
+            min_vram_mb: 0,
+        },
+        load_policy: LoadPolicy::default(),
+        metadata,
+    }
+}
+
+fn mmarco_reranker_default(model_dir: &Path) -> ModelSpec {
+    let id = "mmarco-minilm-l12-onnx";
+    let root = model_dir.join(id);
+    let revision = "1427fd652930e4ba29e8149678df786c240d8825";
+    let mut metadata = BTreeMap::new();
+    metadata.insert("runtime".to_string(), json!("onnxruntime"));
+    metadata.insert("model_family".to_string(), json!("mmarco_minilm"));
+    metadata.insert("task".to_string(), json!("text-ranking"));
+    metadata.insert("max_length".to_string(), json!(512));
+    metadata.insert("hf_current_sha".to_string(), json!(revision));
+    metadata.insert(
+        "artifact_policy".to_string(),
+        json!("CUDA uses the official O4 graph; x86 CPU uses the official AVX2 uint8 graph"),
+    );
+    ModelSpec {
+        id: id.to_string(),
+        name: "mMARCO MiniLM L12 ONNX reranker".to_string(),
+        enabled: true,
+        task_kinds: vec![TaskKind::TextRerank],
+        adapter: AdapterKind::MmarcoReranker,
+        backend: BackendKind::Ort,
+        artifacts: vec![ModelArtifact {
+            kind: ArtifactKind::HuggingFace,
+            path: root,
+            source_path: None,
+            sha256: None,
+            url: None,
+            repo_id: Some("cross-encoder/mmarco-mMiniLMv2-L12-H384-v1".to_string()),
+            revision: Some(revision.to_string()),
+            files: [
+                "onnx/model_O4.onnx",
+                "onnx/model_quint8_avx2.onnx",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "special_tokens_map.json",
+                "config.json",
+            ]
+            .iter()
+            .map(|value| value.to_string())
+            .collect(),
+            allow_patterns: Vec::new(),
+            metadata: BTreeMap::new(),
+        }],
+        runtime: RuntimePolicy {
+            provider_order: vec!["cuda".to_string(), "cpu".to_string()],
+            max_concurrency: 1,
+            idle_ttl_sec: 600,
+        },
+        resources: ResourceRequirement {
+            min_ram_mb: 1024,
+            min_vram_mb: 0,
+        },
+        load_policy: LoadPolicy::default(),
+        metadata,
+    }
 }
 
 fn index_tts_default(model_dir: &Path) -> ModelSpec {
@@ -539,7 +660,7 @@ mod tests {
 
         let shared_specs =
             load_yaml_specs(root.join("configs/models.d")).expect("load shared specs");
-        assert_eq!(shared_specs.len(), 3);
+        assert_eq!(shared_specs.len(), 5);
         for spec in &shared_specs {
             let order = spec
                 .runtime
@@ -556,7 +677,11 @@ mod tests {
                 spec.id
             );
             match spec.id.as_str() {
-                "yolo11n.onnx" | "qwen3-asr-0.6b-onnx" | "indextts-1.5-onnx" => {
+                "yolo11n.onnx"
+                | "qwen3-asr-0.6b-onnx"
+                | "indextts-1.5-onnx"
+                | "multilingual-e5-small-onnx"
+                | "mmarco-minilm-l12-onnx" => {
                     assert_eq!(order, ["cuda", "cpu"], "{} provider order", spec.id);
                     if spec.id == "indextts-1.5-onnx" {
                         assert!(!spec.enabled, "IndexTTS must remain disabled by default");

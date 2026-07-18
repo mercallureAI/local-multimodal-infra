@@ -1,10 +1,40 @@
 use super::*;
 use ort::{
-    memory::{AllocationDevice, AllocatorType, DeviceType, MemoryInfo, MemoryType},
+    memory::{AllocationDevice, Allocator, AllocatorType, DeviceType, MemoryInfo, MemoryType},
     session::{IoBinding, SharedSessionInner},
     value::{DynTensor, DynTensorValueType, DynValue, Tensor, TensorElementType},
 };
 use std::sync::Arc;
+
+/// Reusable pinned-host I/O buffers for a CUDA session with I64 inputs and an
+/// FP32 output. The fixed-shape binding removes per-run tensor allocations and
+/// makes the host/device transfer boundary explicit. It is intended for
+/// encoder-style CPU -> CUDA -> CPU inference where every request changes.
+#[derive(Debug)]
+pub struct PinnedCudaIoBinding {
+    binding: IoBinding,
+    session: Arc<SharedSessionInner>,
+    device_id: u32,
+    input_shape: Vec<usize>,
+    inputs: Vec<(String, Tensor<i64>)>,
+    output_name: String,
+    output_shape: Vec<usize>,
+    // ORT tensors allocated by a session allocator must be released before
+    // that allocator. These fields are intentionally declared last because
+    // Rust drops struct fields in declaration order.
+    _input_allocator: Allocator,
+    _output_allocator: Allocator,
+}
+
+impl PinnedCudaIoBinding {
+    pub fn matches_shapes(&self, input_shape: &[usize], output_shape: &[usize]) -> bool {
+        self.input_shape == input_shape && self.output_shape == output_shape
+    }
+
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+}
 
 /// A CUDA-resident FP32 IndexTTS KV tensor. This deliberately is not `Clone`:
 /// cloning an ORT tensor performs a device copy, while recurrence only needs to
@@ -88,6 +118,173 @@ impl ResidentBindingOutputs {
 }
 
 impl OrtSession {
+    /// Creates reusable CUDA-pinned host buffers for all-I64 model inputs and a
+    /// single FP32 output. Inputs and output must have fixed, non-zero runtime
+    /// shapes for this binding instance; callers can cache one per shape.
+    pub fn create_pinned_cuda_binding(
+        &self,
+        device_id: u32,
+        input_shape: &[usize],
+        output_name: &str,
+        output_shape: &[usize],
+    ) -> Result<PinnedCudaIoBinding> {
+        let selected_device = self.device_id.unwrap_or(0);
+        if self.provider != ProviderKind::Cuda
+            || self.whole_session_cpu_fallback_used()
+            || selected_device != device_id
+        {
+            return Err(InfraError::Backend(format!(
+                "pinned CUDA I/O binding requires a CUDA-selected session with no whole-session CPU retry on device {device_id}; got {:?}, whole_session_cpu_retry={}, device={selected_device}",
+                self.provider,
+                self.whole_session_cpu_fallback_used()
+            )));
+        }
+        validate_nonzero_shape("pinned CUDA input", input_shape)?;
+        validate_nonzero_shape("pinned CUDA output", output_shape)?;
+        if self
+            .inputs()
+            .iter()
+            .any(|input| input.element_type != TensorElement::I64)
+        {
+            return Err(InfraError::Backend(
+                "pinned CUDA I/O binding currently requires every session input to be I64"
+                    .to_string(),
+            ));
+        }
+        let output = self
+            .outputs()
+            .iter()
+            .find(|candidate| candidate.name == output_name)
+            .ok_or_else(|| {
+                InfraError::Backend(format!(
+                    "pinned CUDA output `{output_name}` is absent; available outputs: {}",
+                    format_names(self.outputs().iter().map(|output| output.name.as_str()))
+                ))
+            })?;
+        if self.outputs().len() != 1 || output.element_type != TensorElement::F32 {
+            return Err(InfraError::Backend(format!(
+                "pinned CUDA I/O binding requires exactly one FP32 output; available outputs: {}",
+                format_names(self.outputs().iter().map(|output| output.name.as_str()))
+            )));
+        }
+
+        let input_memory = MemoryInfo::new(
+            AllocationDevice::CUDA_PINNED,
+            device_id as i32,
+            AllocatorType::Device,
+            MemoryType::CPUInput,
+        )
+        .map_err(map_ort_err)?;
+        let output_memory = MemoryInfo::new(
+            AllocationDevice::CUDA_PINNED,
+            device_id as i32,
+            AllocatorType::Device,
+            MemoryType::CPUOutput,
+        )
+        .map_err(map_ort_err)?;
+        let input_allocator =
+            Allocator::new(&self.real.session, input_memory).map_err(map_ort_err)?;
+        let output_allocator =
+            Allocator::new(&self.real.session, output_memory).map_err(map_ort_err)?;
+        let mut inputs = Vec::with_capacity(self.inputs().len());
+        for input in self.inputs() {
+            let tensor =
+                Tensor::<i64>::new(&input_allocator, input_shape.to_vec()).map_err(map_ort_err)?;
+            inputs.push((input.name.clone(), tensor));
+        }
+
+        let mut binding = self.real.session.create_binding().map_err(map_ort_err)?;
+        let output_tensor =
+            Tensor::<f32>::new(&output_allocator, output_shape.to_vec()).map_err(map_ort_err)?;
+        binding
+            .bind_output(output_name, output_tensor)
+            .map_err(map_ort_err)?;
+        Ok(PinnedCudaIoBinding {
+            binding,
+            session: self.real.session.inner(),
+            device_id,
+            input_shape: input_shape.to_vec(),
+            inputs,
+            output_name: output_name.to_string(),
+            output_shape: output_shape.to_vec(),
+            _input_allocator: input_allocator,
+            _output_allocator: output_allocator,
+        })
+    }
+
+    pub fn run_pinned_cuda_binding(
+        &mut self,
+        binding: &mut PinnedCudaIoBinding,
+        inputs: &[OrtTensorInput],
+    ) -> Result<Vec<OrtTensorOutput>> {
+        if !Arc::ptr_eq(&binding.session, &self.real.session.inner()) {
+            return Err(InfraError::Backend(
+                "pinned CUDA I/O binding was used with a different target session".to_string(),
+            ));
+        }
+        self.real.validate_inputs(inputs)?;
+        binding.binding.clear_inputs();
+        for (name, tensor) in &mut binding.inputs {
+            let input = inputs
+                .iter()
+                .find(|candidate| candidate.name == *name)
+                .ok_or_else(|| InfraError::Backend(format!("missing pinned input `{name}`")))?;
+            if input.shape != binding.input_shape {
+                return Err(InfraError::Backend(format!(
+                    "pinned input `{name}` shape {:?} does not match cached shape {:?}",
+                    input.shape, binding.input_shape
+                )));
+            }
+            let source = match &input.data {
+                OrtTensorData::I64(data) => data,
+                other => {
+                    return Err(InfraError::Backend(format!(
+                        "pinned input `{name}` must be I64, got {:?}",
+                        other.element_type()
+                    )))
+                }
+            };
+            let (_, target) = tensor
+                .try_extract_tensor_mut::<i64>()
+                .map_err(map_ort_err)?;
+            if source.len() != target.len() {
+                return Err(InfraError::Backend(format!(
+                    "pinned input `{name}` data length {} does not match buffer length {}",
+                    source.len(),
+                    target.len()
+                )));
+            }
+            target.copy_from_slice(source);
+        }
+        for (name, tensor) in &binding.inputs {
+            binding
+                .binding
+                .bind_input(name.clone(), tensor)
+                .map_err(map_ort_err)?;
+        }
+
+        let outputs = self
+            .real
+            .session
+            .run_binding(&binding.binding)
+            .map_err(map_ort_err)?;
+        let output = outputs.get(&binding.output_name).ok_or_else(|| {
+            InfraError::Backend(format!(
+                "pinned binding did not return output `{}`",
+                binding.output_name
+            ))
+        })?;
+        let (_, data) = output.try_extract_tensor::<f32>().map_err(map_ort_err)?;
+        let result = OrtTensorOutput {
+            name: binding.output_name.clone(),
+            shape: binding.output_shape.clone(),
+            data: OrtTensorData::F32(data.to_vec()),
+        };
+        drop(outputs);
+        binding.binding.clear_inputs();
+        Ok(vec![result])
+    }
+
     /// Creates a binding whose dynamic KV outputs stay on CUDA while
     /// explicitly selected control outputs return to host memory.
     pub fn create_resident_cuda_binding(
@@ -258,6 +455,19 @@ impl OrtSession {
         binding.binding.clear_inputs();
         result
     }
+}
+
+fn validate_nonzero_shape(label: &str, shape: &[usize]) -> Result<()> {
+    if shape.is_empty() || shape.contains(&0) {
+        return Err(InfraError::Backend(format!(
+            "{label} shape must be non-empty and non-zero, got {shape:?}"
+        )));
+    }
+    shape.iter().try_fold(1usize, |size, dim| {
+        size.checked_mul(*dim)
+            .ok_or_else(|| InfraError::Backend(format!("{label} shape overflows usize: {shape:?}")))
+    })?;
+    Ok(())
 }
 
 fn validate_resident_cuda_tensor(
@@ -436,6 +646,14 @@ mod tests {
         assert!(validate_resident_output_names(["kv", "logits"], ["kv"], ["kv"]).is_err());
         assert!(validate_resident_output_names(["kv", "logits"], ["kv"], []).is_err());
         assert!(validate_resident_output_names(["kv", "logits"], ["missing"], ["logits"]).is_err());
+    }
+
+    #[test]
+    fn pinned_shapes_must_be_nonzero_and_not_overflow() {
+        assert!(validate_nonzero_shape("input", &[8, 512]).is_ok());
+        assert!(validate_nonzero_shape("input", &[]).is_err());
+        assert!(validate_nonzero_shape("input", &[1, 0]).is_err());
+        assert!(validate_nonzero_shape("input", &[usize::MAX, 2]).is_err());
     }
 
     #[test]

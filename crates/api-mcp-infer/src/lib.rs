@@ -241,10 +241,79 @@ fn task_from_method(method: &str, params: &Value) -> Result<InferenceTask> {
                 .unwrap_or_default();
             Ok(task)
         }
+        "text_embed" => {
+            let texts = text_list(params, &["input", "texts", "text"])?;
+            let input_type = params
+                .get("input_type")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()?
+                .unwrap_or_default();
+            Ok(InferenceTask::new(
+                TaskKind::TextEmbed,
+                model_id,
+                InferenceInput::TextEmbed { texts, input_type },
+            ))
+        }
+        "text_rerank" => {
+            let query = params
+                .get("query")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    InfraError::BadRequest("text_rerank params.query is required".to_string())
+                })?
+                .to_string();
+            let documents = text_list(params, &["documents"])?;
+            let top_n = params
+                .get("top_n")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize);
+            Ok(InferenceTask::new(
+                TaskKind::TextRerank,
+                model_id,
+                InferenceInput::TextRerank {
+                    query,
+                    documents,
+                    top_n,
+                },
+            ))
+        }
         other => Err(InfraError::BadRequest(format!(
             "unknown inference method `{other}`"
         ))),
     }
+}
+
+fn text_list(params: &Value, keys: &[&str]) -> Result<Vec<String>> {
+    let value = keys
+        .iter()
+        .find_map(|key| params.get(*key))
+        .ok_or_else(|| InfraError::BadRequest(format!("params.{} is required", keys[0])))?;
+    let texts = match value {
+        Value::String(text) => vec![text.clone()],
+        Value::Array(values) => values
+            .iter()
+            .map(|value| {
+                value.as_str().map(str::to_string).ok_or_else(|| {
+                    InfraError::BadRequest(format!("params.{} must contain strings", keys[0]))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        _ => {
+            return Err(InfraError::BadRequest(format!(
+                "params.{} must be a string or array of strings",
+                keys[0]
+            )))
+        }
+    };
+    if texts.is_empty() || texts.iter().any(|text| text.trim().is_empty()) {
+        return Err(InfraError::BadRequest(format!(
+            "params.{} must contain non-empty strings",
+            keys[0]
+        )));
+    }
+    Ok(texts)
 }
 
 fn file_ref(value: &Value) -> Result<FileRef> {
@@ -300,6 +369,14 @@ mod tests {
                 },
                 TaskKind::TtsSynthesize => InferenceOutput::Accepted {
                     job_id: "unsupported-test".to_string(),
+                },
+                TaskKind::TextEmbed => InferenceOutput::TextEmbeddings {
+                    embeddings: vec![vec![1.0]],
+                    prompt_tokens: 1,
+                },
+                TaskKind::TextRerank => InferenceOutput::TextRerank {
+                    results: Vec::new(),
+                    total_tokens: 1,
                 },
             })
         }

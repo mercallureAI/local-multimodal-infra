@@ -982,6 +982,39 @@ impl ControllerState {
                     reference_audio,
                 }
             }
+            local_core::TaskKind::TextEmbed => {
+                let texts = text_list_param(&status.params, &["input", "texts", "text"])?;
+                let input_type = status
+                    .params
+                    .get("input_type")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()?
+                    .unwrap_or_default();
+                InferenceInput::TextEmbed { texts, input_type }
+            }
+            local_core::TaskKind::TextRerank => {
+                let query = status
+                    .params
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        InfraError::BadRequest("text.rerank params.query is required".to_string())
+                    })?
+                    .to_string();
+                let documents = text_list_param(&status.params, &["documents"])?;
+                let top_n = status
+                    .params
+                    .get("top_n")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize);
+                InferenceInput::TextRerank {
+                    query,
+                    documents,
+                    top_n,
+                }
+            }
         };
         let mut task = InferenceTask::new(status.task_kind, status.model_id.clone(), input);
         task.params = status.params.clone();
@@ -1521,6 +1554,37 @@ fn output_files(output: &InferenceOutput) -> Vec<FileRef> {
         InferenceOutput::TtsAudio { audio } => vec![audio.clone()],
         _ => Vec::new(),
     }
+}
+
+fn text_list_param(params: &BTreeMap<String, Value>, keys: &[&str]) -> Result<Vec<String>> {
+    let value = keys
+        .iter()
+        .find_map(|key| params.get(*key))
+        .ok_or_else(|| InfraError::BadRequest(format!("params.{} is required", keys[0])))?;
+    let texts = match value {
+        Value::String(text) => vec![text.clone()],
+        Value::Array(values) => values
+            .iter()
+            .map(|value| {
+                value.as_str().map(str::to_string).ok_or_else(|| {
+                    InfraError::BadRequest(format!("params.{} must contain strings", keys[0]))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        _ => {
+            return Err(InfraError::BadRequest(format!(
+                "params.{} must be a string or array of strings",
+                keys[0]
+            )))
+        }
+    };
+    if texts.is_empty() || texts.iter().any(|text| text.trim().is_empty()) {
+        return Err(InfraError::BadRequest(format!(
+            "params.{} must contain non-empty strings",
+            keys[0]
+        )));
+    }
+    Ok(texts)
 }
 
 fn result_from_status(status: &TaskStatus) -> GenericTaskResult {
