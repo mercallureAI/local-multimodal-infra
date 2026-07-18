@@ -734,13 +734,30 @@ fn punctuation_only_and_zero_tokens_are_rejected() {
 }
 
 #[test]
-fn segment_audio_inserts_200ms_only_between_chunks() {
-    let output = concatenate_segment_audio(&[vec![1, 2], vec![3, 4]], 24_000, 200).expect("audio");
-    assert_eq!(output.len(), 2 + 4_800 + 2);
-    assert_eq!(&output[..2], &[1, 2]);
-    assert!(output[2..4_802].iter().all(|sample| *sample == 0));
-    assert_eq!(&output[4_802..], &[3, 4]);
-    assert_eq!(output.last(), Some(&4));
+fn segment_audio_declicks_edges_and_inserts_200ms_only_between_chunks() {
+    let output = concatenate_segment_audio(&[vec![2_000; 480], vec![-2_000; 480]], 24_000, 200)
+        .expect("audio");
+    assert_eq!(output.len(), 480 + 4_800 + 480);
+
+    // Ten millisecond ramps make every transition to or from silence
+    // continuous while leaving the middle of each segment untouched.
+    assert_eq!(output[0], 0);
+    assert_eq!(output[239], 2_000);
+    assert_eq!(output[240], 2_000);
+    assert_eq!(output[479], 0);
+    assert!(output[480..5_280].iter().all(|sample| *sample == 0));
+    assert_eq!(output[5_280], 0);
+    assert_eq!(output[5_519], -2_000);
+    assert_eq!(output[5_520], -2_000);
+    assert_eq!(output.last(), Some(&0));
+}
+
+#[test]
+fn segment_audio_declicks_even_without_an_intentional_gap() {
+    let output = concatenate_segment_audio(&[vec![12_000; 480], vec![-12_000; 480]], 24_000, 0)
+        .expect("audio");
+    assert_eq!(output.len(), 960);
+    assert_eq!(&output[478..482], &[50, 0, 0, -50]);
 }
 
 fn voiced(samples: usize) -> Vec<i16> {
@@ -1114,9 +1131,13 @@ fn every_segment_must_validate_before_intentional_gap_is_added() {
         validate_generated_audio(segment, 2).expect("each generated segment is valid");
     }
     let output = concatenate_segment_audio(&valid, 1_000, 10).expect("concatenated");
-    assert_eq!(&output[..48], &[1; 48]);
+    assert_eq!(output[0], 0);
+    assert_eq!(&output[9..39], &[1; 30]);
+    assert_eq!(output[47], 0);
     assert_eq!(&output[48..58], &[0; 10]);
-    assert_eq!(&output[58..], &[2; 48]);
+    assert_eq!(output[58], 0);
+    assert_eq!(&output[67..97], &[2; 30]);
+    assert_eq!(output[105], 0);
 }
 
 #[test]

@@ -1628,11 +1628,19 @@ pub(crate) fn concatenate_segment_audio(
     sample_rate: u32,
     silence_ms: u32,
 ) -> Result<Vec<i16>> {
+    const EDGE_FADE_MS: u32 = 10;
+
     if segments.is_empty() || segments.iter().any(Vec::is_empty) {
         return Err(InfraError::Backend(
             "IndexTTS cannot concatenate empty segment audio".to_string(),
         ));
     }
+    let edge_fade_len_u64 = u64::from(sample_rate)
+        .checked_mul(u64::from(EDGE_FADE_MS))
+        .ok_or_else(|| InfraError::Backend("IndexTTS edge fade length overflow".to_string()))?
+        / 1000;
+    let edge_fade_len = usize::try_from(edge_fade_len_u64)
+        .map_err(|_| InfraError::Backend("IndexTTS edge fade length overflow".to_string()))?;
     let silence_len_u64 = u64::from(sample_rate)
         .checked_mul(u64::from(silence_ms))
         .ok_or_else(|| InfraError::Backend("IndexTTS silence length overflow".to_string()))?
@@ -1658,9 +1666,43 @@ pub(crate) fn concatenate_segment_audio(
             })?;
             output.resize(target_len, 0);
         }
-        output.extend_from_slice(segment);
+        append_with_edge_fades(&mut output, segment, edge_fade_len);
     }
     Ok(output)
+}
+
+/// TTS decoder chunks are not guaranteed to end at a zero crossing. Joining
+/// such an edge directly to inserted silence creates an audible impulse at
+/// every chunk boundary (and at the end of a single-chunk WAV). A short,
+/// length-preserving linear ramp makes both edges continuous with silence
+/// without changing the configured inter-segment gap.
+fn append_with_edge_fades(output: &mut Vec<i16>, segment: &[i16], requested_fade_len: usize) {
+    let fade_len = requested_fade_len.min(segment.len().div_ceil(2));
+    if fade_len == 0 {
+        output.extend_from_slice(segment);
+        return;
+    }
+    if fade_len == 1 {
+        output.extend(segment.iter().enumerate().map(|(index, sample)| {
+            if index == 0 || index + 1 == segment.len() {
+                0
+            } else {
+                *sample
+            }
+        }));
+        return;
+    }
+
+    let denominator = i64::try_from(fade_len - 1).expect("fade length derived from u32");
+    output.extend(segment.iter().enumerate().map(|(index, sample)| {
+        let edge_distance = index.min(segment.len() - 1 - index);
+        if edge_distance >= fade_len {
+            *sample
+        } else {
+            let numerator = i64::try_from(edge_distance).expect("fade length derived from u32");
+            (i64::from(*sample) * numerator / denominator) as i16
+        }
+    }));
 }
 
 pub(crate) fn validate_generated_audio(samples: &[i16], generated_steps: usize) -> Result<()> {
