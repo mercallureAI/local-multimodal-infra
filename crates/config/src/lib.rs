@@ -23,6 +23,8 @@ pub struct ControllerConfig {
     #[serde(default)]
     pub admin_token: Option<String>,
     #[serde(default)]
+    pub mcp_infer_tokens: Vec<String>,
+    #[serde(default)]
     pub worker_registration_token: Option<String>,
     #[serde(default)]
     pub public_base_url: Option<String>,
@@ -42,6 +44,7 @@ impl Default for ControllerConfig {
             model_dir: None,
             models_conf_dir: default_models_conf_dir(),
             admin_token: None,
+            mcp_infer_tokens: Vec::new(),
             worker_registration_token: None,
             public_base_url: None,
             file_upload_base_url: None,

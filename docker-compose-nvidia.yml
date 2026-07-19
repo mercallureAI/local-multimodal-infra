@@ -22,6 +22,7 @@ services:
       LOCAL_WORKER_REGISTRATION_TOKEN: ${LOCAL_WORKER_REGISTRATION_TOKEN:?set in .env}
       LOCAL_UPLOAD_SIGNING_SECRET: ${LOCAL_UPLOAD_SIGNING_SECRET:?set in .env}
       LOCAL_ADMIN_TOKEN: ${LOCAL_ADMIN_TOKEN:?set in .env}
+      LOCAL_MCP_INFER_TOKENS: ${LOCAL_MCP_INFER_TOKENS:-}
       LOCAL_PUBLIC_BASE_URL: ${LOCAL_PUBLIC_BASE_URL:?set in .env}
       # Listen on the container interface; the host port mapping below remains loopback-only.
       LOCAL_MCP_BIND: 0.0.0.0:17892

@@ -15,11 +15,11 @@ Repo-specific instructions for future OpenCode agents. Higher-priority user inst
 ## Config, routes, and storage
 
 - Default configs: `configs/controller.yaml`, `configs/worker.yaml`; model specs: `configs/models.d/*.yaml`.
-- Default addresses: controller HTTP API and legacy JSON-RPC `127.0.0.1:17890`, worker `127.0.0.1:17891`, standard MCP Streamable HTTP `127.0.0.1:17892/mcp`.
-- Standard MCP exposes admin and mutating tools; keep it loopback-only by default. Do not use `--mcp-bind 0.0.0.0:17892` or otherwise expose it on a shared network unless a future admin-token/ACL layer is implemented and enabled.
+- Default addresses: controller HTTP API and legacy JSON-RPC `127.0.0.1:17890`, worker `127.0.0.1:17891`, standard MCP admin `127.0.0.1:17892/mcp/admin`, standard MCP inference `127.0.0.1:17892/mcp/infer`.
+- Admin MCP/RPC requires `LOCAL_ADMIN_TOKEN`; inference MCP/RPC optionally enforces the comma-separated `LOCAL_MCP_INFER_TOKENS` list. Keep the host publish loopback-only by default.
 - Start services with explicit storage args: `--workdir ./workdir --model-dir ./workdir/models`.
 - Runtime artifacts: real models only in `workdir/models`; data/logs/uploads/generated/temp only in `workdir/data`; SQLite default `workdir/data/local.db`. Do not commit or delete `workdir/`; do not commit `target/`.
-- Controller routes worth remembering: `/health`, `/assets`, `/assets/sign`, `/files/upload/...`, legacy JSON-RPC only at `POST /rpc/admin` and `POST /rpc/infer` (old JSON-RPC `/mcp/admin` and `/mcp/infer` compatibility aliases are removed), standard MCP Streamable HTTP only on the separate bind `127.0.0.1:17892/mcp` (verify only with official MCP SDK / rmcp client semantics, not raw HTTP JSON-RPC), OpenAI `GET /v1/models`, `POST /v1/audio/transcriptions`, `POST /v1/audio/speech`. Worker routes: `/health`, protected `/internal/infer`.
+- Controller routes worth remembering: `/health`, `/assets`, `/assets/sign`, `/files/upload/...`, authenticated legacy JSON-RPC at `POST /rpc/admin` and optionally authenticated `POST /rpc/infer`, standard MCP at `127.0.0.1:17892/mcp/admin` and `/mcp/infer`, OpenAI `GET /v1/models`, `POST /v1/audio/transcriptions`, `POST /v1/audio/speech`.
 
 ## Service execution rules
 
@@ -32,7 +32,7 @@ Repo-specific instructions for future OpenCode agents. Higher-priority user inst
 
 - Prefer the harness over one-off scripts/curl for service/API/MCP smoke. Primary local smoke: `python -m scripts.local.smoke --tests yolo,qwen-asr,indextts --workdir ./workdir --model-dir ./workdir/models`.
 - Other useful harness commands:
-  - `python -m scripts.local.smoke --tests mcp --workdir ./workdir --model-dir ./workdir/models` (standard MCP SDK group on `127.0.0.1:17892/mcp`: tool listing, admin/catalog/assets, generic task flow, direct inference where resources/artifacts are available)
+  - `python -m scripts.local.smoke --tests mcp --workdir ./workdir --model-dir ./workdir/models` (standard MCP SDK group on the isolated `/mcp/admin` and `/mcp/infer` endpoints)
   - `python -m scripts.local.smoke --tests all --workdir ./workdir --model-dir ./workdir/models` (both groups; skip flags still apply)
   - `python -m scripts.local.smoke --tests assets,yolo,qwen-asr,indextts --workdir ./workdir --model-dir ./workdir/models`
   - `python -m scripts.local.smoke --tests indextts_asr --indextts-frontend auto --workdir ./workdir --model-dir ./workdir/models`
@@ -40,7 +40,7 @@ Repo-specific instructions for future OpenCode agents. Higher-priority user inst
   - `python -m scripts.local.smoke --tests mcp_standard --workdir ./workdir --model-dir ./workdir/models`
 - Use `--skip-build` only when existing `target/debug/controller(.exe)` and `target/debug/worker(.exe)` are valid.
 - `scripts/smoke_api_mcp.py` is a thin compatibility entrypoint; implementation is under `scripts/local/` (`smoke.py`, `processes.py`, `http_client.py`, `paths.py`). The harness builds via `cargo build --bins` unless skipped, starts services with Python `subprocess.Popen`, prints PIDs, writes `workdir/data/*.{stdout,stderr}.log`, waits for `/health`, and cleans up.
-- Harness defaults: controller URL `http://127.0.0.1:17890`, standard MCP URL `http://127.0.0.1:17892/mcp`, worker URL `http://127.0.0.1:17891`, smoke registration/admin env tokens, ready timeout 30s, request timeout 15s, build timeout 600s, cleanup port wait 8s.
+- Harness defaults: controller URL `http://127.0.0.1:17890`, standard MCP admin/inference URLs under `http://127.0.0.1:17892/mcp/`, worker URL `http://127.0.0.1:17891`, smoke registration/admin/inference env tokens.
 - Update `scripts/local/smoke.py` when endpoints, legacy RPC methods, standard MCP tools, OpenAI APIs, task upload, or assets behavior changes.
 
 ## Tokens, uploads, and task flow
@@ -59,7 +59,7 @@ Repo-specific instructions for future OpenCode agents. Higher-priority user inst
 ## Script entrypoints
 
 - Help: `python -m scripts.local.smoke --help`, `python -m scripts.local.indextts_export --help`, `python scripts/indextts_export.py --help`.
-- Standard MCP validation client: `python -m scripts.local.mcp_standard_client --url http://127.0.0.1:17892/mcp --full` (requires the official Python `mcp` SDK in that interpreter).
+- Standard MCP validation client: `python -m scripts.local.mcp_standard_client --admin-token <token> --full` (requires the official Python `mcp` SDK in that interpreter).
 - IndexTTS export top-level entrypoint `scripts/indextts_export.py` delegates to `scripts.local.indextts_export`; do not use old `tools/indextts` paths.
 
 Release smoke examples:

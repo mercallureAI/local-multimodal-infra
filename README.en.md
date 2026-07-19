@@ -31,15 +31,17 @@ The project exposes three main entry points:
 
 | Entry point | For | Purpose |
 | --- | --- | --- |
-| Legacy JSON-RPC API | Agents / tool calls | Only `POST /rpc/admin` and `POST /rpc/infer`: admin is for model management/download/status/list, infer is for generic tasks, upload URLs, start/wait, and inference results. Old `/mcp/*` JSON-RPC routes are not supported entry points. |
-| Standard MCP Server | Agents / standard MCP clients | `http://127.0.0.1:17892/mcp`, verified only with the official MCP SDK client. |
+| Legacy JSON-RPC API | Agents / tool calls | `POST /rpc/admin` uses `LOCAL_ADMIN_TOKEN`; `POST /rpc/infer` accepts any configured `LOCAL_MCP_INFER_TOKENS` token. |
+| Standard MCP Server | Agents / standard MCP clients | Admin: `http://127.0.0.1:17892/mcp/admin`; inference: `http://127.0.0.1:17892/mcp/infer`. |
 | OpenAI-compatible API Server | Apps / OpenAI-style clients | Model listing, speech recognition, speech synthesis, and limited compatibility APIs. |
 
 Default service addresses:
 
 - Controller / API Server / legacy JSON-RPC: `http://127.0.0.1:17890`
-- Legacy JSON-RPC: only `POST /rpc/admin`, `POST /rpc/infer`
-- Standard MCP Streamable HTTP: `http://127.0.0.1:17892/mcp`
+- Legacy JSON-RPC: `POST /rpc/admin`, `POST /rpc/infer`
+- Standard MCP Streamable HTTP: `http://127.0.0.1:17892/mcp/admin`, `http://127.0.0.1:17892/mcp/infer`
+- Admin MCP/RPC requires `LOCAL_ADMIN_TOKEN`; send it as `Authorization: Bearer <token>` or `x-local-admin-token`
+- Inference MCP/RPC uses optional `LOCAL_MCP_INFER_TOKENS=token-a,token-b`; an empty/unset list leaves inference open, while a non-empty list requires any one listed token via Bearer or `x-local-infer-token`
 - Worker: `http://127.0.0.1:17891`
 
 External agents should generally create a task, upload files, and wait for the result. This avoids sharing host file paths with the agent.
@@ -139,7 +141,7 @@ Without Docker, run the controller and worker directly. See [AGENTS.md](AGENTS.m
 
 Common smoke harness aliases:
 
-- `mcp`: runs the standard MCP SDK group through `http://127.0.0.1:17892/mcp` with the official Python `mcp` SDK: tool listing, admin/catalog/assets, generic task flow, and direct inference when local resources are available. It never treats `/rpc/*` as MCP.
+- `mcp`: runs the standard MCP SDK group against the isolated `/mcp/admin` and `/mcp/infer` endpoints, including authentication and catalog separation checks.
 - `all`: expands both `rpc` and `mcp`, while still honoring skip flags such as `--skip-yolo`, `--skip-qwen-asr`, and `--skip-indextts`.
 - `mcp_standard`: validates standard MCP tool listing, admin/catalog/assets, and generic/direct tool calls with the official Python MCP SDK, not by pretending `/rpc/*` is MCP.
 

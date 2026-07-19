@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import tempfile
 import time
@@ -14,11 +15,12 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_URL = "http://127.0.0.1:17892/mcp"
+DEFAULT_ADMIN_URL = "http://127.0.0.1:17892/mcp/admin"
+DEFAULT_INFER_URL = "http://127.0.0.1:17892/mcp/infer"
 YOLO_MODEL_ID = "yolo11n.onnx"
 QWEN_ASR_MODEL_ID = "qwen3-asr-0.6b-onnx"
 INDEXTTS_MODEL_ID = "indextts-1.5-onnx"
-REQUIRED_TOOLS = {
+INFER_TOOLS = {
     "create_task",
     "start_task",
     "get_task",
@@ -29,6 +31,10 @@ REQUIRED_TOOLS = {
     "asr_transcribe",
     "object_detect",
     "tts_synthesize",
+    "text_embed",
+    "text_rerank",
+}
+ADMIN_TOOLS = {
     "list_models",
     "get_model",
     "add_model",
@@ -45,7 +51,10 @@ REQUIRED_TOOLS = {
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate local standard MCP Streamable HTTP endpoint.")
-    parser.add_argument("--url", default=DEFAULT_URL, help=f"MCP URL (default: {DEFAULT_URL})")
+    parser.add_argument("--admin-url", default=DEFAULT_ADMIN_URL, help=f"Admin MCP URL (default: {DEFAULT_ADMIN_URL})")
+    parser.add_argument("--infer-url", default=DEFAULT_INFER_URL, help=f"Inference MCP URL (default: {DEFAULT_INFER_URL})")
+    parser.add_argument("--admin-token", default=os.environ.get("LOCAL_ADMIN_TOKEN"), help="Required admin MCP token; defaults to LOCAL_ADMIN_TOKEN.")
+    parser.add_argument("--infer-token", default=None, help="Optional inference MCP token when the server requires one.")
     parser.add_argument(
         "--full",
         action="store_true",
@@ -65,7 +74,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         summary = asyncio.run(
             run(
-                args.url,
+                args.admin_url,
+                args.infer_url,
+                admin_token=args.admin_token,
+                infer_token=args.infer_token,
                 timeout=args.timeout,
                 full=args.full,
                 sample_image=args.sample_image,
@@ -81,7 +93,8 @@ def main(argv: list[str] | None = None) -> int:
                 json.dumps(
                     {
                         "ok": False,
-                        "url": args.url,
+                        "admin_url": args.admin_url,
+                        "infer_url": args.infer_url,
                         "error": "Python package `mcp` is not installed in this interpreter",
                         "hint": "Install the official MCP Python SDK, e.g. `pip install mcp`, or run with an environment that already has it.",
                     },
@@ -92,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         raise
     except Exception as exc:
-        print(json.dumps({"ok": False, "url": args.url, "error": str(exc)}, ensure_ascii=False, indent=2))
+        print(json.dumps({"ok": False, "admin_url": args.admin_url, "infer_url": args.infer_url, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 1
 
     print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
@@ -100,9 +113,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 async def run(
-    url: str,
+    admin_url: str,
+    infer_url: str,
     timeout: float = 1800.0,
     *,
+    admin_token: str | None,
+    infer_token: str | None = None,
     full: bool = False,
     sample_image: Path | None = None,
     sample_audio: Path | None = None,
@@ -113,70 +129,96 @@ async def run(
     from mcp import ClientSession
 
     try:
-        from mcp.client.streamable_http import streamable_http_client
+        from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
     except ImportError:
+        from mcp.client.streamable_http import create_mcp_http_client
         from mcp.client.streamable_http import streamablehttp_client as streamable_http_client
 
-    async with streamable_http_client(url) as (read_stream, write_stream, *_):
-        async with ClientSession(read_stream, write_stream) as session:
-            initialize_result = await session.initialize()
-            tools_result = await session.list_tools()
-            tool_names = sorted(tool.name for tool in tools_result.tools)
-            missing = sorted(REQUIRED_TOOLS - set(tool_names))
-            if missing:
-                return {
-                    "ok": False,
-                    "url": url,
-                    "initialized": to_jsonable(initialize_result),
-                    "tool_count": len(tool_names),
-                    "tools": tool_names,
-                    "missing_tools": missing,
-                }
+    if not admin_token:
+        raise RuntimeError("admin token is required (--admin-token or LOCAL_ADMIN_TOKEN)")
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+    infer_headers = {"Authorization": f"Bearer {infer_token}"} if infer_token else {}
+    async with create_mcp_http_client(admin_headers) as admin_http:
+        async with streamable_http_client(admin_url, http_client=admin_http) as (admin_read, admin_write, *_):
+            async with ClientSession(admin_read, admin_write) as admin_session:
+                admin_initialize = await admin_session.initialize()
+                admin_tools_result = await admin_session.list_tools()
+                admin_tools = sorted(tool.name for tool in admin_tools_result.tools)
+                admin_missing = sorted(ADMIN_TOOLS - set(admin_tools))
+                if admin_missing:
+                    return {
+                        "ok": False,
+                        "admin_url": admin_url,
+                        "initialized": to_jsonable(admin_initialize),
+                        "tools": admin_tools,
+                        "missing_tools": admin_missing,
+                    }
+                leaked_admin = sorted(set(admin_tools) & INFER_TOOLS)
+                if leaked_admin:
+                    raise RuntimeError(f"admin MCP leaked inference tools: {leaked_admin}")
+                list_models_result = await call_tool_checked(admin_session, "list_models", {})
+                cluster_status_result = await call_tool_checked(admin_session, "get_cluster_status", {})
+                list_nodes_result = await call_tool_checked(admin_session, "list_nodes", {})
+                list_assets_result = await call_tool_checked(admin_session, "list_assets", {})
+                models = list_models_result if isinstance(list_models_result, list) else []
+                async with create_mcp_http_client(infer_headers) as infer_http:
+                    async with streamable_http_client(infer_url, http_client=infer_http) as (infer_read, infer_write, *_):
+                        async with ClientSession(infer_read, infer_write) as infer_session:
+                            infer_initialize = await infer_session.initialize()
+                            infer_tools_result = await infer_session.list_tools()
+                            infer_tools = sorted(tool.name for tool in infer_tools_result.tools)
+                            infer_missing = sorted(INFER_TOOLS - set(infer_tools))
+                            if infer_missing:
+                                return {
+                                    "ok": False,
+                                    "infer_url": infer_url,
+                                    "initialized": to_jsonable(infer_initialize),
+                                    "tools": infer_tools,
+                                    "missing_tools": infer_missing,
+                                }
+                            leaked_infer = sorted(set(infer_tools) & ADMIN_TOOLS)
+                            if leaked_infer:
+                                raise RuntimeError(f"inference MCP leaked admin tools: {leaked_infer}")
+                            summary = {
+                                "ok": True,
+                                "admin_url": admin_url,
+                                "infer_url": infer_url,
+                                "admin_initialized": to_jsonable(admin_initialize),
+                                "infer_initialized": to_jsonable(infer_initialize),
+                                "admin_tools": admin_tools,
+                                "infer_tools": infer_tools,
+                                "list_models": list_models_result,
+                                "get_cluster_status": cluster_status_result,
+                                "list_nodes": list_nodes_result,
+                                "list_assets": list_assets_result,
+                            }
+                            if full:
+                                summary["assets"] = await run_assets_smoke(admin_session, infer_session, timeout)
+                                summary["generic_tasks"] = await run_generic_smoke(
+                                    infer_session,
+                                    sample_image,
+                                    sample_audio,
+                                    reference_audio,
+                                    text,
+                                    timeout,
+                                    models,
+                                    indextts_artifacts_ready=indextts_artifacts_ready,
+                                )
+                                summary["direct_inference"] = await run_direct_smoke(
+                                    admin_session,
+                                    infer_session,
+                                    sample_image,
+                                    sample_audio,
+                                    reference_audio,
+                                    text,
+                                    timeout,
+                                    models,
+                                    indextts_artifacts_ready=indextts_artifacts_ready,
+                                )
+                            return summary
 
-            list_models_result = await call_tool_checked(session, "list_models", {})
-            cluster_status_result = await call_tool_checked(session, "get_cluster_status", {})
-            list_nodes_result = await call_tool_checked(session, "list_nodes", {})
-            list_assets_result = await call_tool_checked(session, "list_assets", {})
-            models = list_models_result if isinstance(list_models_result, list) else []
 
-            summary = {
-                "ok": True,
-                "url": url,
-                "initialized": to_jsonable(initialize_result),
-                "tool_count": len(tool_names),
-                "tools_sample": tool_names[:10],
-                "required_tools_present": sorted(REQUIRED_TOOLS),
-                "list_models": list_models_result,
-                "get_cluster_status": cluster_status_result,
-                "list_nodes": list_nodes_result,
-                "list_assets": list_assets_result,
-            }
-            if full:
-                summary["assets"] = await run_assets_smoke(session, timeout)
-                summary["generic_tasks"] = await run_generic_smoke(
-                    session,
-                    sample_image,
-                    sample_audio,
-                    reference_audio,
-                    text,
-                    timeout,
-                    models,
-                    indextts_artifacts_ready=indextts_artifacts_ready,
-                )
-                summary["direct_inference"] = await run_direct_smoke(
-                    session,
-                    sample_image,
-                    sample_audio,
-                    reference_audio,
-                    text,
-                    timeout,
-                    models,
-                    indextts_artifacts_ready=indextts_artifacts_ready,
-                )
-            return summary
-
-
-async def run_assets_smoke(session: Any, timeout: float) -> dict[str, Any]:
+async def run_assets_smoke(admin_session: Any, infer_session: Any, timeout: float) -> dict[str, Any]:
     marker = f"{int(time.time() * 1000)}"
     body = f"hello standard mcp assets {marker}\n".encode("utf-8")
     path = f"smoke/mcp/{marker}/hello.txt"
@@ -195,13 +237,13 @@ async def run_assets_smoke(session: Any, timeout: float) -> dict[str, Any]:
             "url_ttl_sec": 600,
         },
     ]
-    signed = await call_tool_checked(session, "sign_asset_urls", {"items": requests})
+    signed = await call_tool_checked(infer_session, "sign_asset_urls", {"items": requests})
     signed_items = signed.get("items") if isinstance(signed, dict) else None
     if not isinstance(signed_items, list) or len(signed_items) != 2:
         raise RuntimeError(f"MCP sign_asset_urls returned malformed batch: {signed}")
     if signed_items[0].get("method") != "POST" or signed_items[1].get("method") != "GET":
         raise RuntimeError(f"MCP sign_asset_urls did not preserve upload/download methods: {signed}")
-    alias_signed = await call_tool_checked(session, "sign_assets", {"requests": requests})
+    alias_signed = await call_tool_checked(infer_session, "sign_assets", {"requests": requests})
     alias_items = alias_signed.get("items") if isinstance(alias_signed, dict) else None
     if not isinstance(alias_items, list) or [item.get("method") for item in alias_items] != ["POST", "GET"]:
         raise RuntimeError(f"MCP sign_assets alias returned malformed batch: {alias_signed}")
@@ -214,7 +256,7 @@ async def run_assets_smoke(session: Any, timeout: float) -> dict[str, Any]:
     uri = upload_payload.get("uri")
     if uri != f"assets://material/{path}":
         raise RuntimeError(f"MCP asset upload returned unexpected uri: {upload_payload}")
-    list_payload = await call_tool_checked(session, "list_assets", {"kind": "material", "contains": marker})
+    list_payload = await call_tool_checked(admin_session, "list_assets", {"kind": "material", "contains": marker})
     assets = list_payload.get("assets") if isinstance(list_payload, dict) else []
     if not any(isinstance(asset, dict) and asset.get("uri") == uri for asset in assets or []):
         raise RuntimeError(f"MCP list_assets did not find uploaded asset {uri}: {list_payload}")
@@ -348,7 +390,8 @@ async def generic_tts_synthesize(
 
 
 async def run_direct_smoke(
-    session: Any,
+    admin_session: Any,
+    infer_session: Any,
     sample_image: Path | None,
     sample_audio: Path | None,
     reference_audio: Path | None,
@@ -359,10 +402,11 @@ async def run_direct_smoke(
     indextts_artifacts_ready: bool,
 ) -> dict[str, Any]:
     results: dict[str, Any] = {}
-    results["object_detect"] = await direct_object_detect(session, sample_image, models)
-    results["asr_transcribe"] = await direct_asr_transcribe(session, sample_audio, models)
+    results["object_detect"] = await direct_object_detect(infer_session, sample_image, models)
+    results["asr_transcribe"] = await direct_asr_transcribe(infer_session, sample_audio, models)
     results["tts_synthesize"] = await direct_tts_synthesize(
-        session,
+        admin_session,
+        infer_session,
         reference_audio,
         text,
         models,
@@ -422,7 +466,8 @@ async def direct_asr_transcribe(session: Any, audio: Path | None, models: list[A
 
 
 async def direct_tts_synthesize(
-    session: Any,
+    admin_session: Any,
+    infer_session: Any,
     reference_audio: Path | None,
     text: str,
     models: list[Any],
@@ -438,9 +483,9 @@ async def direct_tts_synthesize(
     if not reference_audio.exists():
         return skipped(f"reference audio does not exist: {reference_audio}")
     if not model_enabled(models, INDEXTTS_MODEL_ID):
-        await call_tool_checked(session, "enable_model", {"id": INDEXTTS_MODEL_ID})
+        await call_tool_checked(admin_session, "enable_model", {"id": INDEXTTS_MODEL_ID})
     payload = await call_tool_checked(
-        session,
+        infer_session,
         "tts_synthesize",
         {
             "model": INDEXTTS_MODEL_ID,
@@ -459,7 +504,7 @@ async def direct_tts_synthesize(
             result["tts_asr_cross_check"] = skipped("tts_synthesize returned no local or downloadable audio path")
         else:
             asr_payload = await call_tool_checked(
-                session,
+                infer_session,
                 "asr_transcribe",
                 {"model": QWEN_ASR_MODEL_ID, "audio": {"path": str(audio_path), "mime": "audio/wav"}},
             )

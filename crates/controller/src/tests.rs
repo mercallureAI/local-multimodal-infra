@@ -93,6 +93,7 @@ async fn worker_registration_requires_shared_token_and_returns_session_token() {
             data_dir: std::env::temp_dir(),
             upload_signing_secret: Some("test-upload-secret".to_string()),
             admin_token: None,
+            mcp_infer_tokens: Vec::new(),
             asset_cleanup_interval: None,
         },
     );
@@ -170,6 +171,7 @@ async fn optional_unuploaded_tts_reference_audio_is_not_used_as_input() {
             )),
             upload_signing_secret: Some("test-upload-secret".to_string()),
             admin_token: None,
+            mcp_infer_tokens: Vec::new(),
             asset_cleanup_interval: None,
         },
     );
@@ -646,6 +648,7 @@ fn controller_startup_runs_initial_asset_cleanup() {
             data_dir,
             upload_signing_secret: Some("test-upload-secret".to_string()),
             admin_token: None,
+            mcp_infer_tokens: Vec::new(),
             asset_cleanup_interval: None,
         },
     );
@@ -765,6 +768,7 @@ fn test_controller_with_temp_data_dir() -> ControllerState {
             data_dir,
             upload_signing_secret: Some("test-upload-secret".to_string()),
             admin_token: None,
+            mcp_infer_tokens: Vec::new(),
             asset_cleanup_interval: None,
         },
     )

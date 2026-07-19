@@ -41,7 +41,10 @@ async fn main() -> Result<()> {
         config.upload_signing_secret = Some(secret);
     }
     if let Ok(token) = std::env::var("LOCAL_ADMIN_TOKEN") {
-        config.admin_token = Some(token);
+        config.admin_token = non_empty_token(token);
+    }
+    if let Ok(tokens) = std::env::var("LOCAL_MCP_INFER_TOKENS") {
+        config.mcp_infer_tokens = parse_mcp_infer_tokens(&tokens)?;
     }
     let mut mcp_bind = std::env::var("LOCAL_MCP_BIND")
         .ok()
@@ -56,11 +59,12 @@ async fn main() -> Result<()> {
         config.upload_signing_secret = Some(secret);
     }
     if let Some(token) = args.admin_token {
-        config.admin_token = Some(token);
+        config.admin_token = non_empty_token(token);
     }
     if let Some(bind) = args.mcp_bind {
         mcp_bind = bind;
     }
+    config.admin_token = config.admin_token.take().and_then(non_empty_token);
     let layout = config.layout();
     let store = SqliteModelStore::new(&layout.database_path, &layout.model_dir)?;
     store.delete_models(["glm-ocr-onnx-q4f16", "glm-ocr-onnx-fp16"])?;
@@ -80,6 +84,7 @@ async fn main() -> Result<()> {
             data_dir: layout.data_dir.clone(),
             upload_signing_secret: config.upload_signing_secret.clone(),
             admin_token: config.admin_token.clone(),
+            mcp_infer_tokens: config.mcp_infer_tokens.clone(),
             ..ControllerOptions::default()
         },
     );
@@ -93,7 +98,7 @@ async fn main() -> Result<()> {
         InfraError::Config(format!("invalid standard MCP bind address {mcp_bind}: {e}"))
     })?;
     tracing::info!(%addr, database = %layout.database_path.display(), model_dir = %layout.model_dir.display(), "starting controller HTTP API");
-    tracing::info!(%mcp_addr, path = "/mcp", "starting standard MCP server");
+    tracing::info!(%mcp_addr, admin_path = "/mcp/admin", infer_path = "/mcp/infer", infer_auth = !config.mcp_infer_tokens.is_empty(), "starting standard MCP server");
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| InfraError::io(None, e))?;
@@ -177,4 +182,36 @@ fn default_public_base_url(bind: &str) -> String {
         .filter(|value| value.chars().all(|ch| ch.is_ascii_digit()))
         .unwrap_or("17890");
     format!("http://127.0.0.1:{port}")
+}
+
+fn parse_mcp_infer_tokens(value: &str) -> Result<Vec<String>> {
+    Ok(value
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>())
+}
+
+fn non_empty_token(token: String) -> Option<String> {
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_mcp_infer_tokens;
+
+    #[test]
+    fn parses_comma_separated_mcp_infer_tokens() {
+        assert_eq!(
+            parse_mcp_infer_tokens(" first,second , third ").expect("tokens"),
+            ["first", "second", "third"]
+        );
+    }
+
+    #[test]
+    fn treats_empty_mcp_infer_token_list_as_open_access() {
+        assert!(parse_mcp_infer_tokens(" , ").expect("tokens").is_empty());
+    }
 }

@@ -11,21 +11,113 @@ use serde_json::{Map, Value};
 
 impl ControllerState {
     pub fn standard_mcp_app(self) -> Router {
-        let server = StandardMcpServer { state: self };
-        let mut config = StreamableHttpServerConfig::default();
-        config.stateful_mode = false;
-        let service = StreamableHttpService::new(
-            move || Ok(server.clone()),
-            LocalSessionManager::default().into(),
-            config,
+        let admin = standard_mcp_router(
+            "/mcp/admin",
+            self.clone(),
+            McpAccess::Admin,
+            ApiAuth::Required {
+                tokens: self.admin_token.clone().into_iter().collect(),
+                header_name: "x-local-admin-token",
+                missing_configuration: true,
+            },
         );
-        Router::new().nest_service("/mcp", service)
+        let infer_auth = if self.mcp_infer_tokens.is_empty() {
+            ApiAuth::Open
+        } else {
+            ApiAuth::Required {
+                tokens: self.mcp_infer_tokens.clone(),
+                header_name: "x-local-infer-token",
+                missing_configuration: false,
+            }
+        };
+        let infer = standard_mcp_router("/mcp/infer", self, McpAccess::Infer, infer_auth);
+        Router::new().merge(admin).merge(infer)
     }
+}
+
+fn standard_mcp_router(
+    path: &'static str,
+    state: ControllerState,
+    access: McpAccess,
+    auth: ApiAuth,
+) -> Router {
+    let server = StandardMcpServer { state, access };
+    let mut config = StreamableHttpServerConfig::default();
+    config.stateful_mode = false;
+    let service = StreamableHttpService::new(
+        move || Ok(server.clone()),
+        LocalSessionManager::default().into(),
+        config,
+    );
+    Router::new()
+        .nest_service(path, service)
+        .layer(axum::middleware::from_fn_with_state(auth, authorize_api))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum McpAccess {
+    Admin,
+    Infer,
+}
+
+#[derive(Clone)]
+pub(super) enum ApiAuth {
+    Open,
+    Required {
+        tokens: Vec<String>,
+        header_name: &'static str,
+        missing_configuration: bool,
+    },
+}
+
+pub(super) async fn authorize_api(
+    State(auth): State<ApiAuth>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let ApiAuth::Required {
+        tokens,
+        header_name,
+        missing_configuration,
+    } = auth
+    else {
+        return next.run(request).await;
+    };
+    if missing_configuration && tokens.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "admin token is not configured" })),
+        )
+            .into_response();
+    }
+    let provided = headers
+        .get(header_name)
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| bearer_token(&headers));
+    if provided.is_some_and(|provided| tokens.iter().any(|token| token == provided)) {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Bearer")],
+            Json(json!({ "error": "missing or invalid API token" })),
+        )
+            .into_response()
+    }
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
 }
 
 #[derive(Clone)]
 struct StandardMcpServer {
     state: ControllerState,
+    access: McpAccess,
 }
 
 impl ServerHandler for StandardMcpServer {
@@ -34,16 +126,18 @@ impl ServerHandler for StandardMcpServer {
             protocol_version: ProtocolVersion::default(),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation {
-                name: "local-controller-standard-mcp".to_string(),
-                title: Some("local Controller Standard MCP".to_string()),
+                name: format!("local-controller-{}-mcp", self.access.label()),
+                title: Some(format!("local Controller {} MCP", self.access.label())),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 description: Some("Standard MCP adapter for the local controller".to_string()),
                 icons: None,
                 website_url: None,
             },
             instructions: Some(
-                "Standard MCP tools for the local controller. Results preserve the legacy JSON-RPC payloads where possible."
-                    .to_string(),
+                format!(
+                    "Standard MCP {} tools for the local controller. Results preserve the legacy JSON-RPC payloads where possible.",
+                    self.access.label()
+                ),
             ),
         }
     }
@@ -54,7 +148,7 @@ impl ServerHandler for StandardMcpServer {
         _context: RequestContext<RoleServer>,
     ) -> std::result::Result<ListToolsResult, ErrorData> {
         Ok(ListToolsResult {
-            tools: tool_definitions(),
+            tools: tool_definitions(self.access),
             next_cursor: None,
             meta: None,
         })
@@ -78,7 +172,7 @@ impl ServerHandler for StandardMcpServer {
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        tool_definitions()
+        tool_definitions(self.access)
             .into_iter()
             .find(|tool| tool.name.as_ref() == name)
     }
@@ -86,6 +180,9 @@ impl ServerHandler for StandardMcpServer {
 
 impl StandardMcpServer {
     async fn call_tool_json(&self, name: &str, arguments: Value) -> Result<Value> {
+        if !self.access.allows(name) {
+            return Err(InfraError::BadRequest(format!("unknown MCP tool `{name}`")));
+        }
         match name {
             "create_task" => {
                 let request = serde_json::from_value::<CreateTaskRequest>(arguments)?;
@@ -146,6 +243,49 @@ impl StandardMcpServer {
             other => Err(InfraError::BadRequest(format!(
                 "unknown MCP tool `{other}`"
             ))),
+        }
+    }
+}
+
+impl McpAccess {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::Infer => "inference",
+        }
+    }
+
+    fn allows(self, name: &str) -> bool {
+        match self {
+            Self::Admin => matches!(
+                name,
+                "list_models"
+                    | "get_model"
+                    | "add_model"
+                    | "upsert_model"
+                    | "download_model"
+                    | "enable_model"
+                    | "disable_model"
+                    | "list_nodes"
+                    | "get_cluster_status"
+                    | "list_assets"
+                    | "search_assets"
+            ),
+            Self::Infer => matches!(
+                name,
+                "create_task"
+                    | "start_task"
+                    | "get_task"
+                    | "wait_task"
+                    | "run_task"
+                    | "sign_assets"
+                    | "sign_asset_urls"
+                    | "asr_transcribe"
+                    | "object_detect"
+                    | "tts_synthesize"
+                    | "text_embed"
+                    | "text_rerank"
+            ),
         }
     }
 }
@@ -346,7 +486,7 @@ fn required_id_value(params: &Value) -> &str {
         .unwrap_or("")
 }
 
-fn tool_definitions() -> Vec<Tool> {
+fn tool_definitions(access: McpAccess) -> Vec<Tool> {
     vec![
         tool(
             "create_task",
@@ -511,6 +651,9 @@ fn tool_definitions() -> Vec<Tool> {
             asset_list_schema(),
         ),
     ]
+    .into_iter()
+    .filter(|tool| access.allows(tool.name.as_ref()))
+    .collect()
 }
 
 fn tool(name: &'static str, description: &'static str, schema: JsonObject) -> Tool {
@@ -583,15 +726,33 @@ fn typed_schema(kind: &str) -> JsonObject {
 mod tests {
     use super::*;
     use local_core::{EmbeddingInputType, TaskKind};
+    use local_registry::ModelRegistry;
 
     #[test]
     fn text_tools_are_registered() {
-        let names = tool_definitions()
+        let names = tool_definitions(McpAccess::Infer)
             .into_iter()
             .map(|tool| tool.name.to_string())
             .collect::<Vec<_>>();
         assert!(names.iter().any(|name| name == "text_embed"));
         assert!(names.iter().any(|name| name == "text_rerank"));
+    }
+
+    #[test]
+    fn admin_and_infer_tool_catalogs_are_disjoint() {
+        let admin = tool_definitions(McpAccess::Admin)
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let infer = tool_definitions(McpAccess::Infer)
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(admin.is_disjoint(&infer));
+        assert!(admin.contains("enable_model"));
+        assert!(!admin.contains("text_embed"));
+        assert!(infer.contains("text_embed"));
+        assert!(!infer.contains("enable_model"));
     }
 
     #[test]
@@ -629,5 +790,165 @@ mod tests {
             rerank.input,
             InferenceInput::TextRerank { top_n: Some(1), .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn rpc_routes_share_admin_and_inference_auth_policies() {
+        let state = test_state(Some("admin-secret"), &["infer-a", "infer-b"]);
+        let (base_url, server) = serve(state.app()).await;
+        let client = reqwest::Client::new();
+        let admin_body = json!({"jsonrpc":"2.0","id":1,"method":"list_models","params":{}});
+        let infer_body =
+            json!({"jsonrpc":"2.0","id":2,"method":"get_task","params":{"task_id":"missing"}});
+
+        assert_eq!(
+            client
+                .post(format!("{base_url}/rpc/admin"))
+                .json(&admin_body)
+                .send()
+                .await
+                .expect("admin without token")
+                .status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
+                .post(format!("{base_url}/rpc/admin"))
+                .bearer_auth("admin-secret")
+                .json(&admin_body)
+                .send()
+                .await
+                .expect("admin with token")
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        assert_eq!(
+            client
+                .post(format!("{base_url}/rpc/infer"))
+                .json(&infer_body)
+                .send()
+                .await
+                .expect("infer without token")
+                .status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
+                .post(format!("{base_url}/rpc/infer"))
+                .bearer_auth("not-listed")
+                .json(&infer_body)
+                .send()
+                .await
+                .expect("infer with wrong token")
+                .status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
+                .post(format!("{base_url}/rpc/infer"))
+                .header("x-local-infer-token", "infer-b")
+                .json(&infer_body)
+                .send()
+                .await
+                .expect("infer with listed token")
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn inference_auth_is_optional_but_admin_auth_is_not() {
+        let state = test_state(None, &[]);
+        let (base_url, server) = serve(state.app()).await;
+        let client = reqwest::Client::new();
+        let body =
+            json!({"jsonrpc":"2.0","id":1,"method":"get_task","params":{"task_id":"missing"}});
+
+        assert_eq!(
+            client
+                .post(format!("{base_url}/rpc/infer"))
+                .json(&body)
+                .send()
+                .await
+                .expect("open infer")
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        assert_eq!(
+            client
+                .post(format!("{base_url}/rpc/admin"))
+                .json(&body)
+                .send()
+                .await
+                .expect("unconfigured admin")
+                .status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn both_standard_mcp_paths_enforce_their_auth_policy() {
+        let state = test_state(Some("admin-secret"), &["infer-secret"]);
+        let (base_url, server) = serve(state.standard_mcp_app()).await;
+        let client = reqwest::Client::new();
+
+        for path in ["/mcp/admin", "/mcp/infer"] {
+            assert_eq!(
+                client
+                    .post(format!("{base_url}{path}"))
+                    .send()
+                    .await
+                    .expect("MCP without token")
+                    .status(),
+                reqwest::StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_ne!(
+            client
+                .post(format!("{base_url}/mcp/admin"))
+                .bearer_auth("admin-secret")
+                .send()
+                .await
+                .expect("admin MCP with token")
+                .status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        assert_ne!(
+            client
+                .post(format!("{base_url}/mcp/infer"))
+                .bearer_auth("infer-secret")
+                .send()
+                .await
+                .expect("infer MCP with token")
+                .status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        server.abort();
+    }
+
+    fn test_state(admin_token: Option<&str>, infer_tokens: &[&str]) -> ControllerState {
+        ControllerState::new_with_options(
+            ModelRegistry::from_models(Vec::new()),
+            None,
+            ControllerOptions {
+                admin_token: admin_token.map(str::to_string),
+                mcp_infer_tokens: infer_tokens.iter().map(|token| token.to_string()).collect(),
+                asset_cleanup_interval: None,
+                ..ControllerOptions::default()
+            },
+        )
+    }
+
+    async fn serve(app: Router) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+        (base_url, server)
     }
 }

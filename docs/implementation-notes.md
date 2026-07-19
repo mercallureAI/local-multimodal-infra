@@ -144,7 +144,7 @@ Optional IndexTTS ASR cross-validation lives in the Python harness, not in ad-ho
 
 ## Legacy JSON-RPC API
 
-The controller exposes the legacy JSON-RPC API on port `17890` only at canonical `POST /rpc/admin` for admin/model operations and canonical `POST /rpc/infer` for inference/task operations. Legacy JSON-RPC `/mcp/admin` and `/mcp/infer` compatibility aliases are removed and must remain absent. These legacy JSON-RPC routes are not the standard MCP protocol. Requests and responses use JSON-RPC 2.0, for example:
+The controller exposes the legacy JSON-RPC API on port `17890` only at canonical `POST /rpc/admin` for admin/model operations and canonical `POST /rpc/infer` for inference/task operations. `/rpc/admin` requires `LOCAL_ADMIN_TOKEN`; `/rpc/infer` is open when `LOCAL_MCP_INFER_TOKENS` is empty and otherwise accepts any token in that comma-separated list. These legacy JSON-RPC routes are not the standard MCP protocol.
 
 ```json
 {"jsonrpc":"2.0","id":1,"result":{}}
@@ -161,15 +161,15 @@ The API accepts core `ModelSpec` JSON, not MCP/OpenAI-specific schemas. `downloa
 
 ## Standard MCP Streamable HTTP API
 
-The controller also starts an official SDK-backed standard MCP server on a separate bind to avoid path/protocol conflicts with the legacy JSON-RPC endpoints. The default and only documented local endpoint is `http://127.0.0.1:17892/mcp`; override the bind only for controlled local development with `--mcp-bind <addr>`, `--mcp-bind=<addr>`, or `LOCAL_MCP_BIND`.
+The controller also starts official SDK-backed standard MCP services on a separate bind: admin tools at `http://127.0.0.1:17892/mcp/admin` and inference tools at `http://127.0.0.1:17892/mcp/infer`. The catalogs are disjoint and cross-catalog `tools/call` requests are rejected. Override only the bind with `--mcp-bind` or `LOCAL_MCP_BIND`.
 
 
-Security boundary: the standard MCP endpoint exposes admin and mutating tools. Keep the bind loopback-only for local automation (`127.0.0.1:17892` or `[::1]:17892`). Do **not** bind it to `0.0.0.0:17892` or another shared-network address. Any future non-loopback deployment must add an admin token and/or ACL in front of the standard MCP transport before exposing these tools.
+Authentication is shared with the legacy RPC routes. Admin always requires `LOCAL_ADMIN_TOKEN`. Inference optionally uses the comma-separated `LOCAL_MCP_INFER_TOKENS`; a configured non-empty list is enforced. Both support Bearer authentication plus their dedicated `x-local-admin-token` / `x-local-infer-token` headers. Keep the host publish loopback-only unless the surrounding network policy is intentional.
 
 Validate a running controller with the official Python SDK client. Do not validate this endpoint with raw HTTP JSON-RPC; use official Python MCP SDK or rmcp client semantics for MCP protocol calls. Raw `urllib`/HTTP is used by the smoke client only for asset bytes uploaded/downloaded through signed URLs returned by MCP tools.
 
 ```bash
-python -m scripts.local.mcp_standard_client --url http://127.0.0.1:17892/mcp --full
+python -m scripts.local.mcp_standard_client --admin-token "$LOCAL_ADMIN_TOKEN" --full
 ```
 
 The smoke harness has aliases that start controller/worker and run the same client or the legacy RPC helpers:
@@ -183,7 +183,7 @@ python -m scripts.local.smoke --tests all --workdir ./workdir --model-dir ./work
 
 
 
-- `mcp` expands to standard MCP SDK coverage on `http://127.0.0.1:17892/mcp`: tool listing, admin/catalog/assets, generic task flow, and direct inference where local resources/artifacts are available.
+- `mcp` expands to standard MCP SDK coverage on `/mcp/admin` and `/mcp/infer`: authentication, isolated tool listings, admin/catalog/assets, generic task flow, and direct inference where local resources/artifacts are available.
 - `all` expands both groups and still respects sensible skip flags.
 - `qwen-asr` is the canonical Qwen ASR smoke alias.
 

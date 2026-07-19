@@ -27,7 +27,8 @@ from .processes import ManagedProcess, cleanup_processes, locate_bin, run_build,
 CONTROLLER_URL = "http://127.0.0.1:17890"
 WORKER_URL = "http://127.0.0.1:17891"
 REGISTRATION_TOKEN = "local-smoke-registration-token"
-MCP_STANDARD_URL = "http://127.0.0.1:17892/mcp"
+MCP_ADMIN_URL = "http://127.0.0.1:17892/mcp/admin"
+MCP_INFER_URL = "http://127.0.0.1:17892/mcp/infer"
 PORTS = (17890, 17891, 17892)
 ASSET_DIR = repo_root() / "scripts" / "assets"
 DEFAULT_YOLO_IMAGE = ASSET_DIR / "yolo-input.jpg"
@@ -52,6 +53,7 @@ INDEXTTS_MODEL_ID = "indextts-1.5-onnx"
 EMBEDDING_MODEL_ID = "multilingual-e5-small-onnx"
 RERANK_MODEL_ID = "mmarco-minilm-l12-onnx"
 ADMIN_TOKEN = "local-smoke-admin-token"
+INFER_TOKEN = "local-smoke-infer-token"
 INDEXTTS_REQUIRED = [
     "IndexTTS_A.onnx",
     "IndexTTS_B.onnx",
@@ -104,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         env["LOCAL_DATA_DIR"] = str(data_dir)
         env["LOCAL_WORKER_REGISTRATION_TOKEN"] = REGISTRATION_TOKEN
         env["LOCAL_ADMIN_TOKEN"] = ADMIN_TOKEN
+        env["LOCAL_MCP_INFER_TOKENS"] = f"unused-{INFER_TOKEN},{INFER_TOKEN}"
         if "LOCAL_INDEXTTS_MODEL_DIR" not in env:
             env["LOCAL_INDEXTTS_MODEL_DIR"] = str(model_dir / INDEXTTS_MODEL_ID)
         # Smoke runs must be deterministic even if the caller has an experimental
@@ -158,8 +161,9 @@ def main(argv: list[str] | None = None) -> int:
         }
         try:
             health_payload["route_policy"] = check_route_policy(args.request_timeout)
+            health_payload["auth_policy"] = check_auth_policy(args.request_timeout)
         except SmokeError as exc:
-            failures.append(f"route policy: {exc}")
+            failures.append(f"route/auth policy: {exc}")
         save_json(data_dir / f"smoke-health-{timestamp}.json", health_payload)
 
         if "assets" in requested_tests:
@@ -286,7 +290,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
             "Comma-separated smoke tests or groups: rpc,mcp,all,assets,yolo,qwen-asr,indextts,"
             "indextts_asr,embedding,rerank,text,mcp_standard. "
             "rpc expands to legacy JSON-RPC coverage on /rpc/admin and /rpc/infer. "
-            "mcp expands to standard MCP SDK coverage on http://127.0.0.1:17892/mcp. "
+            "mcp expands to standard MCP SDK coverage on /mcp/admin and /mcp/infer. "
             "all runs both groups. OCR smoke aliases were removed after withdrawal."
         ),
     )
@@ -439,14 +443,56 @@ def check_route_policy(timeout: float) -> dict:
     return {"ok": True, "checks": checks}
 
 
+def check_auth_policy(timeout: float) -> dict:
+    """Assert all configured admin/inference RPC and MCP routes reject missing credentials."""
+    rpc_body = json.dumps({"jsonrpc": "2.0", "id": "auth-policy", "method": "get_task", "params": {}}).encode(
+        "utf-8"
+    )
+    checks: list[dict] = []
+    for url in (
+        f"{CONTROLLER_URL}/rpc/admin",
+        f"{CONTROLLER_URL}/rpc/infer",
+        MCP_ADMIN_URL,
+        MCP_INFER_URL,
+    ):
+        status, body, _headers = raw_bytes_request(
+            "POST",
+            url,
+            rpc_body,
+            {"Accept": "application/json", "Content-Type": "application/json"},
+            timeout,
+        )
+        check = {"method": "POST", "url": url, "expected_status": 401, "status": status, "ok": status == 401}
+        checks.append(check)
+        if status != 401:
+            preview = body[:200].decode("utf-8", errors="replace")
+            raise SmokeError(f"POST {url} without credentials must return 401; got HTTP {status}: {preview}")
+    print("[smoke] auth policy ok: configured admin/inference RPC and MCP routes rejected missing credentials")
+    return {"ok": True, "checks": checks}
+
+
 def rpc_infer(method: str, params: dict, request_id: str, timeout: float) -> tuple[int, dict]:
     payload = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
-    return json_request("POST", f"{CONTROLLER_URL}/rpc/infer", payload, timeout)
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    return raw_request(
+        "POST",
+        f"{CONTROLLER_URL}/rpc/infer",
+        data,
+        {"Accept": "application/json", "Content-Type": "application/json", "Authorization": f"Bearer {INFER_TOKEN}"},
+        timeout,
+    )
 
 
 def rpc_admin(method: str, params: dict, request_id: str, timeout: float) -> tuple[int, dict]:
     payload = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
-    return json_request("POST", f"{CONTROLLER_URL}/rpc/admin", payload, timeout)
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    return raw_request(
+        "POST",
+        f"{CONTROLLER_URL}/rpc/admin",
+        data,
+        {"Accept": "application/json", "Content-Type": "application/json", "x-local-admin-token": ADMIN_TOKEN},
+        timeout,
+    )
 
 def run_mcp_standard(
     data_dir: Path,
@@ -458,14 +504,20 @@ def run_mcp_standard(
     text: str,
     indextts_artifacts: dict,
 ) -> None:
-    print("[smoke] validating standard MCP endpoint")
+    print("[smoke] validating standard admin and inference MCP endpoints")
     output_path = data_dir / f"smoke-mcp-standard-{timestamp}.json"
     cmd = [
         sys.executable,
         "-m",
         "scripts.local.mcp_standard_client",
-        "--url",
-        MCP_STANDARD_URL,
+        "--admin-url",
+        MCP_ADMIN_URL,
+        "--infer-url",
+        MCP_INFER_URL,
+        "--admin-token",
+        ADMIN_TOKEN,
+        "--infer-token",
+        INFER_TOKEN,
         "--full",
         "--text",
         text,

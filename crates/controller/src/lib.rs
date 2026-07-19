@@ -58,6 +58,7 @@ pub struct ControllerState {
     assets: AssetsStore,
     upload_secret: String,
     admin_token: Option<String>,
+    mcp_infer_tokens: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +68,7 @@ pub struct ControllerOptions {
     pub data_dir: PathBuf,
     pub upload_signing_secret: Option<String>,
     pub admin_token: Option<String>,
+    pub mcp_infer_tokens: Vec<String>,
     pub asset_cleanup_interval: Option<Duration>,
 }
 
@@ -78,6 +80,7 @@ impl Default for ControllerOptions {
             data_dir: PathBuf::from("workdir/data"),
             upload_signing_secret: None,
             admin_token: None,
+            mcp_infer_tokens: Vec::new(),
             asset_cleanup_interval: Some(DEFAULT_ASSET_CLEANUP_INTERVAL),
         }
     }
@@ -152,6 +155,7 @@ impl ControllerState {
             assets,
             upload_secret,
             admin_token: options.admin_token,
+            mcp_infer_tokens: options.mcp_infer_tokens,
         }
     }
 
@@ -159,12 +163,34 @@ impl ControllerState {
         let admin_service: Arc<dyn AdminApi> = Arc::new(self.clone());
         let infer_service: Arc<dyn InferenceApi> = Arc::new(self.clone());
         let openai_service: Arc<dyn OpenAiApi> = Arc::new(self.clone());
+        let admin_auth = standard_mcp::ApiAuth::Required {
+            tokens: self.admin_token.clone().into_iter().collect(),
+            header_name: "x-local-admin-token",
+            missing_configuration: true,
+        };
+        let infer_auth = if self.mcp_infer_tokens.is_empty() {
+            standard_mcp::ApiAuth::Open
+        } else {
+            standard_mcp::ApiAuth::Required {
+                tokens: self.mcp_infer_tokens.clone(),
+                header_name: "x-local-infer-token",
+                missing_configuration: false,
+            }
+        };
         let admin = local_api_mcp_admin::router(AdminApiState {
             service: admin_service,
-        });
+        })
+        .layer(axum::middleware::from_fn_with_state(
+            admin_auth,
+            standard_mcp::authorize_api,
+        ));
         let infer = local_api_mcp_infer::router(InferenceApiState {
             service: infer_service,
-        });
+        })
+        .layer(axum::middleware::from_fn_with_state(
+            infer_auth,
+            standard_mcp::authorize_api,
+        ));
         let openai = local_api_openai::router(OpenAiApiState {
             service: openai_service,
         });
