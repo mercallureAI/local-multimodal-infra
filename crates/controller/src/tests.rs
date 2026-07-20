@@ -759,7 +759,7 @@ fn controller_manifest_has_no_runtime_backend_or_adapter_deps() {
         "local-runtime",
         "local-backend-ort",
         "local-adapter-yolo",
-        "local-adapter-qwen-asr",
+        "local-adapter-sensevoice-asr",
     ] {
         assert!(
             !manifest.contains(forbidden),

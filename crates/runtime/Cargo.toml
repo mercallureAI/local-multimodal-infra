@@ -10,21 +10,21 @@ cuda = [
     "local-adapter-e5-embedding/cuda",
     "local-adapter-index-tts/cuda",
     "local-adapter-mmarco-reranker/cuda",
-    "local-adapter-qwen-asr/cuda",
+    "local-adapter-sensevoice-asr/cuda",
     "local-adapter-yolo/cuda",
 ]
 directml = [
     "local-adapter-e5-embedding/directml",
     "local-adapter-index-tts/directml",
     "local-adapter-mmarco-reranker/directml",
-    "local-adapter-qwen-asr/directml",
+    "local-adapter-sensevoice-asr/directml",
     "local-adapter-yolo/directml",
 ]
 tensorrt = [
     "local-adapter-e5-embedding/tensorrt",
     "local-adapter-index-tts/tensorrt",
     "local-adapter-mmarco-reranker/tensorrt",
-    "local-adapter-qwen-asr/tensorrt",
+    "local-adapter-sensevoice-asr/tensorrt",
     "local-adapter-yolo/tensorrt",
 ]
 
@@ -32,7 +32,7 @@ tensorrt = [
 local-adapter-e5-embedding = { path = "../adapter-e5-embedding" }
 local-adapter-index-tts = { path = "../adapter-index-tts" }
 local-adapter-mmarco-reranker = { path = "../adapter-mmarco-reranker" }
-local-adapter-qwen-asr = { path = "../adapter-qwen-asr" }
+local-adapter-sensevoice-asr = { path = "../adapter-sensevoice-asr" }
 local-adapter-yolo = { path = "../adapter-yolo" }
 local-backend-ort = { path = "../backend-ort" }
 local-core = { path = "../core" }

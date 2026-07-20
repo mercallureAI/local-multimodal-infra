@@ -20,8 +20,8 @@ use std::{
 
 mod io_binding;
 pub use io_binding::{
-    PinnedCudaIoBinding, ResidentBindingOutputs, ResidentCudaTensor, ResidentIoBinding,
-    ResidentTensorInput,
+    PinnedCudaF32IoBinding, PinnedCudaIoBinding, ResidentBindingOutputs, ResidentCudaTensor,
+    ResidentIoBinding, ResidentTensorInput,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1241,6 +1241,25 @@ mod tests {
 
         assert_eq!(outputs[0].name, "y");
         assert_eq!(outputs[0].data, OrtTensorData::I64(vec![4, 9]));
+    }
+
+    #[test]
+    fn pinned_cuda_f32_binding_rejects_cpu_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model_path = dir.path().join("identity_f32.onnx");
+        fs::write(&model_path, identity_model(1)).expect("write model");
+
+        let session = OrtSession::load(&model_path, ProviderSelection::default())
+            .expect("load CPU identity model");
+        let error = session
+            .create_pinned_cuda_f32_binding(0, &[2], &[2])
+            .expect_err("CPU session must reject CUDA-pinned I/O binding");
+        assert!(
+            error
+                .to_string()
+                .contains("requires a CUDA-selected session"),
+            "{error}"
+        );
     }
 
     #[test]

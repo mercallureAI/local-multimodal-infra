@@ -363,6 +363,8 @@ mod tests {
             Ok(match kind {
                 TaskKind::AsrTranscribe => InferenceOutput::AsrTranscription {
                     text: "ok".to_string(),
+                    segments: Vec::new(),
+                    speakers: Vec::new(),
                 },
                 TaskKind::ObjectDetect => InferenceOutput::ObjectDetections {
                     objects: Vec::new(),
@@ -484,7 +486,7 @@ mod tests {
                     .uri("/rpc/infer")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":2,"method":"asr_transcribe","params":{"model":"qwen3-asr-0.6b-onnx","audio":{"path":"./audio.wav","mime":"audio/wav"}}}"#,
+                        r#"{"jsonrpc":"2.0","id":2,"method":"asr_transcribe","params":{"model":"sensevoice-small-onnx","audio":{"path":"./audio.wav","mime":"audio/wav"}}}"#,
                     ))
                     .expect("request"),
             )
@@ -501,7 +503,7 @@ mod tests {
         let tasks = service.tasks.lock().expect("tasks lock");
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].kind, TaskKind::AsrTranscribe);
-        assert_eq!(tasks[0].model_id.as_deref(), Some("qwen3-asr-0.6b-onnx"));
+        assert_eq!(tasks[0].model_id.as_deref(), Some("sensevoice-small-onnx"));
         match &tasks[0].input {
             InferenceInput::AsrTranscribe { audio } => {
                 assert_eq!(

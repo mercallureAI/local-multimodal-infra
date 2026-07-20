@@ -1,7 +1,7 @@
 use local_adapter_e5_embedding::E5EmbeddingAdapter;
 use local_adapter_index_tts::IndexTtsAdapter;
 use local_adapter_mmarco_reranker::MmarcoRerankerAdapter;
-use local_adapter_qwen_asr::QwenAsrAdapter;
+use local_adapter_sensevoice_asr::SenseVoiceAsrAdapter;
 use local_adapter_yolo::YoloAdapter;
 use local_backend_ort::probe_runtime_execution_provider_availability;
 use local_core::{
@@ -443,7 +443,9 @@ impl LoadedEntry {
         );
         let model = match spec.adapter {
             AdapterKind::Yolo => LoadedModel::Yolo(YoloAdapter::load(&spec)?),
-            AdapterKind::QwenAsr => LoadedModel::QwenAsr(QwenAsrAdapter::load(&spec)?),
+            AdapterKind::SenseVoiceAsr => {
+                LoadedModel::SenseVoiceAsr(SenseVoiceAsrAdapter::load(&spec)?)
+            }
             AdapterKind::IndexTts => LoadedModel::IndexTts(IndexTtsAdapter::load(&spec)?),
             AdapterKind::E5Embedding => LoadedModel::E5Embedding(E5EmbeddingAdapter::load(&spec)?),
             AdapterKind::MmarcoReranker => {
@@ -551,9 +553,9 @@ fn validated_runtime_providers_for_model(model_id: &str) -> Option<&'static [&'s
         // Single-session YOLO loading has the broadest generic ORT profile today,
         // but TRT is still withheld until a real local validation path exists.
         "yolo11n.onnx" => Some(&["cuda", "dml", "cpu"]),
-        // Qwen ASR is a multi-session int4-first pipeline; keep this conservative
-        // and only prefer CUDA above CPU until DML/TRT are validated end-to-end.
-        "qwen3-asr-0.6b-onnx" => Some(&["cuda", "cpu"]),
+        // The FunASR ASR pipeline loads FSMN-VAD, SenseVoice, and CAM++ ONNX
+        // sessions with one shared provider policy.
+        "sensevoice-small-onnx" => Some(&["cuda", "cpu"]),
         // All A-F/prefill sessions receive the same provider selection. Root
         // FP32 CUDA is policy-enabled, but still needs real NVIDIA validation.
         "indextts-1.5-onnx" => Some(&["cuda", "cpu"]),
@@ -566,7 +568,7 @@ fn validated_runtime_providers_for_model(model_id: &str) -> Option<&'static [&'s
 #[derive(Debug)]
 enum LoadedModel {
     Yolo(YoloAdapter),
-    QwenAsr(QwenAsrAdapter),
+    SenseVoiceAsr(SenseVoiceAsrAdapter),
     IndexTts(IndexTtsAdapter),
     E5Embedding(E5EmbeddingAdapter),
     MmarcoReranker(MmarcoRerankerAdapter),
@@ -595,10 +597,10 @@ impl LoadedModel {
                 InferenceInput::ObjectDetect { image },
             ) => adapter.object_detect(image),
             (
-                LoadedModel::QwenAsr(adapter),
+                LoadedModel::SenseVoiceAsr(adapter),
                 TaskKind::AsrTranscribe,
                 InferenceInput::AsrTranscribe { audio },
-            ) => adapter.transcribe(audio),
+            ) => adapter.transcribe_with_params(audio, &task.params),
             (
                 LoadedModel::IndexTts(adapter),
                 TaskKind::TtsSynthesize,
@@ -635,7 +637,7 @@ impl LoadedModel {
     fn release_idle_cache(&mut self, model_id: &str) {
         match self {
             LoadedModel::Yolo(_)
-            | LoadedModel::QwenAsr(_)
+            | LoadedModel::SenseVoiceAsr(_)
             | LoadedModel::IndexTts(_)
             | LoadedModel::E5Embedding(_)
             | LoadedModel::MmarcoReranker(_) => {
@@ -1060,8 +1062,8 @@ mod tests {
     #[test]
     fn effective_provider_order_preserves_explicit_non_default_order() {
         let mut spec = test_spec(
-            "qwen3-asr-0.6b-onnx",
-            AdapterKind::QwenAsr,
+            "sensevoice-small-onnx",
+            AdapterKind::SenseVoiceAsr,
             true,
             PathBuf::from("missing"),
         );
@@ -1112,7 +1114,7 @@ mod tests {
     fn effective_provider_order_preserves_cuda_when_available() {
         for (model_id, adapter) in [
             ("yolo11n.onnx", AdapterKind::Yolo),
-            ("qwen3-asr-0.6b-onnx", AdapterKind::QwenAsr),
+            ("sensevoice-small-onnx", AdapterKind::SenseVoiceAsr),
             ("indextts-1.5-onnx", AdapterKind::IndexTts),
         ] {
             let mut spec = test_spec(model_id, adapter, true, PathBuf::from("missing"));
@@ -1137,9 +1139,9 @@ mod tests {
 
     #[test]
     fn effective_provider_order_is_model_specific_and_conservative() {
-        let mut qwen = test_spec(
-            "qwen3-asr-0.6b-onnx",
-            AdapterKind::QwenAsr,
+        let mut sensevoice = test_spec(
+            "sensevoice-small-onnx",
+            AdapterKind::SenseVoiceAsr,
             true,
             PathBuf::from("missing"),
         );
@@ -1154,11 +1156,11 @@ mod tests {
             directml: true,
             tensorrt: true,
         };
-        qwen.runtime.provider_order = vec!["cuda".to_string(), "cpu".to_string()];
+        sensevoice.runtime.provider_order = vec!["cuda".to_string(), "cpu".to_string()];
         indextts.runtime.provider_order = vec!["cuda".to_string(), "cpu".to_string()];
 
         assert_eq!(
-            effective_load_spec_with_availability(&qwen, availability)
+            effective_load_spec_with_availability(&sensevoice, availability)
                 .runtime
                 .provider_order,
             vec!["cuda".to_string(), "cpu".to_string()]
@@ -1215,7 +1217,7 @@ mod tests {
     fn test_spec(id: &str, adapter: AdapterKind, enabled: bool, path: PathBuf) -> ModelSpec {
         let task_kinds = match adapter {
             AdapterKind::Yolo => vec![TaskKind::ObjectDetect],
-            AdapterKind::QwenAsr => vec![TaskKind::AsrTranscribe],
+            AdapterKind::SenseVoiceAsr => vec![TaskKind::AsrTranscribe],
             AdapterKind::IndexTts => vec![TaskKind::TtsSynthesize],
             AdapterKind::E5Embedding => vec![TaskKind::TextEmbed],
             AdapterKind::MmarcoReranker => vec![TaskKind::TextRerank],

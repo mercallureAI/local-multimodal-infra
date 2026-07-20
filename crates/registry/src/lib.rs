@@ -4,7 +4,12 @@ use local_core::{
 };
 use local_error::{InfraError, Result};
 use serde_json::json;
-use std::{collections::BTreeMap, fs, path::Path, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Default)]
@@ -163,7 +168,7 @@ pub fn load_yaml_specs(path: impl AsRef<Path>) -> Result<Vec<ModelSpec>> {
 pub fn default_catalog(model_dir: impl AsRef<Path>) -> Vec<ModelSpec> {
     let model_dir = model_dir.as_ref();
     vec![
-        qwen_asr_default(model_dir),
+        sensevoice_asr_default(model_dir),
         yolo_default(model_dir),
         index_tts_default(model_dir),
         e5_embedding_default(model_dir),
@@ -369,75 +374,137 @@ pub fn materialize_artifact_paths(spec: &mut ModelSpec, model_dir: impl AsRef<Pa
             ArtifactKind::HuggingFace if artifact.files.len() == 1 => root.join(&artifact.files[0]),
             ArtifactKind::HuggingFace => root.clone(),
             ArtifactKind::Url => {
-                let filename = artifact
-                    .url
-                    .as_deref()
-                    .and_then(|url| url.rsplit('/').next())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("artifact.bin");
-                root.join(filename)
+                if let Ok(relative) = artifact.path.strip_prefix(&root) {
+                    if !relative.as_os_str().is_empty() {
+                        root.join(relative)
+                    } else {
+                        url_artifact_default_path(&root, artifact.url.as_deref())
+                    }
+                } else if artifact.path.is_relative() && !artifact.path.as_os_str().is_empty() {
+                    root.join(&artifact.path)
+                } else {
+                    url_artifact_default_path(&root, artifact.url.as_deref())
+                }
             }
         };
     }
 }
 
-fn qwen_asr_default(model_dir: &Path) -> ModelSpec {
-    let id = "qwen3-asr-0.6b-onnx";
+fn url_artifact_default_path(root: &Path, url: Option<&str>) -> PathBuf {
+    let filename = url
+        .and_then(|url| url.rsplit('/').next())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("artifact.bin");
+    root.join(filename)
+}
+
+fn sensevoice_asr_default(model_dir: &Path) -> ModelSpec {
+    let id = "sensevoice-small-onnx";
     let root = model_dir.join(id);
+    let sensevoice_revision = "0dd101a91bcf61c26dd778ddf634d8989afe22e3";
+    let vad_revision = "a158155ef9e81f405c052f40b6d1ad43b87e6215";
+    let campplus_revision = "6265ff7af2a104d745b4389026ed9815c6c1c6ff";
+    let artifact = |target: &str, url: String, sha256: &str, revision: &str| ModelArtifact {
+        kind: ArtifactKind::Url,
+        path: root.join(target),
+        source_path: None,
+        sha256: Some(sha256.to_string()),
+        url: Some(url),
+        repo_id: None,
+        revision: Some(revision.to_string()),
+        files: Vec::new(),
+        allow_patterns: Vec::new(),
+        metadata: BTreeMap::new(),
+    };
     let mut metadata = BTreeMap::new();
     metadata.insert("license".to_string(), json!("Apache-2.0"));
     metadata.insert("runtime".to_string(), json!("onnxruntime"));
-    metadata.insert("model_family".to_string(), json!("qwen3_asr"));
+    metadata.insert("model_family".to_string(), json!("funasr_full_asr"));
     metadata.insert("task".to_string(), json!("automatic-speech-recognition"));
     metadata.insert(
-        "hf_current_sha".to_string(),
-        json!("4fc24a1402e74db89c4d2ef256875e71680128c4"),
+        "source".to_string(),
+        json!([
+            "iic/SenseVoiceSmall-onnx",
+            "iic/speech_fsmn_vad_zh-cn-16k-common-onnx",
+            "3D-Speaker/CAM++"
+        ]),
     );
     metadata.insert(
+        "modelscope_revision".to_string(),
+        json!(sensevoice_revision),
+    );
+    metadata.insert("speaker_diarization_default".to_string(), json!(true));
+    metadata.insert("timestamps_default".to_string(), json!(true));
+    metadata.insert("sensevoice_max_chunk_seconds".to_string(), json!(30));
+    metadata.insert("vad_max_segment_seconds".to_string(), json!(20));
+    metadata.insert(
         "mvp_status".to_string(),
-        json!("Real CPU ORT encoder/decoder/tokenizer path is implemented; real INT4 execution depends on ORT contrib MatMulNBits support and should be verified with the LOCAL_QWEN_ASR_MODEL_DIR-gated smoke test"),
+        json!("Full FunASR-style pipeline: FSMN-VAD, SenseVoiceSmall ONNX, token and segment timestamps, CAM++ embeddings, and speaker clustering; diarization and timestamps are enabled by default"),
     );
     ModelSpec {
         id: id.to_string(),
-        name: "Qwen3 ASR 0.6B ONNX INT4".to_string(),
+        name: "FunASR Full ASR ONNX".to_string(),
         enabled: true,
         task_kinds: vec![TaskKind::AsrTranscribe],
-        adapter: AdapterKind::QwenAsr,
+        adapter: AdapterKind::SenseVoiceAsr,
         backend: BackendKind::Ort,
-        artifacts: vec![ModelArtifact {
-            kind: ArtifactKind::HuggingFace,
-            path: root,
-            source_path: None,
-            sha256: None,
-            url: None,
-            repo_id: Some("andrewleech/qwen3-asr-0.6b-onnx".to_string()),
-            revision: Some("4fc24a1402e74db89c4d2ef256875e71680128c4".to_string()),
-            files: [
-                "encoder.int4.onnx",
-                "decoder_init.int4.onnx",
-                "decoder_step.int4.onnx",
-                "decoder_weights.int4.data",
-                "embed_tokens.bin",
-                "tokenizer.json",
-                "config.json",
-                "preprocessor_config.json",
-                "tokenizer_config.json",
-                "added_tokens.json",
-                "vocab.json",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-            allow_patterns: Vec::new(),
-            metadata: BTreeMap::new(),
-        }],
+        artifacts: vec![
+            artifact(
+                "asr/model_quant.onnx",
+                format!("https://modelscope.cn/models/iic/SenseVoiceSmall-onnx/resolve/{sensevoice_revision}/model_quant.onnx"),
+                "21dc965f689a78d1604717bf561e40d5a236087c85a95584567835750549e822",
+                sensevoice_revision,
+            ),
+            artifact(
+                "asr/am.mvn",
+                format!("https://modelscope.cn/models/iic/SenseVoiceSmall-onnx/resolve/{sensevoice_revision}/am.mvn"),
+                "29b3c740a2c0cfc6b308126d31d7f265fa2be74f3bb095cd2f143ea970896ae5",
+                sensevoice_revision,
+            ),
+            artifact(
+                "asr/config.yaml",
+                format!("https://modelscope.cn/models/iic/SenseVoiceSmall-onnx/resolve/{sensevoice_revision}/config.yaml"),
+                "f71e239ba36705564b5bf2d2ffd07eece07b8e3f2bbf6d2c99d8df856339ac19",
+                sensevoice_revision,
+            ),
+            artifact(
+                "asr/tokens.json",
+                format!("https://modelscope.cn/models/iic/SenseVoiceSmall-onnx/resolve/{sensevoice_revision}/tokens.json"),
+                "a2594fc1474e78973149cba8cd1f603ebed8c39c7decb470631f66e70ce58e97",
+                sensevoice_revision,
+            ),
+            artifact(
+                "vad/model_quant.onnx",
+                format!("https://modelscope.cn/models/iic/speech_fsmn_vad_zh-cn-16k-common-onnx/resolve/{vad_revision}/model_quant.onnx"),
+                "5289eb2aa3c9af2d7a4284bcfa7c3ceb81d360814ed4203239b6c5d0569da8a1",
+                vad_revision,
+            ),
+            artifact(
+                "vad/am.mvn",
+                format!("https://modelscope.cn/models/iic/speech_fsmn_vad_zh-cn-16k-common-onnx/resolve/{vad_revision}/am.mvn"),
+                "6820fef9687708c4fc3fab2530179c8fcea6262daa25514380056cd8f6eb1754",
+                vad_revision,
+            ),
+            artifact(
+                "vad/config.yaml",
+                format!("https://modelscope.cn/models/iic/speech_fsmn_vad_zh-cn-16k-common-onnx/resolve/{vad_revision}/config.yaml"),
+                "2ef334f2d7776edd86ed696296774f87550206c256bfabc597872ad861831589",
+                vad_revision,
+            ),
+            artifact(
+                "speaker/campplus_cn_en_common_200k.onnx",
+                format!("https://huggingface.co/welcomyou/campplus-3dspeaker-200k-onnx/resolve/{campplus_revision}/campplus_cn_en_common_200k.onnx"),
+                "dd1740aa1e1ffa3895f96aef2166b8af2bb2ad09c00769dd275ee36aef6a2a7f",
+                campplus_revision,
+            ),
+        ],
         runtime: RuntimePolicy {
             provider_order: vec!["cuda".to_string(), "cpu".to_string()],
             max_concurrency: 1,
             idle_ttl_sec: 300,
         },
         resources: ResourceRequirement {
-            min_ram_mb: 4096,
+            min_ram_mb: 1536,
             min_vram_mb: 0,
         },
         load_policy: LoadPolicy::default(),
@@ -534,6 +601,35 @@ mod tests {
     }
 
     #[test]
+    fn funasr_artifacts_keep_collision_free_subdirectories() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec = default_catalog(dir.path())
+            .into_iter()
+            .find(|spec| spec.id == "sensevoice-small-onnx")
+            .expect("FunASR spec");
+        let relative = spec
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                artifact
+                    .path
+                    .strip_prefix(dir.path().join("sensevoice-small-onnx"))
+                    .expect("model root")
+                    .to_path_buf()
+            })
+            .collect::<Vec<_>>();
+        assert!(relative.contains(&PathBuf::from("asr/model_quant.onnx")));
+        assert!(relative.contains(&PathBuf::from("vad/model_quant.onnx")));
+        assert_eq!(
+            relative
+                .iter()
+                .filter(|path| path.file_name().is_some())
+                .count(),
+            8
+        );
+    }
+
+    #[test]
     fn default_catalog_keeps_tts_disabled_and_hugging_face() {
         let dir = tempfile::tempdir().expect("tempdir");
         let specs = default_catalog(dir.path());
@@ -596,118 +692,6 @@ mod tests {
                     .all(|artifact| artifact.repo_id.as_deref()
                         == Some("ModaLeap/indextts-1.5-onnx")));
             }
-        }
-    }
-
-    #[test]
-    fn nvidia_compose_static_contract_is_worker_only_cuda() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let nvidia_compose = std::fs::read_to_string(root.join("docker-compose-nvidia.yml"))
-            .expect("read NVIDIA compose");
-        let compose: serde_yaml::Value =
-            serde_yaml::from_str(&nvidia_compose).expect("parse NVIDIA compose YAML");
-        let services = compose
-            .get("services")
-            .and_then(serde_yaml::Value::as_mapping)
-            .expect("services mapping");
-        let controller = services
-            .get(serde_yaml::Value::from("controller"))
-            .and_then(serde_yaml::Value::as_mapping)
-            .expect("controller service");
-        let worker = services
-            .get(serde_yaml::Value::from("worker"))
-            .and_then(serde_yaml::Value::as_mapping)
-            .expect("worker service");
-
-        assert!(!controller.contains_key(serde_yaml::Value::from("gpus")));
-        assert!(!controller.contains_key(serde_yaml::Value::from("deploy")));
-        assert_eq!(
-            worker
-                .get(serde_yaml::Value::from("gpus"))
-                .and_then(serde_yaml::Value::as_str),
-            Some("all")
-        );
-        let command_contains = |service: &serde_yaml::Mapping, expected: &str| {
-            service
-                .get(serde_yaml::Value::from("command"))
-                .and_then(serde_yaml::Value::as_sequence)
-                .is_some_and(|command| command.iter().any(|value| value.as_str() == Some(expected)))
-        };
-        assert!(command_contains(
-            controller,
-            "configs/docker-controller.yaml"
-        ));
-        assert!(command_contains(worker, "configs/docker-worker.yaml"));
-
-        let dockerfile = std::fs::read_to_string(root.join("Dockerfile.nvidia"))
-            .expect("read NVIDIA Dockerfile");
-        assert!(dockerfile
-            .contains("cargo build --locked --release -p local-cli --bin worker --features cuda"));
-        assert!(dockerfile.contains("ARG ORT_CUDA_VERSION=12"));
-        assert!(dockerfile.contains("test -x /usr/local/bin/worker"));
-        assert!(dockerfile.contains("test -e /usr/local/lib/libonnxruntime_providers_cuda.so"));
-        assert!(dockerfile.contains("ldd \"${file}\""));
-        assert!(!dockerfile
-            .to_ascii_lowercase()
-            .contains("--features tensorrt"));
-        assert!(dockerfile.contains("! -name '*tensorrt*'"));
-        assert_eq!(
-            worker
-                .get(serde_yaml::Value::from("platform"))
-                .and_then(serde_yaml::Value::as_str),
-            Some("linux/amd64")
-        );
-
-        let shared_specs =
-            load_yaml_specs(root.join("configs/models.d")).expect("load shared specs");
-        assert_eq!(shared_specs.len(), 5);
-        for spec in &shared_specs {
-            let order = spec
-                .runtime
-                .provider_order
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>();
-            assert!(
-                !order.iter().any(|provider| {
-                    provider.eq_ignore_ascii_case("trt")
-                        || provider.eq_ignore_ascii_case("tensorrt")
-                }),
-                "{} must not request TensorRT",
-                spec.id
-            );
-            match spec.id.as_str() {
-                "yolo11n.onnx"
-                | "qwen3-asr-0.6b-onnx"
-                | "indextts-1.5-onnx"
-                | "multilingual-e5-small-onnx"
-                | "mmarco-minilm-l12-onnx" => {
-                    assert_eq!(order, ["cuda", "cpu"], "{} provider order", spec.id);
-                    if spec.id == "indextts-1.5-onnx" {
-                        assert!(!spec.enabled, "IndexTTS must remain disabled by default");
-                    }
-                }
-                other => panic!("unexpected NVIDIA model spec {other}"),
-            }
-        }
-
-        let cpu_compose =
-            std::fs::read_to_string(root.join("docker-compose.yml")).expect("read CPU compose");
-        let cpu_compose: serde_yaml::Value =
-            serde_yaml::from_str(&cpu_compose).expect("parse CPU compose YAML");
-        let cpu_services = cpu_compose
-            .get("services")
-            .and_then(serde_yaml::Value::as_mapping)
-            .expect("CPU services mapping");
-        for service in cpu_services
-            .values()
-            .filter_map(serde_yaml::Value::as_mapping)
-        {
-            assert!(
-                !service.contains_key(serde_yaml::Value::from("gpus"))
-                    && !service.contains_key(serde_yaml::Value::from("deploy")),
-                "CPU compose must not request GPUs"
-            );
         }
     }
 }

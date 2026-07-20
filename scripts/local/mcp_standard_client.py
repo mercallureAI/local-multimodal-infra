@@ -18,7 +18,7 @@ from typing import Any
 DEFAULT_ADMIN_URL = "http://127.0.0.1:17892/mcp/admin"
 DEFAULT_INFER_URL = "http://127.0.0.1:17892/mcp/infer"
 YOLO_MODEL_ID = "yolo11n.onnx"
-QWEN_ASR_MODEL_ID = "qwen3-asr-0.6b-onnx"
+SENSEVOICE_ASR_MODEL_ID = "sensevoice-small-onnx"
 INDEXTTS_MODEL_ID = "indextts-1.5-onnx"
 INFER_TOOLS = {
     "create_task",
@@ -343,14 +343,14 @@ async def generic_asr_transcribe(session: Any, sample_audio: Path | None, timeou
         return skipped("no --sample-audio supplied for generic ASR task")
     if not sample_audio.exists():
         return skipped(f"sample audio does not exist: {sample_audio}")
-    if not model_enabled(models, QWEN_ASR_MODEL_ID):
-        return skipped(f"{QWEN_ASR_MODEL_ID} is not enabled")
+    if not model_enabled(models, SENSEVOICE_ASR_MODEL_ID):
+        return skipped(f"{SENSEVOICE_ASR_MODEL_ID} is not enabled")
     create = await call_tool_checked(
         session,
         "create_task",
         {
             "task_kind": "asr.transcribe",
-            "model": QWEN_ASR_MODEL_ID,
+            "model": SENSEVOICE_ASR_MODEL_ID,
             "files": [{"name": sample_audio.name, "mime": "audio/wav", "role": "audio", "required": True}],
             "params": {},
         },
@@ -426,7 +426,7 @@ async def run_direct_smoke(
         models,
         timeout,
         artifacts_ready=indextts_artifacts_ready,
-        asr_enabled=model_enabled(models, QWEN_ASR_MODEL_ID),
+        asr_enabled=model_enabled(models, SENSEVOICE_ASR_MODEL_ID),
     )
     return results
 
@@ -459,12 +459,12 @@ async def direct_asr_transcribe(session: Any, audio: Path | None, models: list[A
         return skipped("no --sample-audio supplied")
     if not audio.exists():
         return skipped(f"sample audio does not exist: {audio}")
-    if not model_enabled(models, QWEN_ASR_MODEL_ID):
-        return skipped(f"{QWEN_ASR_MODEL_ID} is not enabled")
+    if not model_enabled(models, SENSEVOICE_ASR_MODEL_ID):
+        return skipped(f"{SENSEVOICE_ASR_MODEL_ID} is not enabled")
     payload = await call_tool_checked(
         session,
         "asr_transcribe",
-        {"model": QWEN_ASR_MODEL_ID, "audio": {"path": str(audio), "mime": "audio/wav"}},
+        {"model": SENSEVOICE_ASR_MODEL_ID, "audio": {"path": str(audio), "mime": "audio/wav"}},
     )
     validate_direct_output(payload, "asr_transcription", "MCP direct asr_transcribe")
     asr_text = extract_direct_asr_text(payload)
@@ -510,7 +510,7 @@ async def direct_tts_synthesize(
     validate_direct_output(payload, "tts_audio", "MCP direct tts_synthesize")
     result: dict[str, Any] = {"status": "passed", "result": payload}
     if not asr_enabled:
-        result["tts_asr_cross_check"] = skipped(f"{QWEN_ASR_MODEL_ID} is not enabled")
+        result["tts_asr_cross_check"] = skipped(f"{SENSEVOICE_ASR_MODEL_ID} is not enabled")
         return result
     audio_path, cleanup_path = resolve_tts_audio_for_asr(payload, timeout)
     try:
@@ -520,7 +520,7 @@ async def direct_tts_synthesize(
             asr_payload = await call_tool_checked(
                 infer_session,
                 "asr_transcribe",
-                {"model": QWEN_ASR_MODEL_ID, "audio": {"path": str(audio_path), "mime": "audio/wav"}},
+                {"model": SENSEVOICE_ASR_MODEL_ID, "audio": {"path": str(audio_path), "mime": "audio/wav"}},
             )
             validate_direct_output(asr_payload, "asr_transcription", "MCP direct tts_synthesize ASR cross-check")
             asr_text = extract_direct_asr_text(asr_payload)

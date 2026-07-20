@@ -33,11 +33,10 @@ pub fn read_wav_mono_f32(path: &Path) -> Result<Vec<f32>> {
             }
         }
     }
-    let mut mono = Vec::with_capacity(interleaved.len() / channels + 1);
-    for frame in interleaved.chunks(channels) {
-        let sum = frame.iter().copied().sum::<f32>();
-        mono.push(sum / frame.len() as f32);
-    }
+    let mono = interleaved
+        .chunks(channels)
+        .map(|frame| frame.iter().copied().sum::<f32>() / frame.len() as f32)
+        .collect::<Vec<_>>();
     if spec.sample_rate == TARGET_SAMPLE_RATE {
         Ok(mono)
     } else {
@@ -58,17 +57,17 @@ pub fn resample_linear(samples: &[f32], source_rate: u32, target_rate: u32) -> V
             .max(1.0) as usize;
         return vec![samples[0]; target_len];
     }
-    let target_len = ((samples.len() as f64) * (target_rate as f64) / (source_rate as f64))
+    let target_len = ((samples.len() as f64) * target_rate as f64 / source_rate as f64)
         .round()
         .max(1.0) as usize;
     let scale = source_rate as f64 / target_rate as f64;
     (0..target_len)
         .map(|i| {
-            let src = i as f64 * scale;
-            let left = src.floor() as usize;
+            let source = i as f64 * scale;
+            let left = source.floor() as usize;
             let right = (left + 1).min(samples.len() - 1);
-            let frac = (src - left as f64) as f32;
-            samples[left] * (1.0 - frac) + samples[right] * frac
+            let fraction = (source - left as f64) as f32;
+            samples[left] * (1.0 - fraction) + samples[right] * fraction
         })
         .collect()
 }

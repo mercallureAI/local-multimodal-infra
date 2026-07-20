@@ -30,13 +30,13 @@ Repo-specific instructions for future OpenCode agents. Higher-priority user inst
 
 ## Smoke harness
 
-- Prefer the harness over one-off scripts/curl for service/API/MCP smoke. Primary local smoke: `python -m scripts.local.smoke --tests yolo,qwen-asr,indextts --workdir ./workdir --model-dir ./workdir/models`.
+- Prefer the harness over one-off scripts/curl for service/API/MCP smoke. Primary local smoke: `python -m scripts.local.smoke --tests yolo,sensevoice-asr,indextts --workdir ./workdir --model-dir ./workdir/models`.
 - Other useful harness commands:
   - `python -m scripts.local.smoke --tests mcp --workdir ./workdir --model-dir ./workdir/models` (standard MCP SDK group on the isolated `/mcp/admin` and `/mcp/infer` endpoints)
   - `python -m scripts.local.smoke --tests all --workdir ./workdir --model-dir ./workdir/models` (both groups; skip flags still apply)
-  - `python -m scripts.local.smoke --tests assets,yolo,qwen-asr,indextts --workdir ./workdir --model-dir ./workdir/models`
+  - `python -m scripts.local.smoke --tests assets,yolo,sensevoice-asr,indextts --workdir ./workdir --model-dir ./workdir/models`
   - `python -m scripts.local.smoke --tests indextts_asr --indextts-frontend auto --workdir ./workdir --model-dir ./workdir/models`
-  - `python scripts/smoke_api_mcp.py --tests yolo,qwen-asr --workdir ./workdir --model-dir ./workdir/models`
+  - `python scripts/smoke_api_mcp.py --tests yolo,sensevoice-asr --workdir ./workdir --model-dir ./workdir/models`
   - `python -m scripts.local.smoke --tests mcp_standard --workdir ./workdir --model-dir ./workdir/models`
 - Use `--skip-build` only when existing `target/debug/controller(.exe)` and `target/debug/worker(.exe)` are valid.
 - `scripts/smoke_api_mcp.py` is a thin compatibility entrypoint; implementation is under `scripts/local/` (`smoke.py`, `processes.py`, `http_client.py`, `paths.py`). The harness builds via `cargo build --bins` unless skipped, starts services with Python `subprocess.Popen`, prints PIDs, writes `workdir/data/*.{stdout,stderr}.log`, waits for `/health`, and cleans up.
@@ -54,7 +54,7 @@ Repo-specific instructions for future OpenCode agents. Higher-priority user inst
 ## Verification commands
 
 - Cheap/default Rust checks: `cargo check --workspace --all-targets`, `cargo build --bins`, `cargo test --workspace`.
-- Opt-in real Qwen artifact test: `LOCAL_QWEN_ASR_MODEL_DIR=workdir/models/qwen3-asr-0.6b-onnx cargo test -p local-adapter-qwen-asr real_model_smoke_if_env_set -- --nocapture` (do not use PowerShell if the user forbids it).
+- Opt-in real FunASR pipeline test: `LOCAL_SENSEVOICE_ASR_MODEL_DIR=workdir/models/sensevoice-small-onnx cargo test -p local-adapter-sensevoice-asr real_model_smoke_if_env_set -- --nocapture` (add `--features cuda` to require the CUDA provider; do not use PowerShell if the user forbids it).
 
 ## Script entrypoints
 

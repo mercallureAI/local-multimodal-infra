@@ -1,0 +1,66 @@
+id: sensevoice-small-onnx
+name: FunASR Full ASR ONNX
+enabled: true
+task_kinds:
+  - asr.transcribe
+adapter: sense_voice_asr
+backend: ort
+artifacts:
+  - type: url
+    path: asr/model_quant.onnx
+    url: https://modelscope.cn/models/iic/SenseVoiceSmall-onnx/resolve/0dd101a91bcf61c26dd778ddf634d8989afe22e3/model_quant.onnx
+    sha256: 21dc965f689a78d1604717bf561e40d5a236087c85a95584567835750549e822
+  - type: url
+    path: asr/am.mvn
+    url: https://modelscope.cn/models/iic/SenseVoiceSmall-onnx/resolve/0dd101a91bcf61c26dd778ddf634d8989afe22e3/am.mvn
+    sha256: 29b3c740a2c0cfc6b308126d31d7f265fa2be74f3bb095cd2f143ea970896ae5
+  - type: url
+    path: asr/config.yaml
+    url: https://modelscope.cn/models/iic/SenseVoiceSmall-onnx/resolve/0dd101a91bcf61c26dd778ddf634d8989afe22e3/config.yaml
+    sha256: f71e239ba36705564b5bf2d2ffd07eece07b8e3f2bbf6d2c99d8df856339ac19
+  - type: url
+    path: asr/tokens.json
+    url: https://modelscope.cn/models/iic/SenseVoiceSmall-onnx/resolve/0dd101a91bcf61c26dd778ddf634d8989afe22e3/tokens.json
+    sha256: a2594fc1474e78973149cba8cd1f603ebed8c39c7decb470631f66e70ce58e97
+  - type: url
+    path: vad/model_quant.onnx
+    url: https://modelscope.cn/models/iic/speech_fsmn_vad_zh-cn-16k-common-onnx/resolve/a158155ef9e81f405c052f40b6d1ad43b87e6215/model_quant.onnx
+    sha256: 5289eb2aa3c9af2d7a4284bcfa7c3ceb81d360814ed4203239b6c5d0569da8a1
+  - type: url
+    path: vad/am.mvn
+    url: https://modelscope.cn/models/iic/speech_fsmn_vad_zh-cn-16k-common-onnx/resolve/a158155ef9e81f405c052f40b6d1ad43b87e6215/am.mvn
+    sha256: 6820fef9687708c4fc3fab2530179c8fcea6262daa25514380056cd8f6eb1754
+  - type: url
+    path: vad/config.yaml
+    url: https://modelscope.cn/models/iic/speech_fsmn_vad_zh-cn-16k-common-onnx/resolve/a158155ef9e81f405c052f40b6d1ad43b87e6215/config.yaml
+    sha256: 2ef334f2d7776edd86ed696296774f87550206c256bfabc597872ad861831589
+  - type: url
+    path: speaker/campplus_cn_en_common_200k.onnx
+    url: https://huggingface.co/welcomyou/campplus-3dspeaker-200k-onnx/resolve/6265ff7af2a104d745b4389026ed9815c6c1c6ff/campplus_cn_en_common_200k.onnx
+    sha256: dd1740aa1e1ffa3895f96aef2166b8af2bb2ad09c00769dd275ee36aef6a2a7f
+runtime:
+  provider_order: [cuda, cpu]
+  max_concurrency: 1
+  idle_ttl_sec: 300
+resources:
+  min_ram_mb: 1536
+  min_vram_mb: 0
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  license: Apache-2.0
+  runtime: onnxruntime
+  model_family: funasr_full_asr
+  task: automatic-speech-recognition
+  source: iic/SenseVoiceSmall-onnx
+  modelscope_revision: 0dd101a91bcf61c26dd778ddf634d8989afe22e3
+  sensevoice_max_chunk_seconds: 30
+  vad_max_segment_seconds: 20
+  vad_provider_order: [cpu]
+  speaker_batch_size: 32
+  speaker_io_binding: true
+  speaker_diarization_default: true
+  timestamps_default: true
+  mvp_status: Full FunASR-style FSMN-VAD, SenseVoiceSmall, token and segment timestamps, CAM++ embeddings, and speaker clustering pipeline.

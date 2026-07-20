@@ -32,14 +32,14 @@ MCP_INFER_URL = "http://127.0.0.1:17892/mcp/infer"
 PORTS = (17890, 17891, 17892)
 ASSET_DIR = repo_root() / "scripts" / "assets"
 DEFAULT_YOLO_IMAGE = ASSET_DIR / "yolo-input.jpg"
-DEFAULT_QWEN_ASR_AUDIO = ASSET_DIR / "tts-input-mon3tr.wav"
+DEFAULT_SENSEVOICE_ASR_AUDIO = ASSET_DIR / "tts-input-mon3tr.wav"
 TEST_ALIASES = {
     "all",
     "rpc",
     "mcp",
     "assets",
     "yolo",
-    "qwen-asr",
+    "sensevoice-asr",
     "indextts",
     "indextts_asr",
     "embedding",
@@ -47,7 +47,7 @@ TEST_ALIASES = {
     "text",
     "mcp_standard",
 }
-RPC_TESTS = {"assets", "yolo", "qwen-asr", "indextts", "indextts_asr", "embedding", "rerank"}
+RPC_TESTS = {"assets", "yolo", "sensevoice-asr", "indextts", "indextts_asr", "embedding", "rerank"}
 MCP_TESTS = {"mcp_standard"}
 INDEXTTS_MODEL_ID = "indextts-1.5-onnx"
 EMBEDDING_MODEL_ID = "multilingual-e5-small-onnx"
@@ -70,8 +70,8 @@ def main(argv: list[str] | None = None) -> int:
     workdir = resolve_cli_path(args.workdir, root)
     model_dir = resolve_cli_path(args.model_dir, root) if args.model_dir else (workdir / "models").resolve()
     yolo_image = resolve_cli_path(args.yolo_image, root) if args.yolo_image else DEFAULT_YOLO_IMAGE
-    qwen_asr_audio = resolve_cli_path(args.qwen_asr_audio, root) if args.qwen_asr_audio else DEFAULT_QWEN_ASR_AUDIO
-    indextts_reference = resolve_cli_path(args.indextts_reference, root) if args.indextts_reference else qwen_asr_audio
+    sensevoice_asr_audio = resolve_cli_path(args.sensevoice_asr_audio, root) if args.sensevoice_asr_audio else DEFAULT_SENSEVOICE_ASR_AUDIO
+    indextts_reference = resolve_cli_path(args.indextts_reference, root) if args.indextts_reference else sensevoice_asr_audio
     data_dir = workdir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -98,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[smoke] data_dir={data_dir}")
         print("[smoke] default assets=scripts/assets/yolo-input.jpg, tts-input-mon3tr.wav")
         print(f"[smoke] yolo_image={yolo_image}")
-        print(f"[smoke] qwen_asr_audio={qwen_asr_audio}")
+        print(f"[smoke] sensevoice_asr_audio={sensevoice_asr_audio}")
         print(f"[smoke] indextts_reference={indextts_reference}")
         print(f"[smoke] requested_tests={','.join(sorted(requested_tests)) or '<none>'}")
 
@@ -179,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
                     timestamp,
                     args.request_timeout,
                     None if args.skip_yolo else yolo_image,
-                    None if args.skip_asr_qwen else qwen_asr_audio,
+                    None if args.skip_sensevoice_asr else sensevoice_asr_audio,
                     None if args.skip_indextts else indextts_reference,
                     args.indextts_text,
                     {"ready": False, "reason": "--skip-indextts"} if args.skip_indextts else indextts_artifacts,
@@ -193,11 +193,11 @@ def main(argv: list[str] | None = None) -> int:
             except SmokeError as exc:
                 failures.append(f"yolo: {exc}")
 
-        if "qwen-asr" in requested_tests:
+        if "sensevoice-asr" in requested_tests:
             try:
-                run_qwen_asr(qwen_asr_audio, data_dir, timestamp, args.request_timeout)
+                run_sensevoice_asr(sensevoice_asr_audio, data_dir, timestamp, args.request_timeout)
             except SmokeError as exc:
-                failures.append(f"qwen-asr: {exc}")
+                failures.append(f"sensevoice-asr: {exc}")
 
         if "indextts" in requested_tests:
             try:
@@ -285,9 +285,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--skip-build", action="store_true", help="Do not build; use existing binaries.")
     parser.add_argument(
         "--tests",
-        default="assets,yolo,qwen-asr,indextts",
+        default="assets,yolo,sensevoice-asr,indextts",
         help=(
-            "Comma-separated smoke tests or groups: rpc,mcp,all,assets,yolo,qwen-asr,indextts,"
+            "Comma-separated smoke tests or groups: rpc,mcp,all,assets,yolo,sensevoice-asr,indextts,"
             "indextts_asr,embedding,rerank,text,mcp_standard. "
             "rpc expands to legacy JSON-RPC coverage on /rpc/admin and /rpc/infer. "
             "mcp expands to standard MCP SDK coverage on /mcp/admin and /mcp/infer. "
@@ -296,16 +296,16 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--skip-yolo", action="store_true")
     parser.add_argument(
-        "--skip-qwen-asr",
-        dest="skip_asr_qwen",
+        "--skip-sensevoice-asr",
+        dest="skip_sensevoice_asr",
         action="store_true",
-        help="Skip Qwen ASR smoke coverage.",
+        help="Skip SenseVoice ASR smoke coverage.",
     )
     parser.add_argument("--skip-indextts", action="store_true")
     parser.add_argument(
         "--indextts-asr-check",
         action="store_true",
-        help="Also synthesize IndexTTS audio and transcribe it with Qwen ASR via generic legacy RPC tasks.",
+        help="Also synthesize IndexTTS audio and transcribe it with SenseVoice ASR via generic legacy RPC tasks.",
     )
     parser.add_argument(
         "--yolo-image",
@@ -314,11 +314,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Local YOLO image override. Default: scripts/assets/yolo-input.jpg.",
     )
     parser.add_argument(
-        "--qwen-asr-audio",
-        dest="qwen_asr_audio",
+        "--sensevoice-asr-audio",
+        dest="sensevoice_asr_audio",
         type=Path,
         default=None,
-        help="Local Qwen ASR WAV override. Default: scripts/assets/tts-input-mon3tr.wav.",
+        help="Local SenseVoice ASR WAV override. Default: scripts/assets/tts-input-mon3tr.wav.",
     )
     parser.add_argument(
         "--indextts-reference",
@@ -360,8 +360,8 @@ def selected_tests(args: argparse.Namespace) -> set[str]:
     tests.difference_update({"all", "rpc", "mcp", "text"})
     if args.skip_yolo:
         tests.discard("yolo")
-    if args.skip_asr_qwen:
-        tests.discard("qwen-asr")
+    if args.skip_sensevoice_asr:
+        tests.discard("sensevoice-asr")
     if args.skip_indextts:
         tests.discard("indextts")
         tests.discard("indextts_asr")
@@ -792,37 +792,58 @@ def run_yolo(image: Path, data_dir: Path, timestamp: str, timeout: float) -> Non
     print(f"[smoke] yolo car_count={car_count} object_count={object_count} saved {out}")
 
 
-def run_qwen_asr(audio: Path, data_dir: Path, timestamp: str, timeout: float) -> None:
+def run_sensevoice_asr(audio: Path, data_dir: Path, timestamp: str, timeout: float) -> None:
     if not audio.exists():
-        raise SmokeError(f"Qwen ASR audio does not exist: {audio}")
-    out = data_dir / f"smoke-qwen-asr-{timestamp}.json"
+        raise SmokeError(f"SenseVoice ASR audio does not exist: {audio}")
+    out = data_dir / f"smoke-sensevoice-asr-{timestamp}.json"
     create = rpc_create_task(
         {
             "task_kind": "asr.transcribe",
-            "model": "qwen3-asr-0.6b-onnx",
+            "model": "sensevoice-small-onnx",
             "files": [{"name": audio.name, "mime": "audio/wav", "role": "audio", "required": True}],
             "params": {},
         },
-        f"smoke-qwen-asr-create-{timestamp}",
+        f"smoke-sensevoice-asr-create-{timestamp}",
         timeout,
     )
     upload_file(first_upload(create, "audio")["upload_url"], audio, "audio/wav", timeout)
-    payload = rpc_start_task(create["task_id"], f"smoke-qwen-asr-start-{timestamp}", timeout)
+    payload = rpc_start_task(create["task_id"], f"smoke-sensevoice-asr-start-{timestamp}", timeout)
     if payload.get("state") != "succeeded":
-        raise SmokeError(f"Qwen ASR generic task did not succeed: {payload}")
+        raise SmokeError(f"SenseVoice ASR generic task did not succeed: {payload}")
     asr_text = extract_asr_text(payload)
     if not asr_text.strip():
-        raise SmokeError(f"Qwen ASR generic task returned empty text: {payload}")
+        raise SmokeError(f"SenseVoice ASR generic task returned empty text: {payload}")
+    output = payload.get("output") or {}
+    segments = output.get("segments") if isinstance(output, dict) else None
+    speakers = output.get("speakers") if isinstance(output, dict) else None
+    if not isinstance(segments, list) or not segments:
+        raise SmokeError(f"SenseVoice ASR did not return default timeline segments: {payload}")
+    if not isinstance(speakers, list) or not speakers:
+        raise SmokeError(f"SenseVoice ASR did not return default speaker diarization: {payload}")
+    for segment in segments:
+        if (
+            not isinstance(segment, dict)
+            or not isinstance(segment.get("start_ms"), int)
+            or not isinstance(segment.get("end_ms"), int)
+            or segment["end_ms"] <= segment["start_ms"]
+            or not str(segment.get("speaker", "")).startswith("speaker_")
+        ):
+            raise SmokeError(f"SenseVoice ASR returned an invalid timeline/speaker segment: {segment}")
     save_json(
         out,
         {
             "input_audio": str(audio),
             "asr_text": asr_text,
             "asr_text_length": len(asr_text),
+            "segment_count": len(segments),
+            "speaker_count": len(speakers),
             "task": payload,
         },
     )
-    print(f"[smoke] qwen-asr text prefix={asr_text[:120]!r} length={len(asr_text)} saved {out}")
+    print(
+        f"[smoke] sensevoice-asr text prefix={asr_text[:120]!r} length={len(asr_text)} "
+        f"segments={len(segments)} speakers={len(speakers)} saved {out}"
+    )
 
 
 
@@ -830,7 +851,7 @@ def post_openai_transcription_multipart(audio: Path, timeout: float) -> tuple[in
     boundary = f"----local-smoke-{int(time.time() * 1000)}"
     body = encode_multipart(
         boundary,
-        fields={"model": "qwen3-asr-0.6b-onnx"},
+        fields={"model": "sensevoice-small-onnx"},
         files={"file": (audio.name, audio.read_bytes(), "audio/wav")},
     )
     headers = {
@@ -1057,15 +1078,15 @@ def transcribe_audio_generic(audio: Path, timestamp: str, timeout: float) -> dic
     create = rpc_create_task(
         {
             "task_kind": "asr.transcribe",
-            "model": "qwen3-asr-0.6b-onnx",
+            "model": "sensevoice-small-onnx",
             "files": [{"name": audio.name, "mime": "audio/wav", "role": "audio", "required": True}],
             "params": {},
         },
-        f"smoke-indextts-asr-qwen-asr-create-{timestamp}",
+        f"smoke-indextts-asr-sensevoice-create-{timestamp}",
         timeout,
     )
     upload_file(first_upload(create, "audio")["upload_url"], audio, "audio/wav", timeout)
-    return rpc_start_task(create["task_id"], f"smoke-indextts-asr-qwen-asr-start-{timestamp}", timeout)
+    return rpc_start_task(create["task_id"], f"smoke-indextts-asr-sensevoice-start-{timestamp}", timeout)
 
 
 def extract_tts_audio_ref(payload: dict) -> dict:

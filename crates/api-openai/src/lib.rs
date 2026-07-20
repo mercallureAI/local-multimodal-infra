@@ -269,7 +269,7 @@ async fn transcriptions(
         InferenceInput::AsrTranscribe { audio },
     );
     match state.service.dispatch(task).await {
-        Ok(InferenceOutput::AsrTranscription { text }) => {
+        Ok(InferenceOutput::AsrTranscription { text, .. }) => {
             (StatusCode::OK, Json(json!(TranscriptionResponse { text }))).into_response()
         }
         Ok(other) => error_response(
@@ -365,11 +365,11 @@ mod tests {
     impl OpenAiApi for RecordingOpenAiApi {
         async fn list_models(&self) -> Result<Vec<ModelSpec>> {
             Ok(vec![ModelSpec {
-                id: "qwen3-asr-0.6b-onnx".to_string(),
-                name: "Qwen3 ASR 0.6B ONNX INT4".to_string(),
+                id: "sensevoice-small-onnx".to_string(),
+                name: "FunASR SenseVoiceSmall ONNX".to_string(),
                 enabled: true,
                 task_kinds: vec![TaskKind::AsrTranscribe],
-                adapter: AdapterKind::QwenAsr,
+                adapter: AdapterKind::SenseVoiceAsr,
                 backend: BackendKind::Ort,
                 artifacts: Vec::new(),
                 runtime: RuntimePolicy {
@@ -389,6 +389,8 @@ mod tests {
             Ok(match kind {
                 TaskKind::AsrTranscribe => InferenceOutput::AsrTranscription {
                     text: "ok".to_string(),
+                    segments: Vec::new(),
+                    speakers: Vec::new(),
                 },
                 TaskKind::TtsSynthesize => InferenceOutput::TtsAudio {
                     audio: FileRef {
@@ -430,7 +432,7 @@ mod tests {
                     .uri("/v1/audio/transcriptions")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"model":"qwen3-asr-0.6b-onnx","path":"./audio.wav"}"#,
+                        r#"{"model":"sensevoice-small-onnx","path":"./audio.wav"}"#,
                     ))
                     .expect("request"),
             )
@@ -450,7 +452,7 @@ mod tests {
         let tasks = service.tasks.lock().expect("tasks lock");
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].kind, TaskKind::AsrTranscribe);
-        assert_eq!(tasks[0].model_id.as_deref(), Some("qwen3-asr-0.6b-onnx"));
+        assert_eq!(tasks[0].model_id.as_deref(), Some("sensevoice-small-onnx"));
         match &tasks[0].input {
             InferenceInput::AsrTranscribe { audio } => {
                 assert_eq!(

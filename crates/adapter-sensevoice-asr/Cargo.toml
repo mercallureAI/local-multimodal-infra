@@ -1,5 +1,5 @@
 [package]
-name = "local-adapter-qwen-asr"
+name = "local-adapter-sensevoice-asr"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
@@ -11,16 +11,15 @@ directml = ["local-backend-ort/directml"]
 tensorrt = ["local-backend-ort/tensorrt"]
 
 [dependencies]
-half = "2"
 hound.workspace = true
+kaldi-native-fbank = "0.1.0"
 local-backend-ort = { path = "../backend-ort" }
 local-core = { path = "../core" }
 local-error = { path = "../error" }
 local-files = { path = "../files" }
-rustfft = "6"
 serde.workspace = true
 serde_json.workspace = true
-tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+serde_yaml.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

@@ -66,7 +66,7 @@ impl WorkerState {
             supported_backends: vec![BackendKind::Ort],
             supported_adapters: vec![
                 AdapterKind::Yolo,
-                AdapterKind::QwenAsr,
+                AdapterKind::SenseVoiceAsr,
                 AdapterKind::IndexTts,
                 AdapterKind::E5Embedding,
                 AdapterKind::MmarcoReranker,
