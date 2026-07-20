@@ -42,6 +42,7 @@
 - 标准 MCP Streamable HTTP：`http://127.0.0.1:17892/mcp/admin`、`http://127.0.0.1:17892/mcp/infer`
 - Admin MCP/RPC：必须配置 `LOCAL_ADMIN_TOKEN`，客户端使用 `Authorization: Bearer <token>` 或 `x-local-admin-token`
 - 推理 MCP/RPC：`LOCAL_MCP_INFER_TOKENS=token-a,token-b`；未配置或为空时不鉴权，配置后客户端必须提供列表中的任一密钥，可使用 Bearer 或 `x-local-infer-token`
+- 模型管理：`list_models` / `get_model` 返回 `downloaded` 与 `download_state`；`download_model` 只提交异步任务，同模型在下载中或已完整下载时会去重；使用 `get_model_download_status` 查询模型及逐文件状态。
 - Worker: `http://127.0.0.1:17891`
 
 外部 Agent 推荐使用“创建任务、上传文件、等待结果”的方式接入，这样不需要共享宿主机文件路径。

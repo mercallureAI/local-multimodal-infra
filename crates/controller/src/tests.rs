@@ -1,14 +1,95 @@
 use super::*;
 use axum::{body::Bytes, http::HeaderMap, routing::post, Router};
 use local_core::{
-    AdapterKind, BackendKind, DeviceSpec, FileRef, InferenceInput, LoadPolicy, ResourceRequirement,
-    ResourceSnapshot, RuntimePolicy, TaskKind,
+    AdapterKind, ArtifactKind, BackendKind, DeviceSpec, FileRef, InferenceInput, LoadPolicy,
+    ModelArtifact, ResourceRequirement, ResourceSnapshot, RuntimePolicy, TaskKind,
 };
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
 use uuid::Uuid;
+
+#[tokio::test]
+async fn admin_model_download_is_async_queryable_and_deduplicated() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = dir.path().join("source/model.onnx");
+    fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir");
+    fs::write(&source, b"onnx").expect("write source");
+    let store = SqliteModelStore::new(dir.path().join("data/local.db"), dir.path().join("models"))
+        .expect("store");
+    let mut spec = test_model();
+    spec.artifacts = vec![ModelArtifact {
+        kind: ArtifactKind::Local,
+        path: source,
+        source_path: None,
+        sha256: None,
+        url: None,
+        repo_id: None,
+        revision: None,
+        files: Vec::new(),
+        allow_patterns: Vec::new(),
+        metadata: BTreeMap::new(),
+    }];
+    let spec = store.upsert_model(spec).expect("upsert model");
+    let controller =
+        ControllerState::with_store(ModelRegistry::from_models(vec![spec.clone()]), store);
+
+    let before = AdminApi::get_model(&controller, &spec.id)
+        .await
+        .expect("model info before download");
+    assert!(!before.downloaded);
+    assert_eq!(before.download_state, DownloadState::NotStarted);
+
+    let queued = AdminApi::download_model(&controller, &spec.id)
+        .await
+        .expect("queue download");
+    assert!(queued.accepted);
+    assert!(!queued.deduplicated);
+    assert_eq!(queued.status.state, DownloadState::Downloading);
+
+    let duplicate = AdminApi::download_model(&controller, &spec.id)
+        .await
+        .expect("deduplicate active download");
+    assert!(!duplicate.accepted);
+    assert!(duplicate.deduplicated);
+    assert!(!duplicate.status.downloaded);
+    assert_eq!(duplicate.status.state, DownloadState::Downloading);
+
+    let update_error = AdminApi::upsert_model(&controller, spec.clone())
+        .await
+        .expect_err("active model download must serialize model updates");
+    assert!(update_error
+        .to_string()
+        .contains("while its artifacts are downloading"));
+
+    let status = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let status = AdminApi::get_model_download_status(&controller, &spec.id)
+                .await
+                .expect("download status");
+            if status.downloaded {
+                break status;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background download timeout");
+    assert_eq!(status.state, DownloadState::Downloaded);
+
+    let completed_duplicate = AdminApi::download_model(&controller, &spec.id)
+        .await
+        .expect("deduplicate completed download");
+    assert!(!completed_duplicate.accepted);
+    assert!(completed_duplicate.deduplicated);
+
+    let after = AdminApi::list_models(&controller)
+        .await
+        .expect("model list after download");
+    assert!(after[0].downloaded);
+    assert_eq!(after[0].download_state, DownloadState::Downloaded);
+}
 
 #[tokio::test]
 async fn mcp_dispatch_forwards_to_registered_worker_internal_infer() {

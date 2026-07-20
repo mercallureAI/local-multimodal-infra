@@ -228,6 +228,10 @@ impl StandardMcpServer {
             "download_model" => Ok(json!(
                 AdminApi::download_model(&self.state, required_id_value(&arguments)).await?
             )),
+            "get_model_download_status" => Ok(json!(
+                AdminApi::get_model_download_status(&self.state, required_id_value(&arguments))
+                    .await?
+            )),
             "enable_model" => Ok(json!(
                 AdminApi::enable_model(&self.state, required_id_value(&arguments)).await?
             )),
@@ -264,6 +268,7 @@ impl McpAccess {
                     | "add_model"
                     | "upsert_model"
                     | "download_model"
+                    | "get_model_download_status"
                     | "enable_model"
                     | "disable_model"
                     | "list_nodes"
@@ -617,7 +622,12 @@ fn tool_definitions(access: McpAccess) -> Vec<Tool> {
         ),
         tool(
             "download_model",
-            "Download or materialize artifacts for a model id/model_id.",
+            "Queue an asynchronous artifact download for a model. Concurrent and already-complete requests are deduplicated.",
+            id_schema(),
+        ),
+        tool(
+            "get_model_download_status",
+            "Return aggregate and per-artifact local download status for a model id/model_id.",
             id_schema(),
         ),
         tool(

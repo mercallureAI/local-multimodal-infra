@@ -42,6 +42,7 @@ Default service addresses:
 - Standard MCP Streamable HTTP: `http://127.0.0.1:17892/mcp/admin`, `http://127.0.0.1:17892/mcp/infer`
 - Admin MCP/RPC requires `LOCAL_ADMIN_TOKEN`; send it as `Authorization: Bearer <token>` or `x-local-admin-token`
 - Inference MCP/RPC uses optional `LOCAL_MCP_INFER_TOKENS=token-a,token-b`; an empty/unset list leaves inference open, while a non-empty list requires any one listed token via Bearer or `x-local-infer-token`
+- Model administration: `list_models` / `get_model` include `downloaded` and `download_state`; `download_model` queues background work and deduplicates both active and already-complete model downloads; use `get_model_download_status` for aggregate and per-file state.
 - Worker: `http://127.0.0.1:17891`
 
 External agents should generally create a task, upload files, and wait for the result. This avoids sharing host file paths with the agent.

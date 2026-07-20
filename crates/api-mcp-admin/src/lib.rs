@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 use axum::{extract::State, routing::post, Json, Router};
-use local_core::{AssetListQuery, AssetListResponse, DownloadStatus, ModelSpec, NodeStatus};
+use local_core::{
+    AssetListQuery, AssetListResponse, DownloadModelResponse, ModelDownloadStatus, ModelInfo,
+    ModelSpec, NodeStatus,
+};
 use local_error::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -8,10 +11,11 @@ use std::sync::Arc;
 
 #[async_trait]
 pub trait AdminApi: Send + Sync + 'static {
-    async fn list_models(&self) -> Result<Vec<ModelSpec>>;
-    async fn get_model(&self, id: &str) -> Result<ModelSpec>;
+    async fn list_models(&self) -> Result<Vec<ModelInfo>>;
+    async fn get_model(&self, id: &str) -> Result<ModelInfo>;
     async fn upsert_model(&self, spec: ModelSpec) -> Result<ModelSpec>;
-    async fn download_model(&self, id: &str) -> Result<Vec<DownloadStatus>>;
+    async fn download_model(&self, id: &str) -> Result<DownloadModelResponse>;
+    async fn get_model_download_status(&self, id: &str) -> Result<ModelDownloadStatus>;
     async fn enable_model(&self, id: &str) -> Result<ModelSpec>;
     async fn disable_model(&self, id: &str) -> Result<ModelSpec>;
     async fn list_nodes(&self) -> Result<Vec<NodeStatus>>;
@@ -80,6 +84,11 @@ async fn handle_json_rpc(
         "download_model" => state
             .service
             .download_model(required_id(&req.params))
+            .await
+            .map(|v| json!(v)),
+        "get_model_download_status" => state
+            .service
+            .get_model_download_status(required_id(&req.params))
             .await
             .map(|v| json!(v)),
         "enable_model" => state
@@ -155,16 +164,17 @@ mod tests {
     #[derive(Default)]
     struct RecordingAdminApi {
         list_models_calls: AtomicUsize,
+        download_status_calls: AtomicUsize,
     }
 
     #[async_trait::async_trait]
     impl AdminApi for RecordingAdminApi {
-        async fn list_models(&self) -> Result<Vec<ModelSpec>> {
+        async fn list_models(&self) -> Result<Vec<ModelInfo>> {
             self.list_models_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Vec::new())
         }
 
-        async fn get_model(&self, id: &str) -> Result<ModelSpec> {
+        async fn get_model(&self, id: &str) -> Result<ModelInfo> {
             Err(local_error::InfraError::Unsupported(format!(
                 "unexpected get_model in test: {id}"
             )))
@@ -176,10 +186,21 @@ mod tests {
             ))
         }
 
-        async fn download_model(&self, id: &str) -> Result<Vec<DownloadStatus>> {
+        async fn download_model(&self, id: &str) -> Result<DownloadModelResponse> {
             Err(local_error::InfraError::Unsupported(format!(
                 "unexpected download_model in test: {id}"
             )))
+        }
+
+        async fn get_model_download_status(&self, id: &str) -> Result<ModelDownloadStatus> {
+            self.download_status_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ModelDownloadStatus {
+                model_id: id.to_string(),
+                downloaded: false,
+                state: local_core::DownloadState::NotStarted,
+                artifacts: Vec::new(),
+                updated_at: None,
+            })
         }
 
         async fn enable_model(&self, id: &str) -> Result<ModelSpec> {
@@ -237,6 +258,36 @@ mod tests {
         assert!(payload.get("error").is_none(), "{payload:?}");
         assert_eq!(payload.get("result"), Some(&json!([])));
         assert_eq!(service.list_models_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn canonical_rpc_admin_route_exposes_download_status() {
+        let service = Arc::new(RecordingAdminApi::default());
+        let app = router(AdminApiState {
+            service: service.clone(),
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/rpc/admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":2,"method":"get_model_download_status","params":{"id":"m"}}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: Value = serde_json::from_slice(&body).expect("json response");
+
+        assert!(payload.get("error").is_none(), "{payload:?}");
+        assert_eq!(payload["result"]["model_id"], "m");
+        assert_eq!(payload["result"]["downloaded"], false);
+        assert_eq!(service.download_status_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

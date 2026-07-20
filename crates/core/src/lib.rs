@@ -361,6 +361,33 @@ pub struct DownloadStatus {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelDownloadStatus {
+    pub model_id: String,
+    pub downloaded: bool,
+    pub state: DownloadState,
+    #[serde(default)]
+    pub artifacts: Vec<DownloadStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelInfo {
+    #[serde(flatten)]
+    pub spec: ModelSpec,
+    pub downloaded: bool,
+    pub download_state: DownloadState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadModelResponse {
+    pub accepted: bool,
+    pub deduplicated: bool,
+    #[serde(flatten)]
+    pub status: ModelDownloadStatus,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimePolicy {
     #[serde(default)]

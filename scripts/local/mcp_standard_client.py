@@ -40,6 +40,7 @@ ADMIN_TOOLS = {
     "add_model",
     "upsert_model",
     "download_model",
+    "get_model_download_status",
     "enable_model",
     "disable_model",
     "list_nodes",
@@ -161,6 +162,18 @@ async def run(
                 list_nodes_result = await call_tool_checked(admin_session, "list_nodes", {})
                 list_assets_result = await call_tool_checked(admin_session, "list_assets", {})
                 models = list_models_result if isinstance(list_models_result, list) else []
+                for model in models:
+                    if not isinstance(model, dict) or "downloaded" not in model or "download_state" not in model:
+                        raise RuntimeError(f"MCP list_models entry is missing local download state: {model!r}")
+                model_download_status = None
+                if models:
+                    model_id = models[0].get("id")
+                    if model_id:
+                        model_download_status = await call_tool_checked(
+                            admin_session,
+                            "get_model_download_status",
+                            {"id": model_id},
+                        )
                 async with create_mcp_http_client(infer_headers) as infer_http:
                     async with streamable_http_client(infer_url, http_client=infer_http) as (infer_read, infer_write, *_):
                         async with ClientSession(infer_read, infer_write) as infer_session:
@@ -188,6 +201,7 @@ async def run(
                                 "admin_tools": admin_tools,
                                 "infer_tools": infer_tools,
                                 "list_models": list_models_result,
+                                "model_download_status": model_download_status,
                                 "get_cluster_status": cluster_status_result,
                                 "list_nodes": list_nodes_result,
                                 "list_assets": list_assets_result,

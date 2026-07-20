@@ -1,13 +1,14 @@
 use chrono::Utc;
 use local_core::{
     ArtifactKind, DownloadState, DownloadStatus, InferenceOutput, InferenceTask, JobState,
-    ModelArtifact, ModelSpec, NodeStatus, TaskStatus,
+    ModelArtifact, ModelDownloadStatus, ModelSpec, NodeStatus, TaskStatus,
 };
 use local_error::{InfraError, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     fs,
     io::Write,
     path::{Component, Path, PathBuf},
@@ -134,14 +135,40 @@ impl SqliteModelStore {
 
     fn write_model(&self, spec: ModelSpec) -> Result<ModelSpec> {
         let spec = self.normalize_model_spec(spec)?;
-        let conn = self.conn()?;
+        let mut conn = self.conn()?;
         let json = serde_json::to_string(&spec)?;
-        conn.execute(
+        let transaction = conn.transaction().map_err(sql_err)?;
+        let existing_json = transaction
+            .query_row(
+                "SELECT spec_json FROM models WHERE id = ?1",
+                params![spec.id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        let artifacts_changed = existing_json
+            .map(|existing_json| -> Result<bool> {
+                let existing: ModelSpec = serde_json::from_str(&existing_json)?;
+                Ok(serde_json::to_value(existing.artifacts)?
+                    != serde_json::to_value(&spec.artifacts)?)
+            })
+            .transpose()?
+            .unwrap_or(false);
+        if artifacts_changed {
+            transaction
+                .execute(
+                    "DELETE FROM artifact_downloads WHERE model_id = ?1",
+                    params![spec.id],
+                )
+                .map_err(sql_err)?;
+        }
+        transaction.execute(
             "INSERT INTO models (id, enabled, spec_json, updated_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled, spec_json=excluded.spec_json, updated_at=excluded.updated_at",
             params![spec.id, bool_to_i64(spec.enabled), json, Utc::now().to_rfc3339()],
         )
         .map_err(sql_err)?;
+        transaction.commit().map_err(sql_err)?;
         Ok(spec)
     }
 
@@ -288,6 +315,10 @@ impl SqliteModelStore {
 
     pub async fn download_model(&self, spec: &ModelSpec) -> Result<Vec<DownloadStatus>> {
         let spec = self.write_model(spec.clone())?;
+        self.download_model_artifacts(&spec).await
+    }
+
+    pub async fn download_model_artifacts(&self, spec: &ModelSpec) -> Result<Vec<DownloadStatus>> {
         let mut statuses = Vec::new();
         for (index, artifact) in spec.artifacts.iter().enumerate() {
             match artifact.kind {
@@ -303,6 +334,15 @@ impl SqliteModelStore {
                         ))
                     })?;
                     let key = format!("url:{index}");
+                    if let Some(status) = self.reusable_download_status(
+                        &spec.id,
+                        &key,
+                        &artifact.path,
+                        artifact.sha256.as_deref(),
+                    )? {
+                        statuses.push(status);
+                        continue;
+                    }
                     self.status(
                         &spec.id,
                         key.clone(),
@@ -332,8 +372,11 @@ impl SqliteModelStore {
                     let revision = artifact.revision.as_deref().unwrap_or("main");
                     let files = if artifact.files.is_empty() && !artifact.allow_patterns.is_empty()
                     {
-                        self.hf_files_for_patterns(repo_id, revision, &artifact.allow_patterns)
-                            .await?
+                        let files = self
+                            .hf_files_for_patterns(repo_id, revision, &artifact.allow_patterns)
+                            .await?;
+                        self.delete_download_status(&spec.id, &hf_metadata_key(index))?;
+                        files
                     } else {
                         artifact.files.clone()
                     };
@@ -346,6 +389,15 @@ impl SqliteModelStore {
                     for file in files {
                         let target = hf_target_path(artifact, &file);
                         let key = format!("hf:{index}:{file}");
+                        if let Some(status) = self.reusable_download_status(
+                            &spec.id,
+                            &key,
+                            &target,
+                            artifact.sha256.as_deref(),
+                        )? {
+                            statuses.push(status);
+                            continue;
+                        }
                         self.status(
                             &spec.id,
                             key.clone(),
@@ -364,6 +416,260 @@ impl SqliteModelStore {
             }
         }
         Ok(statuses)
+    }
+
+    pub fn prepare_model_download(&self, spec: &ModelSpec) -> Result<ModelDownloadStatus> {
+        let spec = self.write_model(spec.clone())?;
+        for expected in expected_downloads(&spec) {
+            if self
+                .reusable_download_status(
+                    &spec.id,
+                    &expected.artifact,
+                    &expected.path,
+                    expected.sha256.as_deref(),
+                )?
+                .is_some()
+            {
+                continue;
+            }
+            self.status(
+                &spec.id,
+                expected.artifact,
+                DownloadState::Downloading,
+                Some(expected.path),
+                expected.sha256,
+                Some("download queued".to_string()),
+            )?;
+        }
+        for (index, artifact) in spec.artifacts.iter().enumerate() {
+            if matches!(artifact.kind, ArtifactKind::HuggingFace)
+                && artifact.files.is_empty()
+                && !artifact.allow_patterns.is_empty()
+            {
+                self.status(
+                    &spec.id,
+                    hf_metadata_key(index),
+                    DownloadState::Downloading,
+                    Some(artifact.path.clone()),
+                    artifact.sha256.clone(),
+                    Some("resolving Hugging Face allow_patterns".to_string()),
+                )?;
+            }
+        }
+        self.model_download_status(&spec)
+    }
+
+    pub fn fail_active_model_download(&self, model_id: &str, error: &str) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE artifact_downloads SET state = 'failed', message = ?2, updated_at = ?3 WHERE model_id = ?1 AND state = 'downloading'",
+            params![model_id, error, Utc::now().to_rfc3339()],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
+
+    pub fn model_download_status(&self, spec: &ModelSpec) -> Result<ModelDownloadStatus> {
+        let mut recorded = self
+            .download_statuses(&spec.id)?
+            .into_iter()
+            .map(|status| (status.artifact.clone(), status))
+            .collect::<BTreeMap<_, _>>();
+        let mut artifacts = Vec::new();
+
+        for expected in expected_downloads(spec) {
+            let recorded_status = recorded.remove(&expected.artifact).filter(|status| {
+                status.path.as_ref() == Some(&expected.path) && status.sha256 == expected.sha256
+            });
+            let status = match recorded_status {
+                Some(status) => refresh_recorded_status(status),
+                None if expected.path.is_file() && expected.sha256.is_some() => {
+                    let expected_sha256 = expected.sha256.as_deref().expect("sha256 checked");
+                    let actual = sha256_file(&expected.path)?;
+                    let (state, message) = if actual.eq_ignore_ascii_case(expected_sha256) {
+                        (
+                            DownloadState::Downloaded,
+                            format!("existing artifact verified with sha256 {actual}"),
+                        )
+                    } else {
+                        (
+                            DownloadState::Failed,
+                            format!(
+                                "artifact sha256 mismatch: expected {expected_sha256}, got {actual}"
+                            ),
+                        )
+                    };
+                    DownloadStatus {
+                        model_id: spec.id.clone(),
+                        artifact: expected.artifact,
+                        state,
+                        path: Some(expected.path),
+                        sha256: expected.sha256,
+                        message: Some(message),
+                        updated_at: Utc::now(),
+                    }
+                }
+                None if matches!(expected.kind, ArtifactKind::Local) && expected.path.exists() => {
+                    let (state, message) = match expected.sha256.as_deref() {
+                        Some(_) => (
+                            DownloadState::Failed,
+                            "cannot verify sha256 for a local directory artifact".to_string(),
+                        ),
+                        None => (
+                            DownloadState::Downloaded,
+                            "local artifact already exists".to_string(),
+                        ),
+                    };
+                    DownloadStatus {
+                        model_id: spec.id.clone(),
+                        artifact: expected.artifact,
+                        state,
+                        path: Some(expected.path),
+                        sha256: expected.sha256,
+                        message: Some(message),
+                        updated_at: Utc::now(),
+                    }
+                }
+                None => DownloadStatus {
+                    model_id: spec.id.clone(),
+                    artifact: expected.artifact,
+                    state: DownloadState::NotStarted,
+                    path: Some(expected.path),
+                    sha256: expected.sha256,
+                    message: Some("artifact has no matching completed download record".to_string()),
+                    updated_at: Utc::now(),
+                },
+            };
+            artifacts.push(status);
+        }
+        for (prefix, sha256) in dynamic_hf_status_prefixes(spec) {
+            artifacts.extend(
+                recorded
+                    .iter()
+                    .filter(|(artifact, status)| {
+                        artifact.starts_with(&prefix) && status.sha256 == sha256
+                    })
+                    .map(|(_, status)| refresh_recorded_status(status.clone())),
+            );
+        }
+        artifacts.sort_by(|left, right| left.artifact.cmp(&right.artifact));
+        artifacts.dedup_by(|left, right| left.artifact == right.artifact);
+
+        let downloaded = !artifacts.is_empty()
+            && artifacts
+                .iter()
+                .all(|status| matches!(status.state, DownloadState::Downloaded));
+        let state = if downloaded {
+            DownloadState::Downloaded
+        } else if artifacts
+            .iter()
+            .any(|status| matches!(status.state, DownloadState::Downloading))
+        {
+            DownloadState::Downloading
+        } else if artifacts
+            .iter()
+            .any(|status| matches!(status.state, DownloadState::Failed))
+        {
+            DownloadState::Failed
+        } else {
+            DownloadState::NotStarted
+        };
+        let updated_at = artifacts.iter().map(|status| status.updated_at).max();
+        Ok(ModelDownloadStatus {
+            model_id: spec.id.clone(),
+            downloaded,
+            state,
+            artifacts,
+            updated_at,
+        })
+    }
+
+    fn download_statuses(&self, model_id: &str) -> Result<Vec<DownloadStatus>> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT artifact, state, path, sha256, message, updated_at FROM artifact_downloads WHERE model_id = ?1 ORDER BY artifact",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![model_id], |row| {
+                let state: String = row.get(1)?;
+                let updated_at: String = row.get(5)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    state,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    updated_at,
+                ))
+            })
+            .map_err(sql_err)?;
+        let mut statuses = Vec::new();
+        for row in rows {
+            let (artifact, state, path, sha256, message, updated_at) = row.map_err(sql_err)?;
+            statuses.push(DownloadStatus {
+                model_id: model_id.to_string(),
+                artifact,
+                state: parse_download_state(&state)?,
+                path: path.map(PathBuf::from),
+                sha256,
+                message,
+                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)
+                    .map_err(|error| {
+                        InfraError::Backend(format!("invalid download timestamp: {error}"))
+                    })?
+                    .with_timezone(&Utc),
+            });
+        }
+        Ok(statuses)
+    }
+
+    fn delete_download_status(&self, model_id: &str, artifact: &str) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "DELETE FROM artifact_downloads WHERE model_id = ?1 AND artifact = ?2",
+            params![model_id, artifact],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
+
+    fn reusable_download_status(
+        &self,
+        model_id: &str,
+        artifact: &str,
+        target: &Path,
+        expected_sha256: Option<&str>,
+    ) -> Result<Option<DownloadStatus>> {
+        if !target.is_file() {
+            return Ok(None);
+        }
+        if let Some(expected) = expected_sha256 {
+            let actual = sha256_file(target)?;
+            if actual.eq_ignore_ascii_case(expected) {
+                return self
+                    .status(
+                        model_id,
+                        artifact.to_string(),
+                        DownloadState::Downloaded,
+                        Some(target.to_path_buf()),
+                        Some(expected.to_string()),
+                        Some(format!("existing artifact verified with sha256 {actual}")),
+                    )
+                    .map(Some);
+            }
+            return Ok(None);
+        }
+        Ok(self
+            .download_statuses(model_id)?
+            .into_iter()
+            .find(|status| {
+                status.artifact == artifact
+                    && matches!(status.state, DownloadState::Downloaded)
+                    && status.path.as_deref() == Some(target)
+                    && status.sha256.is_none()
+            }))
     }
 
     fn import_local_artifact(
@@ -535,6 +841,24 @@ impl SqliteModelStore {
         target: &Path,
         expected_sha256: Option<&str>,
     ) -> Result<DownloadStatus> {
+        if target.exists() {
+            let matches = match expected_sha256 {
+                Some(expected) if target.is_file() => {
+                    sha256_file(target)?.eq_ignore_ascii_case(expected)
+                }
+                Some(_) | None => false,
+            };
+            if matches {
+                return self.status(
+                    model_id,
+                    key,
+                    DownloadState::Downloaded,
+                    Some(target.to_path_buf()),
+                    expected_sha256.map(str::to_string),
+                    Some("artifact already exists locally; download skipped".to_string()),
+                );
+            }
+        }
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| InfraError::io(Some(parent.to_path_buf()), e))?;
@@ -581,10 +905,21 @@ impl SqliteModelStore {
                 );
             }
         }
-        let mut file =
-            fs::File::create(target).map_err(|e| InfraError::io(Some(target.to_path_buf()), e))?;
-        file.write_all(&bytes)
-            .map_err(|e| InfraError::io(Some(target.to_path_buf()), e))?;
+        let partial = partial_download_path(target)?;
+        let write_result = (|| -> Result<()> {
+            let mut file =
+                fs::File::create(&partial).map_err(|e| InfraError::io(Some(partial.clone()), e))?;
+            file.write_all(&bytes)
+                .map_err(|e| InfraError::io(Some(partial.clone()), e))?;
+            file.sync_all()
+                .map_err(|e| InfraError::io(Some(partial.clone()), e))?;
+            replace_download_target(&partial, target)?;
+            Ok(())
+        })();
+        if write_result.is_err() && partial.exists() {
+            let _ = fs::remove_file(&partial);
+        }
+        write_result?;
         let message = if expected_sha256.is_some() {
             Some(format!("downloaded and verified sha256 {actual}"))
         } else {
@@ -935,6 +1270,137 @@ fn state_name(state: &DownloadState) -> &'static str {
         DownloadState::Failed => "failed",
         DownloadState::Skipped => "skipped",
     }
+}
+
+fn parse_download_state(state: &str) -> Result<DownloadState> {
+    match state {
+        "not_started" => Ok(DownloadState::NotStarted),
+        "downloading" => Ok(DownloadState::Downloading),
+        "downloaded" => Ok(DownloadState::Downloaded),
+        "failed" => Ok(DownloadState::Failed),
+        "skipped" => Ok(DownloadState::Skipped),
+        other => Err(InfraError::Backend(format!(
+            "unknown artifact download state `{other}`"
+        ))),
+    }
+}
+
+struct ExpectedDownload {
+    artifact: String,
+    kind: ArtifactKind,
+    path: PathBuf,
+    sha256: Option<String>,
+}
+
+fn expected_downloads(spec: &ModelSpec) -> Vec<ExpectedDownload> {
+    let mut expected = Vec::new();
+    for (index, artifact) in spec.artifacts.iter().enumerate() {
+        match artifact.kind {
+            ArtifactKind::Local => expected.push(ExpectedDownload {
+                artifact: format!("local:{index}"),
+                kind: artifact.kind,
+                path: artifact.path.clone(),
+                sha256: artifact.sha256.clone(),
+            }),
+            ArtifactKind::Url => expected.push(ExpectedDownload {
+                artifact: format!("url:{index}"),
+                kind: artifact.kind,
+                path: artifact.path.clone(),
+                sha256: artifact.sha256.clone(),
+            }),
+            ArtifactKind::HuggingFace => {
+                expected.extend(artifact.files.iter().map(|file| ExpectedDownload {
+                    artifact: format!("hf:{index}:{file}"),
+                    kind: artifact.kind,
+                    path: hf_target_path(artifact, file),
+                    sha256: artifact.sha256.clone(),
+                }));
+            }
+        }
+    }
+    expected
+}
+
+fn dynamic_hf_status_prefixes(spec: &ModelSpec) -> Vec<(String, Option<String>)> {
+    spec.artifacts
+        .iter()
+        .enumerate()
+        .filter(|(_, artifact)| {
+            matches!(artifact.kind, ArtifactKind::HuggingFace)
+                && artifact.files.is_empty()
+                && !artifact.allow_patterns.is_empty()
+        })
+        .map(|(index, artifact)| (format!("hf:{index}:"), artifact.sha256.clone()))
+        .collect()
+}
+
+fn hf_metadata_key(index: usize) -> String {
+    format!("hf:{index}:__metadata__")
+}
+
+fn partial_download_path(target: &Path) -> Result<PathBuf> {
+    let file_name = target.file_name().ok_or_else(|| {
+        InfraError::Config(format!(
+            "download target has no file name: {}",
+            target.display()
+        ))
+    })?;
+    let mut partial_name = file_name.to_os_string();
+    partial_name.push(".part");
+    Ok(target.with_file_name(partial_name))
+}
+
+fn replace_download_target(partial: &Path, target: &Path) -> Result<()> {
+    let backup = target.with_file_name({
+        let mut name = target
+            .file_name()
+            .ok_or_else(|| {
+                InfraError::Config(format!(
+                    "download target has no file name: {}",
+                    target.display()
+                ))
+            })?
+            .to_os_string();
+        name.push(".previous");
+        name
+    });
+    if !target.exists() {
+        fs::rename(partial, target)
+            .map_err(|error| InfraError::io(Some(target.to_path_buf()), error))?;
+        if backup.exists() {
+            let _ = fs::remove_file(backup);
+        }
+        return Ok(());
+    }
+    if backup.exists() {
+        fs::remove_file(&backup).map_err(|error| InfraError::io(Some(backup.clone()), error))?;
+    }
+    fs::rename(target, &backup)
+        .map_err(|error| InfraError::io(Some(target.to_path_buf()), error))?;
+    if let Err(error) = fs::rename(partial, target) {
+        let restore = fs::rename(&backup, target);
+        return match restore {
+            Ok(()) => Err(InfraError::io(Some(target.to_path_buf()), error)),
+            Err(restore_error) => Err(InfraError::Backend(format!(
+                "replace download target {} failed: {error}; restoring {} also failed: {restore_error}",
+                target.display(),
+                backup.display()
+            ))),
+        };
+    }
+    let _ = fs::remove_file(backup);
+    Ok(())
+}
+
+fn refresh_recorded_status(mut status: DownloadStatus) -> DownloadStatus {
+    if matches!(status.state, DownloadState::Downloaded)
+        && !status.path.as_ref().is_some_and(|path| path.exists())
+    {
+        status.state = DownloadState::NotStarted;
+        status.message = Some("recorded artifact is missing locally".to_string());
+        status.updated_at = Utc::now();
+    }
+    status
 }
 
 fn sql_err(error: rusqlite::Error) -> InfraError {

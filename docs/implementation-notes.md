@@ -157,7 +157,7 @@ Errors use:
 ```
 
 
-The API accepts core `ModelSpec` JSON, not MCP/OpenAI-specific schemas. `download_model` returns persisted per-artifact `DownloadStatus` values.
+The API accepts core `ModelSpec` JSON, not MCP/OpenAI-specific schemas. `list_models` and `get_model` add the computed `downloaded` and `download_state` fields without persisting those runtime fields into `ModelSpec`. `download_model` only queues background work and immediately returns `accepted`, `deduplicated`, and the aggregate status. Calls for the same model are deduplicated while a download is active, and calls for an already complete model do not start another task. Query `get_model_download_status` on either the admin MCP catalog or legacy `/rpc/admin` for aggregate and per-artifact state. A destination is reused only when it has a matching persisted completion record or passes its configured SHA-256 check; partial URL downloads are written to a side file and replaced only after the complete response is durable. Artifact configuration changes transactionally invalidate obsolete download rows, and successful files remain reusable when a failed multi-file download is retried.
 
 ## Standard MCP Streamable HTTP API
 

@@ -14,10 +14,11 @@ use local_api_mcp_infer::{InferenceApi, InferenceApiState};
 use local_api_openai::{OpenAiApi, OpenAiApiState};
 use local_core::{
     AssetKind, AssetListQuery, AssetRecord, AssetSignItem, AssetSignRequest, AssetSignResponse,
-    AssetSignedUrl, AssetUrlOperation, CreateTaskRequest, DownloadStatus, FileRef,
-    GenericTaskResult, GenericTaskState, InferenceInput, InferenceOutput, InferenceTask, JobState,
-    ModelSpec, NodeStatus, StartTaskRequest, TaskStatus, TaskUploadSlot, WaitTaskRequest,
-    WorkerHeartbeat, WorkerRegistration, WorkerRegistrationResponse,
+    AssetSignedUrl, AssetUrlOperation, CreateTaskRequest, DownloadModelResponse, DownloadState,
+    FileRef, GenericTaskResult, GenericTaskState, InferenceInput, InferenceOutput, InferenceTask,
+    JobState, ModelDownloadStatus, ModelInfo, ModelSpec, NodeStatus, StartTaskRequest, TaskStatus,
+    TaskUploadSlot, WaitTaskRequest, WorkerHeartbeat, WorkerRegistration,
+    WorkerRegistrationResponse,
 };
 use local_error::{InfraError, Result};
 use local_files::{asset_uri, normalize_asset_path, parse_asset_uri, AssetsStore};
@@ -27,8 +28,14 @@ use local_scheduler::Scheduler;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::{collections::BTreeMap, fs, io::Write, sync::Arc, time::Duration};
-use tokio::sync::RwLock;
+use std::{
+    collections::{BTreeMap, HashSet},
+    fs,
+    io::Write,
+    sync::Arc,
+    time::Duration,
+};
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 mod standard_mcp;
@@ -59,6 +66,7 @@ pub struct ControllerState {
     upload_secret: String,
     admin_token: Option<String>,
     mcp_infer_tokens: Vec<String>,
+    model_downloads: Arc<Mutex<HashSet<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -156,7 +164,30 @@ impl ControllerState {
             upload_secret,
             admin_token: options.admin_token,
             mcp_infer_tokens: options.mcp_infer_tokens,
+            model_downloads: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    async fn model_info(&self, spec: ModelSpec) -> Result<ModelInfo> {
+        let mut status = match &self.store {
+            Some(store) => store.model_download_status(&spec)?,
+            None => ModelDownloadStatus {
+                model_id: spec.id.clone(),
+                downloaded: false,
+                state: DownloadState::NotStarted,
+                artifacts: Vec::new(),
+                updated_at: None,
+            },
+        };
+        if self.model_downloads.lock().await.contains(&spec.id) {
+            status.downloaded = false;
+            status.state = DownloadState::Downloading;
+        }
+        Ok(ModelInfo {
+            spec,
+            downloaded: status.downloaded,
+            download_state: status.state,
+        })
     }
 
     pub fn app(self) -> Router {
@@ -1695,14 +1726,20 @@ fn percent_encode_path(value: &str) -> String {
 
 #[async_trait]
 impl AdminApi for ControllerState {
-    async fn list_models(&self) -> Result<Vec<ModelSpec>> {
-        Ok(self.registry.list().await)
+    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        let mut models = Vec::new();
+        for spec in self.registry.list().await {
+            models.push(self.model_info(spec).await?);
+        }
+        Ok(models)
     }
-    async fn get_model(&self, id: &str) -> Result<ModelSpec> {
-        self.registry
+    async fn get_model(&self, id: &str) -> Result<ModelInfo> {
+        let spec = self
+            .registry
             .get(id)
             .await
-            .ok_or_else(|| InfraError::NotFound(format!("model `{id}`")))
+            .ok_or_else(|| InfraError::NotFound(format!("model `{id}`")))?;
+        self.model_info(spec).await
     }
     async fn enable_model(&self, id: &str) -> Result<ModelSpec> {
         let spec = if let Some(store) = &self.store {
@@ -1723,21 +1760,108 @@ impl AdminApi for ControllerState {
         Ok(spec)
     }
     async fn upsert_model(&self, spec: ModelSpec) -> Result<ModelSpec> {
+        let active = self.model_downloads.lock().await;
+        if active.contains(&spec.id) {
+            return Err(InfraError::BadRequest(format!(
+                "model `{}` cannot be updated while its artifacts are downloading",
+                spec.id
+            )));
+        }
         let spec = if let Some(store) = &self.store {
             store.upsert_model(spec)?
         } else {
             spec
         };
         self.registry.upsert(spec.clone()).await;
+        drop(active);
         Ok(spec)
     }
-    async fn download_model(&self, id: &str) -> Result<Vec<DownloadStatus>> {
-        let spec = self.get_model(id).await?;
+    async fn download_model(&self, id: &str) -> Result<DownloadModelResponse> {
+        let mut active = self.model_downloads.lock().await;
+        let spec = self
+            .registry
+            .get(id)
+            .await
+            .ok_or_else(|| InfraError::NotFound(format!("model `{id}`")))?;
+        if spec.artifacts.is_empty() {
+            return Err(InfraError::Config(format!(
+                "model `{id}` has no artifacts to download"
+            )));
+        }
         let store = self
             .store
             .as_ref()
             .ok_or_else(|| InfraError::Config("model store is not configured".to_string()))?;
-        store.download_model(&spec).await
+        if active.contains(id) {
+            let mut status = store.model_download_status(&spec)?;
+            status.downloaded = false;
+            status.state = DownloadState::Downloading;
+            return Ok(DownloadModelResponse {
+                accepted: false,
+                deduplicated: true,
+                status,
+            });
+        }
+        let current = store.model_download_status(&spec)?;
+        if current.downloaded {
+            return Ok(DownloadModelResponse {
+                accepted: false,
+                deduplicated: true,
+                status: current,
+            });
+        }
+        active.insert(id.to_string());
+        let mut status = match store.prepare_model_download(&spec) {
+            Ok(status) => status,
+            Err(error) => {
+                active.remove(id);
+                return Err(error);
+            }
+        };
+        status.downloaded = false;
+        status.state = DownloadState::Downloading;
+        drop(active);
+
+        let store = store.clone();
+        let active = self.model_downloads.clone();
+        let model_id = id.to_string();
+        tokio::spawn(async move {
+            if let Err(error) = store.download_model_artifacts(&spec).await {
+                let message = format!("download failed: {error}");
+                if let Err(record_error) = store.fail_active_model_download(&model_id, &message) {
+                    tracing::error!(
+                        model_id = %model_id,
+                        error = %record_error,
+                        "failed to persist model download failure"
+                    );
+                }
+                tracing::error!(model_id = %model_id, error = %error, "model download failed");
+            }
+            active.lock().await.remove(&model_id);
+        });
+
+        Ok(DownloadModelResponse {
+            accepted: true,
+            deduplicated: false,
+            status,
+        })
+    }
+    async fn get_model_download_status(&self, id: &str) -> Result<ModelDownloadStatus> {
+        let spec = self
+            .registry
+            .get(id)
+            .await
+            .ok_or_else(|| InfraError::NotFound(format!("model `{id}`")))?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| InfraError::Config("model store is not configured".to_string()))?;
+        let mut status = store.model_download_status(&spec)?;
+        if self.model_downloads.lock().await.contains(id) {
+            status.downloaded = false;
+            status.state = DownloadState::Downloading;
+        }
+        Ok(status)
     }
     async fn list_nodes(&self) -> Result<Vec<NodeStatus>> {
         Ok(self.nodes.read().await.values().cloned().collect())
