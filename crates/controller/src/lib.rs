@@ -199,15 +199,7 @@ impl ControllerState {
             header_name: "x-local-admin-token",
             missing_configuration: true,
         };
-        let infer_auth = if self.mcp_infer_tokens.is_empty() {
-            standard_mcp::ApiAuth::Open
-        } else {
-            standard_mcp::ApiAuth::Required {
-                tokens: self.mcp_infer_tokens.clone(),
-                header_name: "x-local-infer-token",
-                missing_configuration: false,
-            }
-        };
+        let infer_auth = standard_mcp::ApiAuth::inference(&self.mcp_infer_tokens);
         let admin = local_api_mcp_admin::router(AdminApiState {
             service: admin_service,
         })
@@ -219,12 +211,19 @@ impl ControllerState {
             service: infer_service,
         })
         .layer(axum::middleware::from_fn_with_state(
+            infer_auth.clone(),
+            standard_mcp::authorize_api,
+        ));
+        let openai_models = local_api_openai::models_router(OpenAiApiState {
+            service: openai_service.clone(),
+        });
+        let openai_inference = local_api_openai::inference_router(OpenAiApiState {
+            service: openai_service,
+        })
+        .route_layer(axum::middleware::from_fn_with_state(
             infer_auth,
             standard_mcp::authorize_api,
         ));
-        let openai = local_api_openai::router(OpenAiApiState {
-            service: openai_service,
-        });
         Router::new()
             .route("/health", get(health))
             .route("/internal/workers/register", post(register_worker))
@@ -245,7 +244,8 @@ impl ControllerState {
             .with_state(self)
             .merge(admin)
             .merge(infer)
-            .merge(openai)
+            .merge(openai_models)
+            .merge(openai_inference)
     }
 
     pub async fn register_worker(

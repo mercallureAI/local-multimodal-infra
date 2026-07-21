@@ -21,15 +21,7 @@ impl ControllerState {
                 missing_configuration: true,
             },
         );
-        let infer_auth = if self.mcp_infer_tokens.is_empty() {
-            ApiAuth::Open
-        } else {
-            ApiAuth::Required {
-                tokens: self.mcp_infer_tokens.clone(),
-                header_name: "x-local-infer-token",
-                missing_configuration: false,
-            }
-        };
+        let infer_auth = ApiAuth::inference(&self.mcp_infer_tokens);
         let infer = standard_mcp_router("/mcp/infer", self, McpAccess::Infer, infer_auth);
         Router::new().merge(admin).merge(infer)
     }
@@ -68,6 +60,20 @@ pub(super) enum ApiAuth {
         header_name: &'static str,
         missing_configuration: bool,
     },
+}
+
+impl ApiAuth {
+    pub(super) fn inference(tokens: &[String]) -> Self {
+        if tokens.is_empty() {
+            Self::Open
+        } else {
+            Self::Required {
+                tokens: tokens.to_vec(),
+                header_name: "x-local-infer-token",
+                missing_configuration: false,
+            }
+        }
+    }
 }
 
 pub(super) async fn authorize_api(
@@ -931,6 +937,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn openai_inference_routes_use_inference_tokens() {
+        let state = test_state(Some("admin-secret"), &["infer-a", "infer-b"]);
+        let (base_url, server) = serve(state.app()).await;
+        let client = reqwest::Client::new();
+        let inference_paths = [
+            "/v1/audio/transcriptions",
+            "/v1/audio/speech",
+            "/v1/embeddings",
+            "/rerank",
+            "/v1/rerank",
+            "/v2/rerank",
+        ];
+
+        for path in inference_paths {
+            assert_eq!(
+                client
+                    .post(format!("{base_url}{path}"))
+                    .json(&json!({}))
+                    .send()
+                    .await
+                    .expect("OpenAI inference without token")
+                    .status(),
+                reqwest::StatusCode::UNAUTHORIZED,
+                "{path} must reject a missing inference token"
+            );
+            assert_eq!(
+                client
+                    .post(format!("{base_url}{path}"))
+                    .bearer_auth("not-listed")
+                    .json(&json!({}))
+                    .send()
+                    .await
+                    .expect("OpenAI inference with wrong token")
+                    .status(),
+                reqwest::StatusCode::UNAUTHORIZED,
+                "{path} must reject an unlisted inference token"
+            );
+            assert_ne!(
+                client
+                    .post(format!("{base_url}{path}"))
+                    .bearer_auth("infer-a")
+                    .json(&json!({}))
+                    .send()
+                    .await
+                    .expect("OpenAI inference with listed token")
+                    .status(),
+                reqwest::StatusCode::UNAUTHORIZED,
+                "{path} must accept a listed inference token"
+            );
+        }
+
+        assert_eq!(
+            client
+                .get(format!("{base_url}/v1/models"))
+                .send()
+                .await
+                .expect("OpenAI model list without token")
+                .status(),
+            reqwest::StatusCode::OK,
+            "/v1/models is a catalog route, not an inference route"
+        );
+        assert_eq!(
+            client
+                .get(format!("{base_url}/mcp/infer"))
+                .send()
+                .await
+                .expect("standard MCP path on controller port")
+                .status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "OpenAI route auth must not intercept unmatched controller paths"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn inference_auth_is_optional_but_admin_auth_is_not() {
         let state = test_state(None, &[]);
         let (base_url, server) = serve(state.app()).await;
@@ -947,6 +1028,16 @@ mod tests {
                 .expect("open infer")
                 .status(),
             reqwest::StatusCode::OK
+        );
+        assert_ne!(
+            client
+                .post(format!("{base_url}/v1/embeddings"))
+                .json(&json!({}))
+                .send()
+                .await
+                .expect("open OpenAI inference")
+                .status(),
+            reqwest::StatusCode::UNAUTHORIZED
         );
         assert_eq!(
             client

@@ -54,6 +54,7 @@ EMBEDDING_MODEL_ID = "multilingual-e5-small-onnx"
 RERANK_MODEL_ID = "mmarco-minilm-l12-onnx"
 ADMIN_TOKEN = "local-smoke-admin-token"
 INFER_TOKEN = "local-smoke-infer-token"
+INFER_AUTH_HEADERS = {"Authorization": f"Bearer {INFER_TOKEN}"}
 INDEXTTS_REQUIRED = [
     "IndexTTS_A.onnx",
     "IndexTTS_B.onnx",
@@ -444,7 +445,7 @@ def check_route_policy(timeout: float) -> dict:
 
 
 def check_auth_policy(timeout: float) -> dict:
-    """Assert all configured admin/inference RPC and MCP routes reject missing credentials."""
+    """Assert all configured admin, MCP/RPC, and OpenAI inference routes reject missing credentials."""
     rpc_body = json.dumps({"jsonrpc": "2.0", "id": "auth-policy", "method": "get_task", "params": {}}).encode(
         "utf-8"
     )
@@ -467,7 +468,28 @@ def check_auth_policy(timeout: float) -> dict:
         if status != 401:
             preview = body[:200].decode("utf-8", errors="replace")
             raise SmokeError(f"POST {url} without credentials must return 401; got HTTP {status}: {preview}")
-    print("[smoke] auth policy ok: configured admin/inference RPC and MCP routes rejected missing credentials")
+    for path in (
+        "/v1/audio/transcriptions",
+        "/v1/audio/speech",
+        "/v1/embeddings",
+        "/rerank",
+        "/v1/rerank",
+        "/v2/rerank",
+    ):
+        url = f"{CONTROLLER_URL}{path}"
+        status, body, _headers = raw_bytes_request(
+            "POST",
+            url,
+            b"{}",
+            {"Accept": "application/json", "Content-Type": "application/json"},
+            timeout,
+        )
+        check = {"method": "POST", "url": url, "expected_status": 401, "status": status, "ok": status == 401}
+        checks.append(check)
+        if status != 401:
+            preview = body[:200].decode("utf-8", errors="replace")
+            raise SmokeError(f"POST {url} without credentials must return 401; got HTTP {status}: {preview}")
+    print("[smoke] auth policy ok: configured admin and all MCP/RPC/OpenAI inference routes rejected missing credentials")
     return {"ok": True, "checks": checks}
 
 
@@ -707,6 +729,7 @@ def run_embedding(data_dir: Path, timestamp: str, timeout: float) -> None:
             "encoding_format": "float",
         },
         timeout,
+        INFER_AUTH_HEADERS,
     )
     if payload.get("object") != "list" or payload.get("model") != EMBEDDING_MODEL_ID:
         raise SmokeError(f"OpenAI embeddings response envelope mismatch: {payload}")
@@ -740,7 +763,7 @@ def run_rerank(data_dir: Path, timestamp: str, timeout: float) -> None:
         "top_n": 2,
     }
     payload = checked_json_request(
-        "POST", f"{CONTROLLER_URL}/v1/rerank", request, timeout
+        "POST", f"{CONTROLLER_URL}/v1/rerank", request, timeout, INFER_AUTH_HEADERS
     )
     if payload.get("model") != RERANK_MODEL_ID or not str(payload.get("id", "")).startswith("rerank-"):
         raise SmokeError(f"vLLM rerank response envelope mismatch: {payload}")
@@ -862,6 +885,7 @@ def post_openai_transcription_multipart(audio: Path, timeout: float) -> tuple[in
     headers = {
         "Accept": "application/json",
         "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Authorization": f"Bearer {INFER_TOKEN}",
     }
     return raw_request("POST", f"{CONTROLLER_URL}/v1/audio/transcriptions", body, headers, timeout)
 

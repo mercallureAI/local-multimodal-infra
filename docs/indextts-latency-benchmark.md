@@ -31,6 +31,7 @@ speech route. This exact shell sequence sends short-long-short-short:
 
 ```bash
 export REF_WAV=/absolute/path/to/reference-24k-mono.wav
+export INFER_TOKEN=one-token-from-LOCAL_MCP_INFER_TOKENS
 texts=(
   'A short warmed latency sample.'
   'This is the deliberately longer benchmark request. It should contain enough ordinary prose to exercise natural segmentation and sustained decoding while remaining identical in every measured cycle.'
@@ -40,6 +41,7 @@ texts=(
 for text in "${texts[@]}"; do
   curl --fail-with-body -sS http://127.0.0.1:17890/v1/audio/speech \
     -H 'content-type: application/json' \
+    -H "authorization: Bearer $INFER_TOKEN" \
     --data "$(jq -n --arg text "$text" --arg ref "$REF_WAV" \
       '{model:"indextts-1.5-onnx",input:$text,reference_path:$ref}')" >/dev/null
 done

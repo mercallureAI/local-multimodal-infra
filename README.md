@@ -1,246 +1,219 @@
 # local-multimodal-infra
 
-> 把本地算力变成 Agent 可调用的多模态服务。它提供本地 MCP Server 和 OpenAI-compatible API Server，让 Agent 能使用本地图片理解、语音识别、语音合成等能力。
+> 将本机或内网机器的 CPU / NVIDIA GPU 转换为 Agent 可调用的多模态推理服务。
 
 [English README](README.en.md)
 
-## 项目介绍
+## 定义
 
-`local-multimodal-infra` 是一个本地多模态算力网关。它的目标很简单：**把你本机或内网机器上的算力，转换成可轻易部署的模型能力，以最少配置暴露给 Agent**。
+`local-multimodal-infra` 是一套**本地多模态基础设施**。它统一管理模型、文件、任务和运行时，并通过标准 MCP、legacy JSON-RPC 与部分 OpenAI-compatible API 向 Agent 或应用提供能力。
 
-你可以把它理解为：
+项目采用 controller / worker 架构：
 
-- **Agent 的本地工具箱**：Agent 不需要关心模型怎么加载、文件放在哪里、任务在哪台机器上执行。
-- **标准 MCP Server**：运行在独立端口，使用官方 SDK 的 Streamable HTTP 协议。
-- **Legacy JSON-RPC API**：运行在 controller 端口，提供模型管理、文件上传、推理任务和结果查询。
-- **OpenAI-compatible API Server**：提供部分 OpenAI 风格接口，方便已有应用或 Agent 工作流接入。
-
-## 适合的场景
-
-- 让你的 Agent 调用本机或是闲置机器上的算力，实现一些多模态能力。
-- 把一台有 CPU/GPU/大内存的机器变成内网 Agent 可用的推理节点。
-- 希望图片、音频、模型工件留在本地，不交给云服务。
-- 需要一个本地 API Server 接入 Agent 框架。
-- 在有限的算力下，动态装卸不同的模型，以最大化生产力与性价比。
-- 想使用一个完整的可维护的多模态本地推理基础设施，而不是维护多个零散模型脚本。
-- 打造一个云端与本地协同的 Agent。
-
-## Agent 如何使用
-
-项目提供三类入口：
-
-| 入口 | 面向对象 | 用途 |
+| 组件 | 职责 | 默认地址 |
 | --- | --- | --- |
-| Legacy JSON-RPC API | Agent / 工具调用 | `POST /rpc/admin` 使用 `LOCAL_ADMIN_TOKEN`；`POST /rpc/infer` 在配置 `LOCAL_MCP_INFER_TOKENS` 后要求其中任一密钥。 |
-| 标准 MCP Server | Agent / 标准 MCP 客户端 | Admin：`http://127.0.0.1:17892/mcp/admin`；推理：`http://127.0.0.1:17892/mcp/infer`。 |
-| OpenAI-compatible API Server | 应用 / OpenAI 风格客户端 | 列出模型、语音识别、语音合成等有限兼容接口。 |
+| Controller | 模型与任务管理、文件上传、API、任务调度 | `http://127.0.0.1:17890` |
+| Standard MCP Server | 隔离的管理与推理工具目录 | `http://127.0.0.1:17892/mcp/admin`、`http://127.0.0.1:17892/mcp/infer` |
+| Worker | 加载 ONNX 模型并执行推理 | `http://127.0.0.1:17891` |
 
-默认服务地址：
+运行时数据统一存放在 `workdir`：
 
-- Controller / API Server / legacy JSON-RPC: `http://127.0.0.1:17890`
-- Legacy JSON-RPC：`POST /rpc/admin`、`POST /rpc/infer`
-- 标准 MCP Streamable HTTP：`http://127.0.0.1:17892/mcp/admin`、`http://127.0.0.1:17892/mcp/infer`
-- Admin MCP/RPC：必须配置 `LOCAL_ADMIN_TOKEN`，客户端使用 `Authorization: Bearer <token>` 或 `x-local-admin-token`
-- 推理 MCP/RPC：`LOCAL_MCP_INFER_TOKENS=token-a,token-b`；未配置或为空时不鉴权，配置后客户端必须提供列表中的任一密钥，可使用 Bearer 或 `x-local-infer-token`
-- 模型管理：`list_models` / `get_model` 返回 `downloaded` 与 `download_state`；`download_model` 只提交异步任务，同模型在下载中或已完整下载时会去重；使用 `get_model_download_status` 查询模型及逐文件状态。
-- Worker: `http://127.0.0.1:17891`
+- `workdir/models`：模型工件；
+- `workdir/data`：SQLite、上传文件、生成结果、日志与临时文件。
 
-外部 Agent 推荐使用“创建任务、上传文件、等待结果”的方式接入，这样不需要共享宿主机文件路径。
+模型和输入素材不会打包进镜像。本地配置默认绑定 loopback；当前 Docker Compose 会把 controller `17890` 和 worker `17891` 发布到宿主机所有接口，而 MCP `17892` 仅发布到 loopback。部署前应根据使用范围调整端口绑定，并同时配置鉴权和网络访问控制。
 
-## 当前能力状态
+## 提供的功能
 
-| 能力 | 状态 |
-| --- | --- |
-| 图片目标检测 | `yolo11n.onnx` |
-| 语音识别 | `sensevoice-small-onnx`（完整 FunASR 管线：FSMN-VAD、时间轴、CAM++ 说话人分离默认开启） |
-| 语音合成 | `indextts-1.5-onnx` |
-| 产物管理 | 轻量内网存储，统一管理发送给模型的素材与模型生成的产物 |
-| 模型管理 | 支持配置声明、下载、启用、禁用和状态查询。 |
-| 本地验证 | 提供 smoke harness 验证 Docker、服务和 API 调用链。 |
+### 推理能力
 
-SenseVoice 的 MCP/RPC 输出默认包含约 10 秒一段的 `timestamped_text`，格式为
-`[00:00:00.000] 一段文字 [00:00:10.000]`。`segments[].speaker` 标注每段
-发言人，`speakers[]` 汇总发言时长。直连 `asr_transcribe` 或通用任务的
-`params` 支持：
+| 能力 | 默认模型 | 状态 | 主要输出 |
+| --- | --- | --- | --- |
+| 图片目标检测 | `yolo11n.onnx` | 默认启用 | 目标类别、置信度、边界框 |
+| 语音识别 | `sensevoice-small-onnx` | 默认启用 | 文本、时间轴、语言、情绪、发言人 |
+| 语音合成 | `indextts-1.5-onnx` | 实验性，默认禁用 | WAV 音频 |
+| 文本向量 | `multilingual-e5-small-onnx` | 默认启用 | 384 维归一化向量 |
+| 文本重排 | `mmarco-minilm-l12-onnx` | 默认启用 | 文档相关性排序与分数 |
 
-- `timestamps=false`：关闭 `timestamped_text` 和时间轴段落；
-- `timestamp_granularity_sec=<1..120>`：调整目标时间轴粒度，默认 `10`；
-- `token_timestamps=true`：额外返回细粒度 `segments[].tokens`，默认关闭；
-- `speaker_diarization=false`：关闭说话人分离，默认开启。
+所有模型均通过 ONNX Runtime 运行。模型配置表达 CUDA 优先、CPU 回退；实际 provider 仍取决于构建方式、运行环境和具体模型算子支持情况。
 
-## 快速开始
+SenseVoice ASR 集成 FSMN-VAD 和 CAM++ 发言人识别，默认返回纯文本、约 10 秒粒度的 `timestamped_text`、`segments[].speaker` 和 `speakers[]`。可通过 `timestamps`、`timestamp_granularity_sec`、`token_timestamps`、`speaker_diarization` 调整或关闭这些结果。
 
-本项目提供了 Docker Compose ，可以快速开始使用，当然你也可以直接运行本地二进制。
+### 接入接口
+
+| 接口 | 用途 | 鉴权 |
+| --- | --- | --- |
+| `POST /rpc/admin` | legacy JSON-RPC 模型、节点与资产管理 | 必须配置 `LOCAL_ADMIN_TOKEN` |
+| `POST /rpc/infer` | legacy JSON-RPC 推理与通用任务 | 配置 `LOCAL_MCP_INFER_TOKENS` 后启用鉴权 |
+| `/mcp/admin` | 标准 MCP 管理工具 | 必须配置 `LOCAL_ADMIN_TOKEN` |
+| `/mcp/infer` | 标准 MCP 推理工具 | 配置 `LOCAL_MCP_INFER_TOKENS` 后启用鉴权 |
+| `/v1/models` | OpenAI-compatible 模型列表 | 无额外鉴权 |
+| `/v1/audio/transcriptions` | OpenAI-compatible ASR | `LOCAL_MCP_INFER_TOKENS` |
+| `/v1/audio/speech` | OpenAI-compatible TTS | `LOCAL_MCP_INFER_TOKENS` |
+| `/v1/embeddings` | OpenAI-compatible Embeddings | `LOCAL_MCP_INFER_TOKENS` |
+| `/rerank`、`/v1/rerank`、`/v2/rerank` | vLLM / Jina / Cohere 风格重排 | `LOCAL_MCP_INFER_TOKENS` |
+
+Admin 和所有 MCP、RPC、OpenAI-compatible 推理接口接受 `Authorization: Bearer <token>`；legacy JSON-RPC 与 OpenAI-compatible 推理也接受 `x-local-infer-token`，Admin 接口接受 `x-local-admin-token`。
+
+### 基础设施能力
+
+- 模型配置、异步下载、SHA-256 校验、下载状态查询与并发下载去重；
+- 模型启用、禁用、懒加载、并发限制和空闲卸载；
+- controller / worker 调度，以及 CPU / CUDA provider 选择与回退；
+- 签名上传 URL、任务输入、生成产物和本地资产管理；
+- 标准 MCP direct tools 与“创建任务 → 上传文件 → 启动 → 等待结果”的通用任务流程；
+- release、RPC、MCP 和真实模型调用链 smoke harness。
+
+## 快速部署
+
+### 1. 准备配置
+
+需要 Docker 与 Docker Compose。模型不会随镜像发布，首次启动后需要下载到 `workdir/models`。
 
 ```bash
 cp .env.example .env
-docker compose up --build
 ```
 
-使用 Docker Compose 启动后会得到：
+编辑 `.env`，至少替换以下占位值：
 
-- 一个 controller：对外提供 legacy JSON-RPC、标准 MCP Server 和 OpenAI-compatible API Server。
-- 一个 worker：负责加载模型并执行本地推理。
-- 一个本地目录 `./workdir`：保存模型、数据、上传文件和运行日志。
+```dotenv
+LOCAL_WORKER_REGISTRATION_TOKEN=replace-with-a-long-random-worker-registration-token
+LOCAL_UPLOAD_SIGNING_SECRET=replace-with-a-long-random-upload-signing-secret
+LOCAL_ADMIN_TOKEN=replace-with-a-long-random-admin-token
+LOCAL_MCP_INFER_TOKENS=
+LOCAL_PUBLIC_BASE_URL=http://127.0.0.1:17890
+```
 
-真实模型不会打包进镜像。首次启动后，需要通过管理接口下载默认模型，或提前把模型放入 `workdir/models`。
+`LOCAL_MCP_INFER_TOKENS` 为空时推理接口不鉴权；设置为逗号分隔的 token 后，MCP、JSON-RPC 和 OpenAI-compatible 推理接口均要求其中任意一个 token。
 
-### NVIDIA GPU Compose
+如服务仅供本机使用，建议把 Compose 中的 `17890:17890` 和 `17891:17891` 改为 `127.0.0.1:17890:17890`、`127.0.0.1:17891:17891`。`/v1/models`、健康检查和部分资产路由不属于推理鉴权范围，仍应使用网络访问控制保护 controller 端口。
 
-上面的默认命令仍然使用 CPU 编译，并且不会申请 GPU。NVIDIA 部署需要先安装
-较新的 NVIDIA 驱动和
-[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)，
-以及 Docker Compose，并确认前置条件：
+### 2. 启动 CPU 服务
 
 ```bash
-docker compose version
+docker compose up -d --build
+docker compose ps
+curl --fail http://127.0.0.1:17890/health
+```
+
+### 3. 启动 NVIDIA CUDA 服务
+
+CUDA 部署需要 NVIDIA 驱动、NVIDIA Container Toolkit 和可用的 `nvidia-smi`。当前镜像使用 CUDA 12 的 ONNX Runtime 包，支持 Linux x86_64 容器：
+
+```bash
 nvidia-smi
+ORT_CUDA_VERSION=12 docker compose -f docker-compose-nvidia.yml up -d --build
+docker compose -f docker-compose-nvidia.yml exec worker nvidia-smi
 ```
 
-然后运行：
+CUDA Compose 只向 worker 分配 GPU；controller 继续运行 CPU 镜像。`/health` 只表示服务可用，不能证明某个模型已经在 CUDA 上完成推理。
+
+### 4. 下载模型
+
+先查看配置中的模型及下载状态：
 
 ```bash
-cp .env.example .env
-ORT_CUDA_VERSION=12 docker compose -f docker-compose-nvidia.yml up --build
-```
-
-`ORT_CUDA_VERSION` 默认为且目前仅支持 `12`，它在构建时选择 ORT 的 CUDA 12
-二进制包。该路径目前仅支持 Linux x86_64，与 rc.12 发布的 CUDA 包一致。
-只有 NVIDIA worker 通过 `deploy.resources.reservations.devices` 预留一个 GPU，并使用独立的
-`local-multimodal-infra:nvidia-cuda12` 镜像；controller 继续使用 CPU 镜像且
-不会获得 GPU。
-
-CPU 与 NVIDIA Compose 共同使用唯一的 `configs/models.d`。YOLO、SenseVoice ASR、
-FP32 IndexTTS、multilingual-e5-small 和 mMARCO MiniLM reranker 表达
-`[cuda, cpu]` 意图。E5 在 CPU 上优先选择派生的 INT8 pooled 图，在可用 CUDA
-上优先选择派生的 O4 pooled 图；mMARCO 仍直接选择官方对应量化图。session 加载前，runtime availability
-解析会在 CUDA 未编译时立即将其变为 `[cpu]`；CUDA 构建会执行并缓存一次微型
-CUDA session 探针，若 EP 无法注册和初始化，则不会尝试模型 CUDA session。
-探针成功时保持 CUDA 优先和 CPU 回退，但它不验证每个模型或算子，特定模型的
-CUDA 加载仍可能回退 CPU。IndexTTS policy 及 A、B、C、D、E、E-prefill、F
-共七个 session 都传递此顺序并报告实际 provider，但真实 NVIDIA 硬件与工件
-验证仍未完成。TensorRT 不受支持且不在本任务范围内。
-
-不要把 `/health` 当成 GPU 推理证明。先运行
-`docker compose -f docker-compose-nvidia.yml exec worker nvidia-smi` 验证容器
-可见 GPU。下载并启用 YOLO 工件后，把仓库样例复制到 worker 可见的共享
-workdir，再发送真实的受支持请求：
-
-```bash
-mkdir -p workdir/data
-cp scripts/assets/yolo-input.jpg workdir/data/yolo-input.jpg
-curl --fail-with-body http://127.0.0.1:17890/rpc/infer \
+curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
   -H 'content-type: application/json' \
-  --data '{"jsonrpc":"2.0","id":"gpu-yolo","method":"object_detect","params":{"model":"yolo11n.onnx","image":{"path":"/app/workdir/data/yolo-input.jpg","mime":"image/jpeg"}}}'
-docker compose -f docker-compose-nvidia.yml logs worker |
-  grep 'lazy loading model'
-docker compose -f docker-compose-nvidia.yml exec worker nvidia-smi dmon -s pucvmet
+  -H 'x-local-admin-token: replace-with-your-admin-token' \
+  --data '{"jsonrpc":"2.0","id":"models","method":"list_models","params":{}}'
 ```
 
-在另一个终端中于请求期间启动 `nvidia-smi dmon`。lazy-load 日志显示 effective
-provider order，dmon 可显示同时段 GPU 活动；两者都不能证明逐节点 GPU placement。
-硬件快照中的 `has_cuda` 当前仍会是 `false`，因为控制面报告尚未探测 NVML；
-它不决定 ORT CUDA EP 的实际选择。
-
-## 本地开发
-
-不使用 Docker 时，可以直接运行 controller 和 worker。具体命令、服务约束和 smoke harness 用法见 [AGENTS.md](AGENTS.md) 与 [Implementation notes](docs/implementation-notes.md)。
-
-Smoke harness 常用别名：
-
-- `mcp`：运行标准 MCP SDK 组：分别通过 `/mcp/admin` 和 `/mcp/infer` 验证隔离后的工具列表、鉴权、admin/catalog/assets、generic task flow，以及本地资源可用时的 direct inference。
-- `all`：同时展开 `rpc` 和 `mcp` 两组，并继续尊重 `--skip-yolo`、`--skip-sensevoice-asr`、`--skip-indextts` 等跳过参数。
-- `mcp_standard`：只用官方 Python MCP SDK 验证标准 MCP 工具列表、admin/catalog/assets、generic/direct 工具调用，不向 `/rpc/*` 伪装 MCP。
-- `text`：用真实模型验证 OpenAI `/v1/embeddings` 和 vLLM `/v1/rerank`，包括 384 维、归一化、batch 顺序、`top_n`、相关性排序和 token usage。
-
-
-示例：
+提交异步下载任务，并查询逐文件状态：
 
 ```bash
-python -m scripts.local.smoke --tests rpc --workdir ./workdir --model-dir ./workdir/models
-python -m scripts.local.smoke --tests mcp --workdir ./workdir --model-dir ./workdir/models
-python -m scripts.local.smoke --tests all --workdir ./workdir --model-dir ./workdir/models
-python -m scripts.local.smoke --tests text --workdir ./workdir --model-dir ./workdir/models
-```
-
-下载 E5 官方图后，生成把 masked mean pooling 与 L2 normalization 合入图内的
-派生文件。原图不会被覆盖；若派生文件不存在，adapter 会兼容回退到 Rust host
-pooling：
-
-```bash
-uv run --with onnx --python 3.12 \
-  python -m scripts.local.e5_pooling_export --model-dir workdir/models
-```
-
-CUDA pooled 图使用固定 shape 的 pinned-host I/O binding，输入/输出缓冲在重复请求间
-复用。按 batch 与文本长度运行 release 端到端基准：
-
-```bash
-python -m scripts.local.benchmark_text_embeddings --mode cpu \
-  --controller-bin target/release/controller --worker-bin target/release/worker
-python -m scripts.local.benchmark_text_embeddings --mode gpu \
-  --controller-bin target/release/controller --worker-bin target-cuda/release/worker
-```
-
-## 文本检索 API
-
-Embedding 使用 OpenAI 兼容端点；`input_type` 是 E5 的可选扩展，取值为
-`query` 或 `passage`，默认 `passage`：
-
-```bash
-curl http://127.0.0.1:17890/v1/embeddings \
+curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
   -H 'content-type: application/json' \
-  --data '{"model":"multilingual-e5-small-onnx","input":["你好","hello"],"input_type":"query"}'
-```
+  -H 'x-local-admin-token: replace-with-your-admin-token' \
+  --data '{"jsonrpc":"2.0","id":"download","method":"download_model","params":{"id":"sensevoice-small-onnx"}}'
 
-Rerank 兼容 vLLM/Jina/Cohere 形状，并注册 `/rerank`、`/v1/rerank`、
-`/v2/rerank` 三个别名：
-
-```bash
-curl http://127.0.0.1:17890/v1/rerank \
+curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
   -H 'content-type: application/json' \
-  --data '{"model":"mmarco-minilm-l12-onnx","query":"法国首都","documents":["巴黎","巴西利亚"],"top_n":1}'
+  -H 'x-local-admin-token: replace-with-your-admin-token' \
+  --data '{"jsonrpc":"2.0","id":"status","method":"get_model_download_status","params":{"id":"sensevoice-small-onnx"}}'
 ```
 
-常用配置入口：
+其他默认模型 ID：
 
-- `configs/controller.yaml`
-- `configs/worker.yaml`
-- `configs/models.d`
+- `yolo11n.onnx`
+- `multilingual-e5-small-onnx`
+- `mmarco-minilm-l12-onnx`
+- `indextts-1.5-onnx`（实验性，下载后还需调用 `enable_model`）
 
-## 目录约定
+### 5. Agent 如何使用
 
-- `workdir/models`：真实模型工件。
-- `workdir/data`：SQLite、上传文件、日志和生成结果。
-- `docker-compose.yml` / `Dockerfile`：CPU 容器启动入口。
-- `docker-compose-nvidia.yml` / `Dockerfile.nvidia`：NVIDIA CUDA 12 worker 启动入口。
-- `scripts/local/smoke.py`：本地 smoke harness。
-- `scripts/local/e5_pooling_export.py`：生成 E5 图内 pooling/L2 派生图。
-- `scripts/local/benchmark_text_embeddings.py`：batch/长度矩阵 release 基准。
-- `docs/implementation-notes.md`：更多实现细节。
+推荐只向 Agent 配置推理 MCP：
 
-## 路线图
+- 推理：`http://127.0.0.1:17892/mcp/infer`
+- 管理：`http://127.0.0.1:17892/mcp/admin`，仅在 Agent 确实需要下载、启用或禁用模型时单独配置
 
-- [ ] 完善标准 MCP 实现并保持 legacy JSON-RPC 边界清晰
-- [ ] 更成熟的 API Server
-- [ ] 更稳定的运行时管理
-- [ ] IndexTTS 本地能力恢复
-- [ ] 可选硬件加速路径
-...
+下面是常见的 Streamable HTTP MCP 配置形状；不同 Agent 的配置文件名或字段名可能略有差异：
 
-## 更多文档
+```json
+{
+  "mcpServers": {
+    "local-multimodal": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:17892/mcp/infer",
+      "headers": {
+        "Authorization": "Bearer replace-with-your-infer-token"
+      }
+    }
+  }
+}
+```
 
-- [Implementation notes](docs/implementation-notes.md)
-- [AGENTS.md](AGENTS.md)
-- [Dockerfile](Dockerfile)
-- [docker-compose.yml](docker-compose.yml)
-- [docker-compose-nvidia.yml](docker-compose-nvidia.yml)
-- [.env.example](.env.example)
+如果 `LOCAL_MCP_INFER_TOKENS` 为空，可以删除 `headers`。需要管理工具时，另建一个 MCP Server 配置，将 URL 改为 `/mcp/admin`，并使用 `LOCAL_ADMIN_TOKEN`，不要与推理 token 混用。
 
-Release smoke examples:
+接入后，Agent 可以直接调用 `object_detect`、`asr_transcribe`、`tts_synthesize`、`text_embed` 和 `text_rerank`。对于 Agent 无法直接访问的图片或音频，使用 `create_task` → 上传到返回的签名 URL → `start_task` → `wait_task`，不需要与 worker 共享宿主机文件路径。
+
+需要与 OpenAI 风格客户端集成时，将 base URL 指向 `http://127.0.0.1:17890/v1`，并把 `LOCAL_MCP_INFER_TOKENS` 中的任意一个 token 作为 API key / Bearer token。该接口只实现上表列出的本地能力，不是完整 OpenAI API。
+
+### 6. 验证部署
+
+仓库内置 smoke harness，会负责构建、启动、等待健康状态、执行真实请求并清理进程：
 
 ```bash
-cargo build --release --bins
-python -m scripts.local.smoke --skip-build --release --tests mcp --workdir ./workdir --model-dir ./workdir/models --ready-timeout 60 --request-timeout 600
-python -m scripts.local.smoke --skip-build --release --tests rpc --workdir ./workdir --model-dir ./workdir/models --ready-timeout 60 --request-timeout 600
+python -m scripts.local.smoke --tests rpc \
+  --workdir ./workdir --model-dir ./workdir/models
+
+python -m scripts.local.smoke --tests mcp \
+  --workdir ./workdir --model-dir ./workdir/models
 ```
+
+`mcp` 测试需要当前 Python 环境安装官方 `mcp` SDK。release 验证可先运行 `cargo build --release --bins`，再为 smoke harness 增加 `--skip-build --release`。
+
+## 参考资料
+
+### 模型仓库
+
+| 用途 | 仓库 | 当前固定版本 |
+| --- | --- | --- |
+| YOLO11n ONNX | [aaurelions/yolo11n.onnx](https://huggingface.co/aaurelions/yolo11n.onnx) | `f46d9b72aa9a0f02bc00484446e2310b1a549bce` |
+| SenseVoiceSmall ONNX | [haixuantao/SenseVoiceSmall-onnx](https://huggingface.co/haixuantao/SenseVoiceSmall-onnx) | `c4c8747214bed7ebbf2557e0412c19efa540023c` |
+| FSMN-VAD ONNX | [funasr/fsmn-vad-onnx](https://huggingface.co/funasr/fsmn-vad-onnx) | `f6e9fbb4cefa7397216c763f21307993f147f585` |
+| FSMN-VAD 配置 | [MoYoYoTech/Translator](https://huggingface.co/MoYoYoTech/Translator) | `58fbad4088820ed1253955c8faf1444cd0b2dc69` |
+| CAM++ Speaker | [welcomyou/campplus-3dspeaker-200k-onnx](https://huggingface.co/welcomyou/campplus-3dspeaker-200k-onnx) | `6265ff7af2a104d745b4389026ed9815c6c1c6ff` |
+| IndexTTS 1.5 ONNX | [ModaLeap/indextts-1.5-onnx](https://huggingface.co/ModaLeap/indextts-1.5-onnx) | 配置暂未固定 revision |
+| multilingual-e5-small | [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) | `614241f622f53c4eeff9890bdc4f31cfecc418b3` |
+| mMARCO MiniLM reranker | [cross-encoder/mmarco-mMiniLMv2-L12-H384-v1](https://huggingface.co/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1) | `1427fd652930e4ba29e8149678df786c240d8825` |
+
+实际下载文件、revision 与 SHA-256 以 [`configs/models.d`](configs/models.d) 中的配置为准。
+
+### 参考代码仓库
+
+- [modelscope/FunASR](https://github.com/modelscope/FunASR)：SenseVoice ONNX 前处理、推理与 FSMN-VAD 管线参考；
+- [FunAudioLLM/SenseVoice](https://github.com/FunAudioLLM/SenseVoice)：SenseVoice 模型与官方实现；
+- [ultralytics/ultralytics](https://github.com/ultralytics/ultralytics)：YOLO 预处理、输出解码与 COCO 标签来源；
+- [index-tts/index-tts](https://github.com/index-tts/index-tts)：IndexTTS 官方实现；
+- [DakeQQ/Text-to-Speech-TTS-ONNX](https://github.com/DakeQQ/Text-to-Speech-TTS-ONNX)：IndexTTS ONNX 导出与推理参考；
+- [microsoft/onnxruntime](https://github.com/microsoft/onnxruntime)：CPU / CUDA 推理运行时；
+- [modelcontextprotocol/rust-sdk](https://github.com/modelcontextprotocol/rust-sdk)：标准 MCP Rust SDK。
+
+### 项目文档
+
+- [实现说明](docs/implementation-notes.md)
+- [开发与验证约束](AGENTS.md)
+- [CPU Compose](docker-compose.yml)
+- [NVIDIA CUDA Compose](docker-compose-nvidia.yml)
+- [环境变量示例](.env.example)

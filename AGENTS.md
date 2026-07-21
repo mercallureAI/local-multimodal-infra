@@ -16,10 +16,10 @@ Repo-specific instructions for future OpenCode agents. Higher-priority user inst
 
 - Default configs: `configs/controller.yaml`, `configs/worker.yaml`; model specs: `configs/models.d/*.yaml`.
 - Default addresses: controller HTTP API and legacy JSON-RPC `127.0.0.1:17890`, worker `127.0.0.1:17891`, standard MCP admin `127.0.0.1:17892/mcp/admin`, standard MCP inference `127.0.0.1:17892/mcp/infer`.
-- Admin MCP/RPC requires `LOCAL_ADMIN_TOKEN`; inference MCP/RPC optionally enforces the comma-separated `LOCAL_MCP_INFER_TOKENS` list. Keep the host publish loopback-only by default.
+- Admin MCP/RPC requires `LOCAL_ADMIN_TOKEN`; MCP, RPC, and OpenAI-compatible inference routes share the optional comma-separated `LOCAL_MCP_INFER_TOKENS` list. Keep the host publish loopback-only by default.
 - Start services with explicit storage args: `--workdir ./workdir --model-dir ./workdir/models`.
 - Runtime artifacts: real models only in `workdir/models`; data/logs/uploads/generated/temp only in `workdir/data`; SQLite default `workdir/data/local.db`. Do not commit or delete `workdir/`; do not commit `target/`.
-- Controller routes worth remembering: `/health`, `/assets`, `/assets/sign`, `/files/upload/...`, authenticated legacy JSON-RPC at `POST /rpc/admin` and optionally authenticated `POST /rpc/infer`, standard MCP at `127.0.0.1:17892/mcp/admin` and `/mcp/infer`, OpenAI `GET /v1/models`, `POST /v1/audio/transcriptions`, `POST /v1/audio/speech`.
+- Controller routes worth remembering: `/health`, `/assets`, `/assets/sign`, `/files/upload/...`, authenticated legacy JSON-RPC at `POST /rpc/admin` and optionally authenticated `POST /rpc/infer`, standard MCP at `127.0.0.1:17892/mcp/admin` and `/mcp/infer`, open OpenAI catalog `GET /v1/models`, and OpenAI inference `POST /v1/audio/transcriptions`, `POST /v1/audio/speech`, `POST /v1/embeddings`, `/rerank`, `/v1/rerank`, `/v2/rerank` guarded by the same inference-token policy.
 
 ## Service execution rules
 

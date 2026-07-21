@@ -33,6 +33,8 @@ WORKER_URL = "http://127.0.0.1:17891"
 PORTS = (17890, 17891, 17892)
 REGISTRATION_TOKEN = "local-text-benchmark-registration-token"
 ADMIN_TOKEN = "local-text-benchmark-admin-token"
+INFER_TOKEN = "local-text-benchmark-infer-token"
+INFER_AUTH_HEADERS = {"Authorization": f"Bearer {INFER_TOKEN}"}
 MODEL_ID = "multilingual-e5-small-onnx"
 
 
@@ -103,13 +105,13 @@ def run_case(
     payload: dict | None = None
     for _ in range(warmups):
         payload = checked_json_request(
-            "POST", f"{CONTROLLER_URL}/v1/embeddings", request, timeout
+            "POST", f"{CONTROLLER_URL}/v1/embeddings", request, timeout, INFER_AUTH_HEADERS
         )
     samples: list[float] = []
     for _ in range(iterations):
         started = time.perf_counter()
         payload = checked_json_request(
-            "POST", f"{CONTROLLER_URL}/v1/embeddings", request, timeout
+            "POST", f"{CONTROLLER_URL}/v1/embeddings", request, timeout, INFER_AUTH_HEADERS
         )
         samples.append((time.perf_counter() - started) * 1000.0)
 
@@ -235,6 +237,7 @@ def main() -> int:
     env["LOCAL_DATA_DIR"] = str(data_dir)
     env["LOCAL_WORKER_REGISTRATION_TOKEN"] = REGISTRATION_TOKEN
     env["LOCAL_ADMIN_TOKEN"] = ADMIN_TOKEN
+    env["LOCAL_MCP_INFER_TOKENS"] = INFER_TOKEN
     env["RUST_LOG"] = "local_runtime=info,local_adapter_e5_embedding=info,ort=warn"
     launched: list[ManagedProcess] = []
     started = time.time()

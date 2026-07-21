@@ -27,8 +27,17 @@ pub struct OpenAiApiState {
 }
 
 pub fn router(state: OpenAiApiState) -> Router {
+    models_router(state.clone()).merge(inference_router(state))
+}
+
+pub fn models_router(state: OpenAiApiState) -> Router {
     Router::new()
         .route("/v1/models", get(list_models))
+        .with_state(state)
+}
+
+pub fn inference_router(state: OpenAiApiState) -> Router {
+    Router::new()
         .route("/v1/audio/transcriptions", post(transcriptions))
         .route("/v1/audio/speech", post(speech))
         .route("/v1/embeddings", post(embeddings))

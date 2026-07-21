@@ -9,19 +9,33 @@ import urllib.request
 from .errors import SmokeError
 
 
-def checked_json_request(method: str, url: str, payload: dict | None, timeout: float) -> dict:
-    status, body = json_request(method, url, payload, timeout)
+def checked_json_request(
+    method: str,
+    url: str,
+    payload: dict | None,
+    timeout: float,
+    headers: dict[str, str] | None = None,
+) -> dict:
+    status, body = json_request(method, url, payload, timeout, headers)
     if not (200 <= status < 300):
         raise SmokeError(f"{method} {url} returned HTTP {status}: {body}")
     return body
 
 
-def json_request(method: str, url: str, payload: dict | None, timeout: float) -> tuple[int, dict]:
+def json_request(
+    method: str,
+    url: str,
+    payload: dict | None,
+    timeout: float,
+    extra_headers: dict[str, str] | None = None,
+) -> tuple[int, dict]:
     data = None
     headers = {"Accept": "application/json"}
     if payload is not None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
+    if extra_headers:
+        headers.update(extra_headers)
     return raw_request(method, url, data, headers, timeout)
 
 

@@ -33,7 +33,7 @@ The project exposes three main entry points:
 | --- | --- | --- |
 | Legacy JSON-RPC API | Agents / tool calls | `POST /rpc/admin` uses `LOCAL_ADMIN_TOKEN`; `POST /rpc/infer` accepts any configured `LOCAL_MCP_INFER_TOKENS` token. |
 | Standard MCP Server | Agents / standard MCP clients | Admin: `http://127.0.0.1:17892/mcp/admin`; inference: `http://127.0.0.1:17892/mcp/infer`. |
-| OpenAI-compatible API Server | Apps / OpenAI-style clients | Model listing, speech recognition, speech synthesis, and limited compatibility APIs. |
+| OpenAI-compatible API Server | Apps / OpenAI-style clients | Model listing plus inference guarded by `LOCAL_MCP_INFER_TOKENS`. |
 
 Default service addresses:
 
@@ -41,7 +41,7 @@ Default service addresses:
 - Legacy JSON-RPC: `POST /rpc/admin`, `POST /rpc/infer`
 - Standard MCP Streamable HTTP: `http://127.0.0.1:17892/mcp/admin`, `http://127.0.0.1:17892/mcp/infer`
 - Admin MCP/RPC requires `LOCAL_ADMIN_TOKEN`; send it as `Authorization: Bearer <token>` or `x-local-admin-token`
-- Inference MCP/RPC uses optional `LOCAL_MCP_INFER_TOKENS=token-a,token-b`; an empty/unset list leaves inference open, while a non-empty list requires any one listed token via Bearer or `x-local-infer-token`
+- MCP, RPC, and OpenAI-compatible inference share optional `LOCAL_MCP_INFER_TOKENS=token-a,token-b`; an empty/unset list leaves inference open, while a non-empty list requires any one listed token via Bearer or `x-local-infer-token`. `GET /v1/models` remains an unauthenticated catalog route.
 - Model administration: `list_models` / `get_model` include `downloaded` and `download_state`; `download_model` queues background work and deduplicates both active and already-complete model downloads; use `get_model_download_status` for aggregate and per-file state.
 - Worker: `http://127.0.0.1:17891`
 

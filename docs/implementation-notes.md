@@ -144,7 +144,7 @@ Optional IndexTTS ASR cross-validation lives in the Python harness, not in ad-ho
 
 ## Legacy JSON-RPC API
 
-The controller exposes the legacy JSON-RPC API on port `17890` only at canonical `POST /rpc/admin` for admin/model operations and canonical `POST /rpc/infer` for inference/task operations. `/rpc/admin` requires `LOCAL_ADMIN_TOKEN`; `/rpc/infer` is open when `LOCAL_MCP_INFER_TOKENS` is empty and otherwise accepts any token in that comma-separated list. These legacy JSON-RPC routes are not the standard MCP protocol.
+The controller exposes the legacy JSON-RPC API on port `17890` only at canonical `POST /rpc/admin` for admin/model operations and canonical `POST /rpc/infer` for inference/task operations. `/rpc/admin` requires `LOCAL_ADMIN_TOKEN`; `/rpc/infer` is open when `LOCAL_MCP_INFER_TOKENS` is empty and otherwise accepts any token in that comma-separated list. The same inference-token policy guards OpenAI-compatible ASR, TTS, embeddings, and all rerank aliases; `GET /v1/models` remains an open catalog route. These legacy JSON-RPC routes are not the standard MCP protocol.
 
 ```json
 {"jsonrpc":"2.0","id":1,"result":{}}
@@ -164,7 +164,7 @@ The API accepts core `ModelSpec` JSON, not MCP/OpenAI-specific schemas. `list_mo
 The controller also starts official SDK-backed standard MCP services on a separate bind: admin tools at `http://127.0.0.1:17892/mcp/admin` and inference tools at `http://127.0.0.1:17892/mcp/infer`. The catalogs are disjoint and cross-catalog `tools/call` requests are rejected. Override only the bind with `--mcp-bind` or `LOCAL_MCP_BIND`.
 
 
-Authentication is shared with the legacy RPC routes. Admin always requires `LOCAL_ADMIN_TOKEN`. Inference optionally uses the comma-separated `LOCAL_MCP_INFER_TOKENS`; a configured non-empty list is enforced. Both support Bearer authentication plus their dedicated `x-local-admin-token` / `x-local-infer-token` headers. Keep the host publish loopback-only unless the surrounding network policy is intentional.
+Authentication is shared across standard MCP, legacy RPC, and OpenAI-compatible inference routes. Admin always requires `LOCAL_ADMIN_TOKEN`. Inference optionally uses the comma-separated `LOCAL_MCP_INFER_TOKENS`; a configured non-empty list is enforced everywhere. Both support Bearer authentication plus their dedicated `x-local-admin-token` / `x-local-infer-token` headers. Keep the host publish loopback-only unless the surrounding network policy is intentional.
 
 Validate a running controller with the official Python SDK client. Do not validate this endpoint with raw HTTP JSON-RPC; use official Python MCP SDK or rmcp client semantics for MCP protocol calls. Raw `urllib`/HTTP is used by the smoke client only for asset bytes uploaded/downloaded through signed URLs returned by MCP tools.
 
