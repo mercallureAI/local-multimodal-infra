@@ -67,4 +67,6 @@ metadata:
   speaker_io_binding: true
   speaker_diarization_default: true
   timestamps_default: true
-  mvp_status: Full FunASR-style FSMN-VAD, SenseVoiceSmall, token and segment timestamps, CAM++ embeddings, and speaker clustering pipeline.
+  timestamp_granularity_sec: 10
+  token_timestamps_default: false
+  mvp_status: Full FunASR-style FSMN-VAD, SenseVoiceSmall, configurable ~10s timeline segments, optional token timestamps, CAM++ embeddings, and speaker clustering pipeline.

@@ -389,6 +389,7 @@ mod tests {
             Ok(match kind {
                 TaskKind::AsrTranscribe => InferenceOutput::AsrTranscription {
                     text: "ok".to_string(),
+                    timestamped_text: None,
                     segments: Vec::new(),
                     speakers: Vec::new(),
                 },

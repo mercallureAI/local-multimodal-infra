@@ -401,8 +401,9 @@ fn url_artifact_default_path(root: &Path, url: Option<&str>) -> PathBuf {
 fn sensevoice_asr_default(model_dir: &Path) -> ModelSpec {
     let id = "sensevoice-small-onnx";
     let root = model_dir.join(id);
-    let sensevoice_revision = "0dd101a91bcf61c26dd778ddf634d8989afe22e3";
-    let vad_revision = "a158155ef9e81f405c052f40b6d1ad43b87e6215";
+    let sensevoice_revision = "c4c8747214bed7ebbf2557e0412c19efa540023c";
+    let vad_revision = "f6e9fbb4cefa7397216c763f21307993f147f585";
+    let vad_config_revision = "58fbad4088820ed1253955c8faf1444cd0b2dc69";
     let campplus_revision = "6265ff7af2a104d745b4389026ed9815c6c1c6ff";
     let artifact = |target: &str, url: String, sha256: &str, revision: &str| ModelArtifact {
         kind: ArtifactKind::Url,
@@ -424,22 +425,30 @@ fn sensevoice_asr_default(model_dir: &Path) -> ModelSpec {
     metadata.insert(
         "source".to_string(),
         json!([
-            "iic/SenseVoiceSmall-onnx",
-            "iic/speech_fsmn_vad_zh-cn-16k-common-onnx",
+            "haixuantao/SenseVoiceSmall-onnx",
+            "funasr/fsmn-vad-onnx",
+            "MoYoYoTech/Translator",
             "3D-Speaker/CAM++"
         ]),
     );
     metadata.insert(
-        "modelscope_revision".to_string(),
+        "huggingface_revision".to_string(),
         json!(sensevoice_revision),
+    );
+    metadata.insert("vad_huggingface_revision".to_string(), json!(vad_revision));
+    metadata.insert(
+        "vad_config_huggingface_revision".to_string(),
+        json!(vad_config_revision),
     );
     metadata.insert("speaker_diarization_default".to_string(), json!(true));
     metadata.insert("timestamps_default".to_string(), json!(true));
+    metadata.insert("timestamp_granularity_sec".to_string(), json!(10));
+    metadata.insert("token_timestamps_default".to_string(), json!(false));
     metadata.insert("sensevoice_max_chunk_seconds".to_string(), json!(30));
     metadata.insert("vad_max_segment_seconds".to_string(), json!(20));
     metadata.insert(
         "mvp_status".to_string(),
-        json!("Full FunASR-style pipeline: FSMN-VAD, SenseVoiceSmall ONNX, token and segment timestamps, CAM++ embeddings, and speaker clustering; diarization and timestamps are enabled by default"),
+        json!("Full FunASR-style pipeline: FSMN-VAD, SenseVoiceSmall ONNX, configurable ~10s timeline segments, optional token timestamps, CAM++ embeddings, and speaker clustering; diarization and timeline output are enabled by default"),
     );
     ModelSpec {
         id: id.to_string(),
@@ -451,45 +460,45 @@ fn sensevoice_asr_default(model_dir: &Path) -> ModelSpec {
         artifacts: vec![
             artifact(
                 "asr/model_quant.onnx",
-                format!("https://modelscope.cn/models/iic/SenseVoiceSmall-onnx/resolve/{sensevoice_revision}/model_quant.onnx"),
+                format!("https://huggingface.co/haixuantao/SenseVoiceSmall-onnx/resolve/{sensevoice_revision}/model_quant.onnx?download=true"),
                 "21dc965f689a78d1604717bf561e40d5a236087c85a95584567835750549e822",
                 sensevoice_revision,
             ),
             artifact(
                 "asr/am.mvn",
-                format!("https://modelscope.cn/models/iic/SenseVoiceSmall-onnx/resolve/{sensevoice_revision}/am.mvn"),
+                format!("https://huggingface.co/haixuantao/SenseVoiceSmall-onnx/resolve/{sensevoice_revision}/am.mvn?download=true"),
                 "29b3c740a2c0cfc6b308126d31d7f265fa2be74f3bb095cd2f143ea970896ae5",
                 sensevoice_revision,
             ),
             artifact(
                 "asr/config.yaml",
-                format!("https://modelscope.cn/models/iic/SenseVoiceSmall-onnx/resolve/{sensevoice_revision}/config.yaml"),
+                format!("https://huggingface.co/haixuantao/SenseVoiceSmall-onnx/resolve/{sensevoice_revision}/config.yaml?download=true"),
                 "f71e239ba36705564b5bf2d2ffd07eece07b8e3f2bbf6d2c99d8df856339ac19",
                 sensevoice_revision,
             ),
             artifact(
                 "asr/tokens.json",
-                format!("https://modelscope.cn/models/iic/SenseVoiceSmall-onnx/resolve/{sensevoice_revision}/tokens.json"),
+                format!("https://huggingface.co/haixuantao/SenseVoiceSmall-onnx/resolve/{sensevoice_revision}/tokens.json?download=true"),
                 "a2594fc1474e78973149cba8cd1f603ebed8c39c7decb470631f66e70ce58e97",
                 sensevoice_revision,
             ),
             artifact(
                 "vad/model_quant.onnx",
-                format!("https://modelscope.cn/models/iic/speech_fsmn_vad_zh-cn-16k-common-onnx/resolve/{vad_revision}/model_quant.onnx"),
-                "5289eb2aa3c9af2d7a4284bcfa7c3ceb81d360814ed4203239b6c5d0569da8a1",
+                format!("https://huggingface.co/funasr/fsmn-vad-onnx/resolve/{vad_revision}/model_quant.onnx?download=true"),
+                "9b28837838fce9685503c63139fadbad35d6c8ed485485dafdbb32e725969660",
                 vad_revision,
             ),
             artifact(
                 "vad/am.mvn",
-                format!("https://modelscope.cn/models/iic/speech_fsmn_vad_zh-cn-16k-common-onnx/resolve/{vad_revision}/am.mvn"),
+                format!("https://huggingface.co/funasr/fsmn-vad-onnx/resolve/{vad_revision}/vad.mvn?download=true"),
                 "6820fef9687708c4fc3fab2530179c8fcea6262daa25514380056cd8f6eb1754",
                 vad_revision,
             ),
             artifact(
                 "vad/config.yaml",
-                format!("https://modelscope.cn/models/iic/speech_fsmn_vad_zh-cn-16k-common-onnx/resolve/{vad_revision}/config.yaml"),
-                "2ef334f2d7776edd86ed696296774f87550206c256bfabc597872ad861831589",
-                vad_revision,
+                format!("https://huggingface.co/MoYoYoTech/Translator/resolve/{vad_config_revision}/moyoyo_asr_models/speech_fsmn_vad_zh-cn-16k-common-pytorch/config.yaml?download=true"),
+                "486861ca26ddb79081663b6179cb204c6bfae71c52f04aafc48a9e9d8dde1e93",
+                vad_config_revision,
             ),
             artifact(
                 "speaker/campplus_cn_en_common_200k.onnx",

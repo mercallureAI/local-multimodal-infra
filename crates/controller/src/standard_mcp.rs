@@ -321,11 +321,21 @@ fn task_from_method(method: &str, params: &Value) -> Result<InferenceTask> {
     match method {
         "asr_transcribe" => {
             let audio = direct_file_ref(params, "audio", "audio_path", "asr_transcribe")?;
-            Ok(InferenceTask::new(
+            let mut task = InferenceTask::new(
                 local_core::TaskKind::AsrTranscribe,
                 model_id,
                 InferenceInput::AsrTranscribe { audio },
-            ))
+            );
+            task.params = params
+                .as_object()
+                .map(|object| {
+                    object
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(task)
         }
         "object_detect" => {
             let image = direct_file_ref(params, "image", "image_path", "object_detect")?;
@@ -551,12 +561,16 @@ fn tool_definitions(access: McpAccess) -> Vec<Tool> {
         ),
         tool(
             "asr_transcribe",
-            "Run direct ASR transcription using model/model_id and an audio FileRef.",
+            "Run direct ASR. By default returns ~10s timestamped_text/segments plus segments[].speaker and speakers[]; set timestamps=false to disable the timeline.",
             object_schema(&[
                 ("model", string_schema()),
                 ("model_id", string_schema()),
                 ("audio", file_ref_schema()),
                 ("audio_path", string_schema()),
+                ("timestamps", bool_schema()),
+                ("timestamp_granularity_sec", timestamp_granularity_schema()),
+                ("token_timestamps", bool_schema()),
+                ("speaker_diarization", bool_schema()),
             ]),
         ),
         tool(
@@ -718,6 +732,18 @@ fn number_schema() -> JsonObject {
     typed_schema("number")
 }
 
+fn timestamp_granularity_schema() -> JsonObject {
+    let mut schema = number_schema();
+    schema.insert("default".to_string(), json!(10));
+    schema.insert("minimum".to_string(), json!(1));
+    schema.insert("maximum".to_string(), json!(120));
+    schema.insert(
+        "description".to_string(),
+        json!("Target timeline segment duration in seconds; defaults to 10."),
+    );
+    schema
+}
+
 fn bool_schema() -> JsonObject {
     typed_schema("boolean")
 }
@@ -800,6 +826,43 @@ mod tests {
             rerank.input,
             InferenceInput::TextRerank { top_n: Some(1), .. }
         ));
+    }
+
+    #[test]
+    fn asr_tool_exposes_timeline_and_speaker_params() {
+        let tool = tool_definitions(McpAccess::Infer)
+            .into_iter()
+            .find(|tool| tool.name.as_ref() == "asr_transcribe")
+            .expect("ASR tool");
+        let schema = serde_json::to_value(tool).expect("serialize tool");
+        let properties = &schema["inputSchema"]["properties"];
+        for name in [
+            "timestamps",
+            "timestamp_granularity_sec",
+            "token_timestamps",
+            "speaker_diarization",
+        ] {
+            assert!(properties.get(name).is_some(), "missing {name}: {schema}");
+        }
+        assert_eq!(properties["timestamp_granularity_sec"]["default"], 10);
+
+        let task = task_from_method(
+            "asr_transcribe",
+            &json!({
+                "model": "sensevoice-small-onnx",
+                "audio_path": "./audio.wav",
+                "timestamps": false,
+                "timestamp_granularity_sec": 15,
+                "token_timestamps": true,
+                "speaker_diarization": false
+            }),
+        )
+        .expect("ASR task");
+        assert_eq!(task.kind, TaskKind::AsrTranscribe);
+        assert_eq!(task.params["timestamps"], false);
+        assert_eq!(task.params["timestamp_granularity_sec"], 15);
+        assert_eq!(task.params["token_timestamps"], true);
+        assert_eq!(task.params["speaker_diarization"], false);
     }
 
     #[tokio::test]

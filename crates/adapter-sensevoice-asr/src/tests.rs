@@ -161,6 +161,146 @@ fn component_provider_and_io_binding_metadata_are_validated() {
 }
 
 #[test]
+fn timeline_options_default_to_ten_seconds_and_are_configurable() {
+    let defaults = AsrOptions::from_params(&BTreeMap::new()).expect("default options");
+    assert!(defaults.timestamps);
+    assert!(defaults.speaker_diarization);
+    assert_eq!(
+        defaults.timestamp_granularity_ms,
+        DEFAULT_TIMESTAMP_GRANULARITY_MS
+    );
+    assert!(!defaults.token_timestamps);
+
+    let params = BTreeMap::from([
+        ("timestamps".to_string(), serde_json::json!(false)),
+        (
+            "timestamp_granularity_sec".to_string(),
+            serde_json::json!(12.5),
+        ),
+        ("token_timestamps".to_string(), serde_json::json!(true)),
+        ("speaker_diarization".to_string(), serde_json::json!(false)),
+    ]);
+    let configured = AsrOptions::from_params(&params).expect("configured options");
+    assert!(!configured.timestamps);
+    assert!(!configured.speaker_diarization);
+    assert_eq!(configured.timestamp_granularity_ms, 12_500);
+    assert!(configured.token_timestamps);
+
+    for params in [
+        BTreeMap::from([(
+            "timestamp_granularity_sec".to_string(),
+            serde_json::json!(0),
+        )]),
+        BTreeMap::from([("timestamps".to_string(), serde_json::json!("false"))]),
+    ] {
+        assert!(AsrOptions::from_params(&params).is_err());
+    }
+}
+
+#[test]
+fn timeline_splits_near_target_and_formats_boundary_pairs() {
+    let decoded = DecodedText {
+        text: "甲乙丙丁戊".to_string(),
+        language: Some("zh".to_string()),
+        emotion: Some("NEUTRAL".to_string()),
+        events: Vec::new(),
+        tokens: [0, 5_000, 10_000, 15_000, 20_000]
+            .into_iter()
+            .zip(['甲', '乙', '丙', '丁', '戊'])
+            .map(|(start_ms, text)| RelativeTokenTimestamp {
+                start_ms,
+                end_ms: start_ms + 1_000,
+                text: text.to_string(),
+                starts_word: false,
+            })
+            .collect(),
+    };
+    let segments = split_decoded_segment(
+        0,
+        22_000,
+        Some("speaker_0".to_string()),
+        decoded,
+        10_000,
+        false,
+    );
+    assert_eq!(segments.len(), 2, "{segments:?}");
+    assert_eq!((segments[0].start_ms, segments[0].end_ms), (0, 11_000));
+    assert_eq!((segments[1].start_ms, segments[1].end_ms), (11_000, 22_000));
+    assert!(segments.iter().all(|segment| segment.tokens.is_empty()));
+    assert_eq!(
+        format_timestamped_text(&segments),
+        "[00:00:00.000] 甲乙丙 [00:00:11.000]\n[00:00:11.000] 丁戊 [00:00:22.000]"
+    );
+}
+
+#[test]
+fn timeline_merges_short_adjacent_segments_only_for_same_speaker() {
+    let segment = |start_ms, end_ms, text: &str, speaker: &str| AsrSegment {
+        start_ms,
+        end_ms,
+        text: text.to_string(),
+        speaker: Some(speaker.to_string()),
+        language: Some("zh".to_string()),
+        emotion: None,
+        events: Vec::new(),
+        tokens: Vec::new(),
+    };
+    let merged = merge_timeline_segments(
+        vec![
+            segment(0, 3_000, "甲", "speaker_0"),
+            segment(3_500, 8_000, "乙", "speaker_0"),
+            segment(8_200, 12_000, "丙", "speaker_0"),
+            segment(12_100, 15_000, "丁", "speaker_1"),
+        ],
+        10_000,
+    );
+    assert_eq!(merged.len(), 2, "{merged:?}");
+    assert_eq!(merged[0].text, "甲乙丙");
+    assert_eq!((merged[0].start_ms, merged[0].end_ms), (0, 12_000));
+    assert_eq!(merged[1].speaker.as_deref(), Some("speaker_1"));
+}
+
+#[test]
+fn timeline_does_not_split_inside_ascii_wordpieces() {
+    let decoded = DecodedText {
+        text: "deep seek works".to_string(),
+        language: Some("en".to_string()),
+        emotion: None,
+        events: Vec::new(),
+        tokens: vec![
+            RelativeTokenTimestamp {
+                start_ms: 0,
+                end_ms: 5_000,
+                text: "de".to_string(),
+                starts_word: true,
+            },
+            RelativeTokenTimestamp {
+                start_ms: 5_000,
+                end_ms: 10_000,
+                text: "ep".to_string(),
+                starts_word: false,
+            },
+            RelativeTokenTimestamp {
+                start_ms: 10_000,
+                end_ms: 15_000,
+                text: "seek".to_string(),
+                starts_word: true,
+            },
+            RelativeTokenTimestamp {
+                start_ms: 15_000,
+                end_ms: 20_000,
+                text: "works".to_string(),
+                starts_word: true,
+            },
+        ],
+    };
+    let segments = split_decoded_segment(0, 22_000, None, decoded, 9_000, false);
+    assert_eq!(segments.len(), 2, "{segments:?}");
+    assert_eq!(segments[0].text, "deep");
+    assert_eq!(segments[1].text, "seek works");
+}
+
+#[test]
 fn real_model_smoke_if_env_set() {
     let Ok(model_dir) = std::env::var("LOCAL_SENSEVOICE_ASR_MODEL_DIR") else {
         return;
@@ -185,6 +325,7 @@ fn real_model_smoke_if_env_set() {
         .expect("transcribe real audio");
     let InferenceOutput::AsrTranscription {
         text,
+        timestamped_text,
         segments,
         speakers,
     } = output
@@ -192,6 +333,7 @@ fn real_model_smoke_if_env_set() {
         panic!("unexpected output")
     };
     eprintln!("SenseVoice text: {text:?}");
+    eprintln!("SenseVoice timestamped text: {timestamped_text:?}");
     eprintln!(
         "SenseVoice segments: {:#?}",
         segments
@@ -207,6 +349,8 @@ fn real_model_smoke_if_env_set() {
     );
     eprintln!("SenseVoice speakers: {speakers:#?}");
     assert!(!text.trim().is_empty());
+    let timestamped_text = timestamped_text.expect("default timestamped text");
+    assert!(timestamped_text.starts_with("[00:"), "{timestamped_text}");
     assert!(!segments.is_empty());
     assert!(segments.iter().all(|segment| {
         segment.end_ms > segment.start_ms
@@ -219,6 +363,10 @@ fn real_model_smoke_if_env_set() {
                 .iter()
                 .all(|token| token.end_ms > token.start_ms)
     }));
+    assert!(
+        segments.iter().all(|segment| segment.tokens.is_empty()),
+        "token timestamps must be opt-in"
+    );
     assert!(!speakers.is_empty());
     if let Ok(expected) = std::env::var("LOCAL_SENSEVOICE_ASR_EXPECT_SPEAKERS") {
         let expected = expected.parse::<usize>().expect("speaker count");

@@ -198,11 +198,21 @@ fn task_from_method(method: &str, params: &Value) -> Result<InferenceTask> {
     match method {
         "asr_transcribe" => {
             let audio = file_ref(params.get("audio").unwrap_or(params))?;
-            Ok(InferenceTask::new(
+            let mut task = InferenceTask::new(
                 TaskKind::AsrTranscribe,
                 model_id,
                 InferenceInput::AsrTranscribe { audio },
-            ))
+            );
+            task.params = params
+                .as_object()
+                .map(|object| {
+                    object
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(task)
         }
         "object_detect" => {
             let image = file_ref(params.get("image").unwrap_or(params))?;
@@ -363,8 +373,12 @@ mod tests {
             Ok(match kind {
                 TaskKind::AsrTranscribe => InferenceOutput::AsrTranscription {
                     text: "ok".to_string(),
+                    timestamped_text: Some("[00:00:00.000] ok [00:00:01.000]".to_string()),
                     segments: Vec::new(),
-                    speakers: Vec::new(),
+                    speakers: vec![local_core::AsrSpeaker {
+                        id: "speaker_0".to_string(),
+                        speech_ms: 1_000,
+                    }],
                 },
                 TaskKind::ObjectDetect => InferenceOutput::ObjectDetections {
                     objects: Vec::new(),
@@ -486,7 +500,7 @@ mod tests {
                     .uri("/rpc/infer")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":2,"method":"asr_transcribe","params":{"model":"sensevoice-small-onnx","audio":{"path":"./audio.wav","mime":"audio/wav"}}}"#,
+                        r#"{"jsonrpc":"2.0","id":2,"method":"asr_transcribe","params":{"model":"sensevoice-small-onnx","audio":{"path":"./audio.wav","mime":"audio/wav"},"timestamps":true,"timestamp_granularity_sec":10,"speaker_diarization":true}}"#,
                     ))
                     .expect("request"),
             )
@@ -499,11 +513,19 @@ mod tests {
             .expect("body");
         let payload: Value = serde_json::from_slice(&body).expect("json response");
         assert!(payload.get("error").is_none(), "{payload:?}");
+        assert_eq!(
+            payload["result"]["timestamped_text"],
+            "[00:00:00.000] ok [00:00:01.000]"
+        );
+        assert_eq!(payload["result"]["speakers"][0]["id"], "speaker_0");
 
         let tasks = service.tasks.lock().expect("tasks lock");
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].kind, TaskKind::AsrTranscribe);
         assert_eq!(tasks[0].model_id.as_deref(), Some("sensevoice-small-onnx"));
+        assert_eq!(tasks[0].params["timestamps"], true);
+        assert_eq!(tasks[0].params["timestamp_granularity_sec"], 10);
+        assert_eq!(tasks[0].params["speaker_diarization"], true);
         match &tasks[0].input {
             InferenceInput::AsrTranscribe { audio } => {
                 assert_eq!(

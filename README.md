@@ -58,6 +58,16 @@
 | 模型管理 | 支持配置声明、下载、启用、禁用和状态查询。 |
 | 本地验证 | 提供 smoke harness 验证 Docker、服务和 API 调用链。 |
 
+SenseVoice 的 MCP/RPC 输出默认包含约 10 秒一段的 `timestamped_text`，格式为
+`[00:00:00.000] 一段文字 [00:00:10.000]`。`segments[].speaker` 标注每段
+发言人，`speakers[]` 汇总发言时长。直连 `asr_transcribe` 或通用任务的
+`params` 支持：
+
+- `timestamps=false`：关闭 `timestamped_text` 和时间轴段落；
+- `timestamp_granularity_sec=<1..120>`：调整目标时间轴粒度，默认 `10`；
+- `token_timestamps=true`：额外返回细粒度 `segments[].tokens`，默认关闭；
+- `speaker_diarization=false`：关闭说话人分离，默认开启。
+
 ## 快速开始
 
 本项目提供了 Docker Compose ，可以快速开始使用，当然你也可以直接运行本地二进制。
@@ -100,7 +110,7 @@ ORT_CUDA_VERSION=12 docker compose -f docker-compose-nvidia.yml up --build
 `local-multimodal-infra:nvidia-cuda12` 镜像；controller 继续使用 CPU 镜像且
 不会获得 GPU。
 
-CPU 与 NVIDIA Compose 共同使用唯一的 `configs/models.d`。YOLO、Qwen ASR、
+CPU 与 NVIDIA Compose 共同使用唯一的 `configs/models.d`。YOLO、SenseVoice ASR、
 FP32 IndexTTS、multilingual-e5-small 和 mMARCO MiniLM reranker 表达
 `[cuda, cpu]` 意图。E5 在 CPU 上优先选择派生的 INT8 pooled 图，在可用 CUDA
 上优先选择派生的 O4 pooled 图；mMARCO 仍直接选择官方对应量化图。session 加载前，runtime availability

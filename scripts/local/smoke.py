@@ -816,6 +816,9 @@ def run_sensevoice_asr(audio: Path, data_dir: Path, timestamp: str, timeout: flo
     output = payload.get("output") or {}
     segments = output.get("segments") if isinstance(output, dict) else None
     speakers = output.get("speakers") if isinstance(output, dict) else None
+    timestamped_text = output.get("timestamped_text") if isinstance(output, dict) else None
+    if not isinstance(timestamped_text, str) or not timestamped_text.startswith("["):
+        raise SmokeError(f"SenseVoice ASR did not return default timestamped_text: {payload}")
     if not isinstance(segments, list) or not segments:
         raise SmokeError(f"SenseVoice ASR did not return default timeline segments: {payload}")
     if not isinstance(speakers, list) or not speakers:
@@ -826,7 +829,9 @@ def run_sensevoice_asr(audio: Path, data_dir: Path, timestamp: str, timeout: flo
             or not isinstance(segment.get("start_ms"), int)
             or not isinstance(segment.get("end_ms"), int)
             or segment["end_ms"] <= segment["start_ms"]
+            or segment["end_ms"] - segment["start_ms"] > 15_000
             or not str(segment.get("speaker", "")).startswith("speaker_")
+            or bool(segment.get("tokens"))
         ):
             raise SmokeError(f"SenseVoice ASR returned an invalid timeline/speaker segment: {segment}")
     save_json(

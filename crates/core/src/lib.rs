@@ -513,6 +513,8 @@ pub enum InferenceInput {
 pub enum InferenceOutput {
     AsrTranscription {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamped_text: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         segments: Vec<AsrSegment>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -780,6 +782,7 @@ mod tests {
                 .expect("legacy output");
         let InferenceOutput::AsrTranscription {
             text,
+            timestamped_text,
             segments,
             speakers,
         } = output
@@ -787,6 +790,7 @@ mod tests {
             panic!("wrong output")
         };
         assert_eq!(text, "hello");
+        assert!(timestamped_text.is_none());
         assert!(segments.is_empty());
         assert!(speakers.is_empty());
     }

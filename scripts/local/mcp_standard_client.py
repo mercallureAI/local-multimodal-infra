@@ -364,6 +364,7 @@ async def generic_asr_transcribe(session: Any, sample_audio: Path | None, timeou
     asr_text = extract_direct_asr_text(wait.get("output"))
     if not asr_text.strip():
         raise RuntimeError(f"MCP generic asr.transcribe returned empty text: {wait}")
+    validate_asr_timeline(wait.get("output"), "MCP generic asr.transcribe")
     return {"status": "passed", "input_audio": str(sample_audio), "asr_text": asr_text, "asr_text_length": len(asr_text), "create_task": create, "start_task": start, "wait_task": wait, "get_task": get}
 
 
@@ -470,6 +471,7 @@ async def direct_asr_transcribe(session: Any, audio: Path | None, models: list[A
     asr_text = extract_direct_asr_text(payload)
     if not asr_text.strip():
         raise RuntimeError(f"MCP direct asr_transcribe returned empty text: {payload}")
+    validate_asr_timeline(payload, "MCP direct asr_transcribe")
     return {
         "status": "passed",
         "input_audio": str(audio),
@@ -650,6 +652,31 @@ def extract_direct_asr_text(payload: Any) -> str:
     if isinstance(payload, dict) and isinstance(payload.get("text"), str):
         return payload["text"]
     return ""
+
+
+def validate_asr_timeline(payload: Any, label: str) -> None:
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{label} output is malformed: {payload}")
+    timestamped_text = payload.get("timestamped_text")
+    segments = payload.get("segments")
+    speakers = payload.get("speakers")
+    if not isinstance(timestamped_text, str) or not timestamped_text.startswith("["):
+        raise RuntimeError(f"{label} returned no default timestamped_text: {payload}")
+    if not isinstance(segments, list) or not segments:
+        raise RuntimeError(f"{label} returned no timeline segments: {payload}")
+    if not isinstance(speakers, list) or not speakers:
+        raise RuntimeError(f"{label} returned no speaker summary: {payload}")
+    for segment in segments:
+        if (
+            not isinstance(segment, dict)
+            or not isinstance(segment.get("start_ms"), int)
+            or not isinstance(segment.get("end_ms"), int)
+            or segment["end_ms"] <= segment["start_ms"]
+            or segment["end_ms"] - segment["start_ms"] > 15_000
+            or not str(segment.get("speaker", "")).startswith("speaker_")
+            or bool(segment.get("tokens"))
+        ):
+            raise RuntimeError(f"{label} returned invalid default timeline/speaker data: {segment}")
 
 
 def resolve_tts_audio_for_asr(payload: Any, timeout: float) -> tuple[Path | None, Path | None]:
