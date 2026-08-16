@@ -403,16 +403,17 @@ async fn signed_asset_upload_rejects_unsigned_ttl_params_and_persists_signed_exp
 #[test]
 fn public_asset_signing_rejects_reserved_upload_paths_but_task_internal_signing_works() {
     let controller = test_controller_with_temp_data_dir();
-    for path in [
-        "tasks/task-id/inputs/audio.wav",
-        "system/model-cache.bin",
-        ".metadata/material/hidden.json",
+    for (kind, path) in [
+        (AssetKind::Material, "tasks/task-id/inputs/audio.wav"),
+        (AssetKind::Material, "system/model-cache.bin"),
+        (AssetKind::Artifact, "mcp/results/hash.txt"),
+        (AssetKind::Material, ".metadata/material/hidden.json"),
     ] {
         let err = controller
             .sign_assets_batch(AssetSignRequest {
                 items: vec![AssetSignItem {
                     operation: AssetUrlOperation::Upload,
-                    kind: Some(AssetKind::Material),
+                    kind: Some(kind),
                     path: Some(path.to_string()),
                     uri: None,
                     content_type: None,

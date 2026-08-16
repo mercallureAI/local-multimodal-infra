@@ -7,7 +7,19 @@ use rmcp::{
     },
     ErrorData, RoleServer, ServerHandler,
 };
+use serde::Deserialize;
 use serde_json::{Map, Value};
+
+const MCP_RESULT_PREVIEW_MAX_BYTES: usize = 1_000;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum WithUrlResult {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
 
 impl ControllerState {
     pub fn standard_mcp_app(self) -> Router {
@@ -189,7 +201,8 @@ impl StandardMcpServer {
         if !self.access.allows(name) {
             return Err(InfraError::BadRequest(format!("unknown MCP tool `{name}`")));
         }
-        match name {
+        let (with_url_result, arguments) = result_url_policy(name, arguments)?;
+        let value = match name {
             "create_task" => {
                 let request = serde_json::from_value::<CreateTaskRequest>(arguments)?;
                 Ok(json!(
@@ -253,8 +266,87 @@ impl StandardMcpServer {
             other => Err(InfraError::BadRequest(format!(
                 "unknown MCP tool `{other}`"
             ))),
+        }?;
+        match with_url_result {
+            Some(policy) => self.present_inference_result(value, policy),
+            None => Ok(value),
         }
     }
+
+    fn present_inference_result(&self, value: Value, policy: WithUrlResult) -> Result<Value> {
+        let text = serde_json::to_string(&value)?;
+        let needs_url = match policy {
+            WithUrlResult::Auto => text.len() > MCP_RESULT_PREVIEW_MAX_BYTES,
+            WithUrlResult::On => true,
+            WithUrlResult::Off => false,
+        };
+        if !needs_url {
+            return Ok(value);
+        }
+
+        let bytes = text.as_bytes();
+        let sha256 = sha256_hex(bytes);
+        let asset_path = format!("mcp/results/{sha256}.txt");
+        let expires_at = Utc::now() + chrono::Duration::seconds(DEFAULT_ARTIFACT_ASSET_TTL_SECS);
+        let (mut record, _) = self.state.assets.put_or_reuse_by_sha256_at_path(
+            AssetKind::Artifact,
+            &asset_path,
+            Some("text/plain; charset=utf-8".to_string()),
+            Some(expires_at),
+            bytes,
+            sha256,
+        )?;
+        self.state.decorate_asset(&mut record);
+        let preview = utf8_safe_prefix(&text, MCP_RESULT_PREVIEW_MAX_BYTES);
+        Ok(json!({
+            "preview": preview,
+            "truncated": preview.len() < text.len(),
+            "download_url": record.download_url,
+            "artifact_uri": record.uri,
+            "content_type": record.content_type,
+            "size_bytes": record.size,
+            "sha256": record.sha256,
+            "expires_at": record.expires_at,
+        }))
+    }
+}
+
+fn result_url_policy(name: &str, mut arguments: Value) -> Result<(Option<WithUrlResult>, Value)> {
+    if !is_inference_result_tool(name) {
+        return Ok((None, arguments));
+    }
+    let raw = arguments
+        .as_object_mut()
+        .and_then(|object| object.remove("with_url_result"));
+    let policy = raw
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    Ok((Some(policy), arguments))
+}
+
+fn is_inference_result_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "create_task"
+            | "start_task"
+            | "get_task"
+            | "wait_task"
+            | "run_task"
+            | "asr_transcribe"
+            | "object_detect"
+            | "tts_synthesize"
+            | "text_embed"
+            | "text_rerank"
+    )
+}
+
+fn utf8_safe_prefix(value: &str, max_bytes: usize) -> &str {
+    let mut end = value.len().min(max_bytes);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 impl McpAccess {
@@ -519,6 +611,7 @@ fn tool_definitions(access: McpAccess) -> Vec<Tool> {
                 ("files", array_schema()),
                 ("params", object_schema(&[])),
                 ("wait_timeout_sec", number_schema()),
+                ("with_url_result", with_url_result_schema()),
             ]),
         ),
         tool(
@@ -528,12 +621,16 @@ fn tool_definitions(access: McpAccess) -> Vec<Tool> {
                 ("task_id", string_schema()),
                 ("wait", bool_schema()),
                 ("timeout_sec", number_schema()),
+                ("with_url_result", with_url_result_schema()),
             ]),
         ),
         tool(
             "get_task",
             "Fetch generic task status by task_id.",
-            object_schema(&[("task_id", string_schema())]),
+            object_schema(&[
+                ("task_id", string_schema()),
+                ("with_url_result", with_url_result_schema()),
+            ]),
         ),
         tool(
             "wait_task",
@@ -541,6 +638,7 @@ fn tool_definitions(access: McpAccess) -> Vec<Tool> {
             object_schema(&[
                 ("task_id", string_schema()),
                 ("timeout_sec", number_schema()),
+                ("with_url_result", with_url_result_schema()),
             ]),
         ),
         tool(
@@ -553,6 +651,7 @@ fn tool_definitions(access: McpAccess) -> Vec<Tool> {
                 ("files", array_schema()),
                 ("params", object_schema(&[])),
                 ("wait_timeout_sec", number_schema()),
+                ("with_url_result", with_url_result_schema()),
             ]),
         ),
         tool(
@@ -577,6 +676,7 @@ fn tool_definitions(access: McpAccess) -> Vec<Tool> {
                 ("timestamp_granularity_sec", timestamp_granularity_schema()),
                 ("token_timestamps", bool_schema()),
                 ("speaker_diarization", bool_schema()),
+                ("with_url_result", with_url_result_schema()),
             ]),
         ),
         tool(
@@ -587,6 +687,7 @@ fn tool_definitions(access: McpAccess) -> Vec<Tool> {
                 ("model_id", string_schema()),
                 ("image", file_ref_schema()),
                 ("image_path", string_schema()),
+                ("with_url_result", with_url_result_schema()),
             ]),
         ),
         tool(
@@ -599,6 +700,7 @@ fn tool_definitions(access: McpAccess) -> Vec<Tool> {
                 ("reference_audio", file_ref_schema()),
                 ("reference_audio_path", string_schema()),
                 ("reference_path", string_schema()),
+                ("with_url_result", with_url_result_schema()),
             ]),
         ),
         tool(
@@ -611,6 +713,7 @@ fn tool_definitions(access: McpAccess) -> Vec<Tool> {
                 ("texts", array_schema()),
                 ("text", string_schema()),
                 ("input_type", string_schema()),
+                ("with_url_result", with_url_result_schema()),
             ]),
         ),
         tool(
@@ -622,6 +725,7 @@ fn tool_definitions(access: McpAccess) -> Vec<Tool> {
                 ("query", string_schema()),
                 ("documents", array_schema()),
                 ("top_n", number_schema()),
+                ("with_url_result", with_url_result_schema()),
             ]),
         ),
         tool("list_models", "List configured models.", object_schema(&[])),
@@ -750,6 +854,17 @@ fn timestamp_granularity_schema() -> JsonObject {
     schema
 }
 
+fn with_url_result_schema() -> JsonObject {
+    let mut schema = string_schema();
+    schema.insert("enum".to_string(), json!(["auto", "on", "off"]));
+    schema.insert("default".to_string(), json!("auto"));
+    schema.insert(
+        "description".to_string(),
+        json!("auto stores results over 1000 UTF-8 bytes as a downloadable text artifact; on always creates the artifact; off always returns the complete result inline."),
+    );
+    schema
+}
+
 fn bool_schema() -> JsonObject {
     typed_schema("boolean")
 }
@@ -778,6 +893,121 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(names.iter().any(|name| name == "text_embed"));
         assert!(names.iter().any(|name| name == "text_rerank"));
+    }
+
+    #[test]
+    fn inference_tools_expose_url_result_policy() {
+        for tool in tool_definitions(McpAccess::Infer)
+            .into_iter()
+            .filter(|tool| is_inference_result_tool(tool.name.as_ref()))
+        {
+            let schema = serde_json::to_value(&tool).expect("serialize tool");
+            let policy = &schema["inputSchema"]["properties"]["with_url_result"];
+            assert_eq!(policy["default"], "auto", "{}: {schema}", tool.name);
+            assert_eq!(policy["enum"], json!(["auto", "on", "off"]));
+        }
+    }
+
+    #[test]
+    fn url_result_policy_is_removed_before_inference_dispatch() {
+        let (policy, arguments) = result_url_policy(
+            "asr_transcribe",
+            json!({"audio_path": "audio.wav", "with_url_result": "on"}),
+        )
+        .expect("valid policy");
+        assert_eq!(policy, Some(WithUrlResult::On));
+        assert!(arguments.get("with_url_result").is_none());
+
+        let err = result_url_policy(
+            "text_embed",
+            json!({"input": ["q"], "with_url_result": "sometimes"}),
+        )
+        .expect_err("invalid policy must fail");
+        assert!(err.to_string().contains("unknown variant"), "{err}");
+    }
+
+    #[test]
+    fn utf8_preview_never_splits_a_code_point() {
+        let value = format!("{}界tail", "a".repeat(999));
+        let preview = utf8_safe_prefix(&value, MCP_RESULT_PREVIEW_MAX_BYTES);
+        assert_eq!(preview, "a".repeat(999));
+        assert!(value.is_char_boundary(preview.len()));
+    }
+
+    #[test]
+    fn url_result_modes_create_deduplicated_expiring_text_artifacts() {
+        let dir = tempfile::tempdir().expect("temp data dir");
+        let state = ControllerState::new_with_options(
+            ModelRegistry::from_models(Vec::new()),
+            None,
+            ControllerOptions {
+                data_dir: dir.path().to_path_buf(),
+                upload_signing_secret: Some("result-test-secret".to_string()),
+                asset_cleanup_interval: None,
+                ..ControllerOptions::default()
+            },
+        );
+        let server = StandardMcpServer {
+            state: state.clone(),
+            access: McpAccess::Infer,
+        };
+        let long_value = json!({"text": format!("{}界tail", "a".repeat(990))});
+        let full_text = serde_json::to_string(&long_value).expect("serialize result");
+
+        let short_value = json!({"text": "ok"});
+        let short_auto = server
+            .present_inference_result(short_value.clone(), WithUrlResult::Auto)
+            .expect("short auto result");
+        assert_eq!(short_auto, short_value);
+
+        let inline = server
+            .present_inference_result(long_value.clone(), WithUrlResult::Off)
+            .expect("off result");
+        assert_eq!(inline, long_value);
+        assert!(state
+            .assets
+            .list(&AssetListQuery::default())
+            .expect("list assets")
+            .assets
+            .is_empty());
+
+        let first = server
+            .present_inference_result(long_value.clone(), WithUrlResult::Auto)
+            .expect("auto result");
+        assert_eq!(first["truncated"], true);
+        let preview = first["preview"].as_str().expect("preview");
+        assert!(preview.len() <= MCP_RESULT_PREVIEW_MAX_BYTES);
+        assert!(full_text.is_char_boundary(preview.len()));
+        assert!(first["download_url"]
+            .as_str()
+            .is_some_and(|url| url.starts_with("http://127.0.0.1:17890/assets/artifact/")));
+        let uri = first["artifact_uri"].as_str().expect("artifact URI");
+        let (record, bytes) = state.assets.read_bytes(uri).expect("read text artifact");
+        assert_eq!(bytes, full_text.as_bytes());
+        assert_eq!(
+            record.content_type.as_deref(),
+            Some("text/plain; charset=utf-8")
+        );
+        assert!(record.path.ends_with(".txt"));
+        let first_expiry = record.expires_at.expect("artifact expiry");
+
+        let second = server
+            .present_inference_result(long_value, WithUrlResult::On)
+            .expect("on result");
+        assert_eq!(second["artifact_uri"], first["artifact_uri"]);
+        let assets = state
+            .assets
+            .list(&AssetListQuery::default())
+            .expect("list deduplicated assets")
+            .assets;
+        assert_eq!(assets.len(), 1);
+        assert!(assets[0].expires_at.expect("renewed expiry") >= first_expiry);
+
+        let short = server
+            .present_inference_result(short_value, WithUrlResult::On)
+            .expect("short on result");
+        assert_eq!(short["truncated"], false);
+        assert!(short["download_url"].is_string());
     }
 
     #[test]

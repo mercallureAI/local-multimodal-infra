@@ -167,6 +167,14 @@ curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
 
 接入后，Agent 可以直接调用 `object_detect`、`asr_transcribe`、`tts_synthesize`、`text_embed` 和 `text_rerank`。对于 Agent 无法直接访问的图片或音频，使用 `create_task` → 上传到返回的签名 URL → `start_task` → `wait_task`，不需要与 worker 共享宿主机文件路径。
 
+所有会返回推理结果的 MCP tools 都接受 `with_url_result`：
+
+- `auto`（默认）：结果的 UTF-8 序列化文本不超过 1000 字节时保持原有结构内联返回；超过时返回 UTF-8 安全边界内的前 1000 字节预览和下载 URL。
+- `on`：始终返回最多 1000 UTF-8 字节的预览并生成下载 URL；短结果的预览包含全文。
+- `off`：始终通过 MCP 接口内联返回完整的原有结果。
+
+URL 模式的完整结果以 `text/plain; charset=utf-8` 的 `.txt` 产物保存，响应包含 `preview`、`truncated`、`download_url`、`artifact_uri`、`size_bytes`、`sha256` 和 `expires_at`。这些文本产物由产物中心统一管理：默认 24 小时后自动清理，相同内容复用同一产物并续期；签名下载 URL 默认有效 10 分钟，再次调用可获得新 URL。
+
 需要与 OpenAI 风格客户端集成时，将 base URL 指向 `http://127.0.0.1:17890/v1`，并把 `LOCAL_MCP_INFER_TOKENS` 中的任意一个 token 作为 API key / Bearer token。该接口只实现上表列出的本地能力，不是完整 OpenAI API。
 
 ### 6. 验证部署

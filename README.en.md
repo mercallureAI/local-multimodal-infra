@@ -146,6 +146,14 @@ Common smoke harness aliases:
 - `all`: expands both `rpc` and `mcp`, while still honoring skip flags such as `--skip-yolo`, `--skip-qwen-asr`, and `--skip-indextts`.
 - `mcp_standard`: validates standard MCP tool listing, admin/catalog/assets, and generic/direct tool calls with the official Python MCP SDK, not by pretending `/rpc/*` is MCP.
 
+Every MCP tool that returns an inference result accepts `with_url_result`:
+
+- `auto` (default) preserves the original inline structure through 1000 UTF-8 bytes; larger serialized results become an UTF-8-safe preview of at most 1000 bytes plus a download URL.
+- `on` always creates a download and includes an at-most-1000-byte preview (the full result when it is shorter).
+- `off` always returns the complete original result inline.
+
+URL-backed results are managed `.txt` artifacts with `text/plain; charset=utf-8`. The response includes `preview`, `truncated`, `download_url`, `artifact_uri`, `size_bytes`, `sha256`, and `expires_at`. Text artifacts expire after 24 hours by default; identical content reuses and renews the same artifact. Signed download URLs expire after 10 minutes by default and a repeated call issues a fresh URL.
+
 
 Examples:
 

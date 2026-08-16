@@ -1540,7 +1540,7 @@ fn canonical_asset_expiry_query(query: &BTreeMap<String, String>) -> Result<Opti
 fn is_reserved_asset_upload_path(path: &str) -> bool {
     matches!(
         path.split('/').next().unwrap_or_default(),
-        "tasks" | "system" | ".metadata"
+        "tasks" | "system" | "mcp" | ".metadata"
     )
 }
 

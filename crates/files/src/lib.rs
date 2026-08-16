@@ -68,6 +68,57 @@ impl AssetsStore {
         bytes: &[u8],
         sha256: String,
     ) -> Result<(AssetRecord, bool)> {
+        self.put_or_reuse_by_sha256_any_path(kind, path, content_type, expires_at, bytes, sha256)
+    }
+
+    pub fn put_or_reuse_by_sha256_at_path(
+        &self,
+        kind: AssetKind,
+        path: &str,
+        content_type: Option<String>,
+        expires_at: Option<DateTime<Utc>>,
+        bytes: &[u8],
+        sha256: String,
+    ) -> Result<(AssetRecord, bool)> {
+        self.cleanup_expired_before_access("put_or_reuse_by_sha256_at_path");
+        let relative = normalize_asset_path(path)?;
+        let size = bytes.len() as u64;
+        let existing = match self.read_record(kind, &relative) {
+            Ok(record) => Some(record),
+            Err(InfraError::NotFound(_)) => None,
+            Err(err) => return Err(err),
+        };
+        if let Some(mut record) = existing.filter(|record| {
+            record.sha256.as_deref() == Some(sha256.as_str())
+                && record.size == size
+                && fs::metadata(self.asset_path(record.kind, &record.path))
+                    .is_ok_and(|metadata| metadata.is_file() && metadata.len() == size)
+        }) {
+            let refreshed_expiry = renew_managed_expiry(record.expires_at, expires_at);
+            let refreshed_content_type = content_type.or(record.content_type.clone());
+            if record.expires_at != refreshed_expiry
+                || record.content_type != refreshed_content_type
+            {
+                record.expires_at = refreshed_expiry;
+                record.content_type = refreshed_content_type;
+                self.write_record(&record)?;
+            }
+            return Ok((record, true));
+        }
+
+        self.write_asset(kind, relative, content_type, expires_at, bytes, sha256)
+            .map(|record| (record, false))
+    }
+
+    fn put_or_reuse_by_sha256_any_path(
+        &self,
+        kind: AssetKind,
+        path: &str,
+        content_type: Option<String>,
+        expires_at: Option<DateTime<Utc>>,
+        bytes: &[u8],
+        sha256: String,
+    ) -> Result<(AssetRecord, bool)> {
         self.cleanup_expired_before_access("put_or_reuse_by_sha256");
         let relative = normalize_asset_path(path)?;
         let size = bytes.len() as u64;
@@ -374,6 +425,17 @@ fn extend_expiry(
     }
 }
 
+fn renew_managed_expiry(
+    existing: Option<DateTime<Utc>>,
+    requested: Option<DateTime<Utc>>,
+) -> Option<DateTime<Utc>> {
+    match (existing, requested) {
+        (_, None) => None,
+        (None, Some(requested)) => Some(requested),
+        (Some(existing), Some(requested)) => Some(existing.max(requested)),
+    }
+}
+
 fn remove_file_if_exists(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -506,6 +568,60 @@ mod tests {
             .asset_path(AssetKind::Material, "tasks/new-task/inputs/copy.wav")
             .exists());
         assert!(store.asset_path(existing.kind, &existing.path).exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn exact_path_hash_reuse_restores_managed_metadata_and_expiry() {
+        let root = test_data_dir();
+        let store = AssetsStore::new(&root);
+        let bytes = b"same bytes";
+        let sha256 = sha256_bytes(bytes);
+        let unmanaged = store
+            .put(
+                AssetKind::Artifact,
+                "mcp/results/result.txt",
+                Some("application/octet-stream".to_string()),
+                None,
+                bytes,
+            )
+            .expect("put unmanaged artifact");
+        let first_expiry = Utc::now() + Duration::hours(1);
+
+        let (text, was_reused) = store
+            .put_or_reuse_by_sha256_at_path(
+                AssetKind::Artifact,
+                "mcp/results/result.txt",
+                Some("text/plain; charset=utf-8".to_string()),
+                Some(first_expiry),
+                bytes,
+                sha256.clone(),
+            )
+            .expect("reuse exact text artifact");
+        assert!(was_reused);
+        assert_eq!(text.uri, unmanaged.uri);
+        assert!(text.path.ends_with(".txt"));
+        assert_eq!(
+            text.content_type.as_deref(),
+            Some("text/plain; charset=utf-8")
+        );
+        assert_eq!(text.expires_at, Some(first_expiry));
+
+        let renewed_expiry = first_expiry + Duration::hours(1);
+        let (reused, was_reused_again) = store
+            .put_or_reuse_by_sha256_at_path(
+                AssetKind::Artifact,
+                "mcp/results/result.txt",
+                Some("text/plain; charset=utf-8".to_string()),
+                Some(renewed_expiry),
+                bytes,
+                sha256,
+            )
+            .expect("renew exact text artifact");
+        assert!(was_reused_again);
+        assert_eq!(reused.uri, text.uri);
+        assert_eq!(reused.expires_at, Some(renewed_expiry));
 
         let _ = fs::remove_dir_all(root);
     }

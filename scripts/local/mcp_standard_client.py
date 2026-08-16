@@ -48,6 +48,7 @@ ADMIN_TOOLS = {
     "list_assets",
     "search_assets",
 }
+URL_RESULT_TOOLS = INFER_TOOLS - {"sign_assets", "sign_asset_urls"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -192,6 +193,7 @@ async def run(
                             leaked_infer = sorted(set(infer_tools) & ADMIN_TOOLS)
                             if leaked_infer:
                                 raise RuntimeError(f"inference MCP leaked admin tools: {leaked_infer}")
+                            validate_url_result_schemas(infer_tools_result.tools)
                             summary = {
                                 "ok": True,
                                 "admin_url": admin_url,
@@ -208,6 +210,7 @@ async def run(
                             }
                             if full:
                                 summary["assets"] = await run_assets_smoke(admin_session, infer_session, timeout)
+                                summary["url_results"] = await run_url_result_smoke(infer_session, timeout)
                                 summary["generic_tasks"] = await run_generic_smoke(
                                     infer_session,
                                     sample_image,
@@ -282,6 +285,47 @@ async def run_assets_smoke(admin_session: Any, infer_session: Any, timeout: floa
         "uri": uri,
         "list_count": len(assets or []),
         "signed_batch_methods": [item.get("method") for item in signed_items],
+    }
+
+
+async def run_url_result_smoke(session: Any, timeout: float) -> dict[str, Any]:
+    wrapped = await call_tool_checked(
+        session,
+        "create_task",
+        {
+            "task_kind": "text.embed",
+            "params": {"input": ["standard MCP URL result smoke"], "input_type": "query"},
+            "with_url_result": "on",
+        },
+    )
+    if not isinstance(wrapped, dict):
+        raise RuntimeError(f"MCP with_url_result=on returned malformed result: {wrapped!r}")
+    download_url = wrapped.get("download_url")
+    artifact_uri = wrapped.get("artifact_uri")
+    preview = wrapped.get("preview")
+    if not isinstance(download_url, str) or not isinstance(artifact_uri, str) or not isinstance(preview, str):
+        raise RuntimeError(f"MCP URL result is missing preview/download metadata: {wrapped!r}")
+    if wrapped.get("content_type") != "text/plain; charset=utf-8" or not artifact_uri.endswith(".txt"):
+        raise RuntimeError(f"MCP URL result is not a managed txt artifact: {wrapped!r}")
+    downloaded = download_bytes(download_url, timeout).decode("utf-8")
+    full_result = json.loads(downloaded)
+    task_id = require_task_id(full_result, "MCP URL result create_task")
+    if wrapped.get("truncated") is False and preview != downloaded:
+        raise RuntimeError("MCP non-truncated preview does not match its downloaded result")
+
+    repeated = await call_tool_checked(
+        session,
+        "get_task",
+        {"task_id": task_id, "with_url_result": "on"},
+    )
+    if not isinstance(repeated, dict) or repeated.get("artifact_uri") != artifact_uri:
+        raise RuntimeError(f"MCP URL result was not deduplicated: first={wrapped!r}, repeated={repeated!r}")
+    return {
+        "status": "passed",
+        "artifact_uri": artifact_uri,
+        "truncated": wrapped.get("truncated"),
+        "size_bytes": wrapped.get("size_bytes"),
+        "deduplicated": True,
     }
 
 
@@ -542,6 +586,8 @@ async def direct_tts_synthesize(
 
 
 async def call_tool_checked(session: Any, name: str, arguments: dict[str, Any]) -> Any:
+    if name in URL_RESULT_TOOLS and "with_url_result" not in arguments:
+        arguments = {**arguments, "with_url_result": "off"}
     result = await session.call_tool(name, arguments)
     if bool(getattr(result, "isError", False)) or bool(getattr(result, "is_error", False)):
         raise RuntimeError(f"MCP tool {name} returned error: {to_jsonable(getattr(result, 'content', []))}")
@@ -704,6 +750,24 @@ def validate_task_output(payload: Any, expected_type: str, label: str) -> None:
     if not isinstance(payload, dict) or payload.get("state") != "succeeded":
         raise RuntimeError(f"{label} task did not succeed: {payload}")
     validate_direct_output(payload.get("output"), expected_type, label)
+
+
+def validate_url_result_schemas(tools: list[Any]) -> None:
+    by_name = {str(tool.name): tool for tool in tools}
+    for name in URL_RESULT_TOOLS:
+        tool = by_name.get(name)
+        if tool is None:
+            continue
+        schema = getattr(tool, "inputSchema", None)
+        if schema is None:
+            schema = getattr(tool, "input_schema", None)
+        schema = to_jsonable(schema)
+        properties = schema.get("properties") if isinstance(schema, dict) else None
+        policy = properties.get("with_url_result") if isinstance(properties, dict) else None
+        if not isinstance(policy, dict) or policy.get("default") != "auto":
+            raise RuntimeError(f"MCP tool {name} is missing with_url_result=auto: {schema!r}")
+        if policy.get("enum") != ["auto", "on", "off"]:
+            raise RuntimeError(f"MCP tool {name} has invalid with_url_result enum: {policy!r}")
 
 
 def validate_direct_output(payload: Any, expected_type: str, label: str) -> None:
