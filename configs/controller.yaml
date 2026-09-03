@@ -2,8 +2,13 @@ bind: 127.0.0.1:17890
 workdir: workdir
 # database_path defaults to workdir/data/local.db; model_dir defaults to workdir/models.
 models_conf_dir: configs/models.d
-# admin_token is reserved for follow-up auth; MVP exposes local-only endpoints.
+# Required for admin JSON-RPC and MCP routes. It can also be set with
+# LOCAL_ADMIN_TOKEN or --admin-token.
 admin_token: null
+# Optional inference tokens. Configure a YAML list here or provide a
+# comma-separated LOCAL_MCP_INFER_TOKENS value. An empty list leaves inference
+# routes unauthenticated.
+mcp_infer_tokens: []
 # Set via config, env LOCAL_WORKER_REGISTRATION_TOKEN, or CLI --worker-registration-token.
 worker_registration_token: null
 # Signed upload URLs default to http://127.0.0.1:<bind-port> when null.
