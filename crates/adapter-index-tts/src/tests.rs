@@ -16,7 +16,6 @@ fn validates_complete_artifact_layout() {
     for name in MODEL_FILENAMES {
         fs::write(dir.path().join(name), b"placeholder").expect("onnx");
     }
-    fs::write(dir.path().join("IndexTTS_E_Prefill.onnx"), b"placeholder").expect("prefill");
     fs::write(dir.path().join("bpe.model"), b"sentencepiece").expect("bpe");
     fs::write(dir.path().join("manifest.yaml"), b"precision: cpu-fp32\n").expect("manifest");
 
@@ -36,7 +35,6 @@ fn fp32_layout_ignores_quantized_subdirs() {
     for name in MODEL_FILENAMES {
         fs::write(dir.path().join(name), b"placeholder").expect("onnx");
     }
-    fs::write(dir.path().join("IndexTTS_E_Prefill.onnx"), b"placeholder").expect("prefill");
     let q4 = dir.path().join("q4");
     fs::create_dir(&q4).expect("q4 dir");
     for name in MODEL_FILENAMES {
@@ -1575,7 +1573,6 @@ fn deployment_config_tracks_immutable_source_and_v2_contract() {
         "/contract/manifest_json_sha256",
         "/contract/manifest_yaml_sha256",
         "/contract/index_tts_e_sha256",
-        "/contract/index_tts_e_prefill_sha256",
         "/source_provenance_reference/sha256",
     ] {
         config = deployment_config_fixture(&artifacts.root);
@@ -1627,8 +1624,7 @@ fn deployment_config_fixture(root: &Path) -> Value {
             "cache_mode": "prefill_decode",
             "manifest_json_sha256": hash("manifest.json"),
             "manifest_yaml_sha256": hash("manifest.yaml"),
-            "index_tts_e_sha256": hash("IndexTTS_E.onnx"),
-            "index_tts_e_prefill_sha256": hash("IndexTTS_E_Prefill.onnx")
+            "index_tts_e_sha256": hash("IndexTTS_E.onnx")
         },
         "source_provenance_reference": {
             "sha256": "3bfb39cc326d834be4fda72000e4cc53ebbb6c52e154150f1fdbe7323d1e909c",
@@ -1642,16 +1638,14 @@ fn deployment_config_fixture(root: &Path) -> Value {
 }
 
 #[test]
-fn legacy_layout_without_prefill_fails_actionably() {
+fn layout_without_prefill_graph_is_accepted() {
     let dir = tempfile::tempdir().expect("tempdir");
     for name in MODEL_FILENAMES {
         fs::write(dir.path().join(name), b"placeholder").expect("onnx");
     }
     fs::write(dir.path().join("bpe.model"), b"sentencepiece").expect("bpe");
-    let err = IndexTtsArtifacts::validate(dir.path(), IndexTtsPrecision::CpuFp32)
-        .expect_err("legacy package");
-    assert!(err.to_string().contains("re-export"));
-    assert!(err.to_string().contains("IndexTTS_E_Prefill.onnx"));
+    IndexTtsArtifacts::validate(dir.path(), IndexTtsPrecision::CpuFp32)
+        .expect("IndexTTS_E prefills; no separate prefill graph is needed");
 }
 
 #[test]
@@ -1744,12 +1738,12 @@ fn concatenate_hidden_states_flattens_batch_token_hidden() {
 }
 
 #[test]
-fn provider_report_maps_all_seven_sessions_including_e_prefill() {
+fn provider_report_maps_all_six_sessions() {
     let mut observed = Vec::new();
     let report = index_tts_provider_report_with(|session| {
         observed.push(session);
         SessionProviderReport {
-            provider: if session == IndexTtsSession::EPrefill {
+            provider: if session == IndexTtsSession::E {
                 ProviderKind::Cuda
             } else {
                 ProviderKind::Cpu
@@ -1766,12 +1760,11 @@ fn provider_report_maps_all_seven_sessions_including_e_prefill() {
             IndexTtsSession::C,
             IndexTtsSession::D,
             IndexTtsSession::E,
-            IndexTtsSession::EPrefill,
             IndexTtsSession::F,
         ]
     );
-    assert_eq!(report.e.provider, ProviderKind::Cpu);
-    assert_eq!(report.e_prefill.provider, ProviderKind::Cuda);
+    assert_eq!(report.e.provider, ProviderKind::Cuda);
+    assert_eq!(report.d.provider, ProviderKind::Cpu);
     assert_eq!(report.f.provider, ProviderKind::Cpu);
     assert!(report.f.cpu_fallback_used);
 }
@@ -1961,7 +1954,7 @@ fn real_model_smoke_if_env_set() {
     };
     let report = adapter.provider_report();
     eprintln!(
-        "IndexTTS provider report: A={:?}/{} B={:?}/{} C={:?}/{} D={:?}/{} E={:?}/{} E-prefill={:?}/{} F={:?}/{}",
+        "IndexTTS provider report: A={:?}/{} B={:?}/{} C={:?}/{} D={:?}/{} E={:?}/{} F={:?}/{}",
         report.a.provider,
         report.a.cpu_fallback_used,
         report.b.provider,
@@ -1972,8 +1965,6 @@ fn real_model_smoke_if_env_set() {
         report.d.cpu_fallback_used,
         report.e.provider,
         report.e.cpu_fallback_used,
-        report.e_prefill.provider,
-        report.e_prefill.cpu_fallback_used,
         report.f.provider,
         report.f.cpu_fallback_used
     );
@@ -2063,7 +2054,6 @@ fn config_fixture(manifest: &str) -> (tempfile::TempDir, IndexTtsArtifacts) {
     for name in MODEL_FILENAMES {
         fs::write(dir.path().join(name), b"placeholder").expect("onnx");
     }
-    fs::write(dir.path().join("IndexTTS_E_Prefill.onnx"), b"placeholder").expect("prefill");
     fs::write(dir.path().join("bpe.model"), b"sentencepiece").expect("bpe");
     fs::write(
         dir.path().join("manifest.yaml"),

@@ -1,0 +1,28 @@
+[package]
+name = "local-adapter-qwen3-chat"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+cuda = ["local-backend-ort/cuda"]
+directml = ["local-backend-ort/directml"]
+tensorrt = ["local-backend-ort/tensorrt"]
+
+[dependencies]
+half.workspace = true
+local-backend-ort = { path = "../backend-ort" }
+local-core = { path = "../core" }
+local-error = { path = "../error" }
+minijinja = { version = "2", default-features = false, features = ["builtins", "serde", "loop_controls", "preserve_order"] }
+serde.workspace = true
+# Tool definitions keep the key order of the request, as the chat template
+# renders them for the model.
+serde_json = { workspace = true, features = ["preserve_order"] }
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tracing-subscriber.workspace = true

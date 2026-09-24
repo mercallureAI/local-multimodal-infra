@@ -38,7 +38,7 @@ services:
       - "127.0.0.1:17892:17892"
 
   worker:
-    # ort-sys rc.12 publishes the Linux CUDA 12 archive for x86_64.
+    # The official ONNX Runtime CUDA 12 build targets Linux x86_64.
     platform: linux/amd64
     build:
       context: .

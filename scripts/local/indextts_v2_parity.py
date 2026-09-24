@@ -42,44 +42,35 @@ def main() -> int:
         parameter.requires_grad_(False)
 
     layers = int(gpt.layers)
-    prefill_torch = IndexTtsE(gpt, layers, prefill=True).eval()
-    decode_torch = IndexTtsE(gpt, layers, prefill=False).eval()
+    e_torch = IndexTtsE(gpt, layers).eval()
     options = ort.SessionOptions()
     options.intra_op_num_threads = 1
-    prefill_ort = ort.InferenceSession(
-        str(args.onnx_dir / "IndexTTS_E_Prefill.onnx"),
-        sess_options=options,
-        providers=["CPUExecutionProvider"],
-    )
-    decode_ort = ort.InferenceSession(
+    e_ort = ort.InferenceSession(
         str(args.onnx_dir / "IndexTTS_E.onnx"),
         sess_options=options,
         providers=["CPUExecutionProvider"],
     )
 
+    # Prefill runs through the same E graph with zero-length KV caches.
     torch.manual_seed(25851)
     hidden = torch.randn(1, 11, 1280, dtype=torch.float32) * 0.01
     mask = torch.ones(1, 11, dtype=torch.int64)
+    empty_cache = [torch.zeros(1, 20, 0, 64, dtype=torch.float32) for _ in range(layers * 2)]
     with torch.no_grad():
-        torch_outputs = prefill_torch(hidden, mask)
-    ort_outputs = prefill_ort.run(None, {"hidden_state": hidden.numpy(), "attention_mask": mask.numpy()})
+        torch_outputs = e_torch(*empty_cache, hidden, mask)
+    ort_outputs = e_ort.run(None, e_feeds(layers, [value.numpy() for value in empty_cache], hidden, mask))
     maxima = compare_outputs("prefill", torch_outputs, ort_outputs)
     torch_cache = list(torch_outputs[: layers * 2])
     ort_cache = list(ort_outputs[: layers * 2])
+    assert ort_cache[0].shape == (1, 20, 11, 64), ort_cache[0].shape
 
     for step in range(args.steps):
         torch.manual_seed(25852 + step)
         hidden = torch.randn(1, 1, 1280, dtype=torch.float32) * 0.01
         mask = torch.ones(1, 12 + step, dtype=torch.int64)
         with torch.no_grad():
-            torch_outputs = decode_torch(*torch_cache, hidden, mask)
-        feeds = {}
-        for index in range(layers):
-            feeds[f"in_key_{index}"] = ort_cache[index * 2]
-            feeds[f"in_value_{index}"] = ort_cache[index * 2 + 1]
-        feeds["hidden_state"] = hidden.numpy()
-        feeds["attention_mask"] = mask.numpy()
-        ort_outputs = decode_ort.run(None, feeds)
+            torch_outputs = e_torch(*torch_cache, hidden, mask)
+        ort_outputs = e_ort.run(None, e_feeds(layers, ort_cache, hidden, mask))
         step_maxima = compare_outputs(f"decode_{step + 1}", torch_outputs, ort_outputs)
         maxima = tuple(max(left, right) for left, right in zip(maxima, step_maxima))
         torch_cache = list(torch_outputs[: layers * 2])
@@ -92,6 +83,16 @@ def main() -> int:
         f"max_hidden_abs={maxima[1]:.9g} max_logits_abs={maxima[2]:.9g}"
     )
     return 0
+
+
+def e_feeds(layers: int, cache, hidden, mask) -> dict[str, np.ndarray]:
+    feeds = {}
+    for index in range(layers):
+        feeds[f"in_key_{index}"] = cache[index * 2]
+        feeds[f"in_value_{index}"] = cache[index * 2 + 1]
+    feeds["hidden_state"] = hidden.numpy()
+    feeds["attention_mask"] = mask.numpy()
+    return feeds
 
 
 def compare_outputs(label: str, torch_outputs, ort_outputs) -> tuple[float, float, float]:

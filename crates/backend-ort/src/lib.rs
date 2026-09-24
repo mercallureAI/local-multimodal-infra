@@ -20,6 +20,7 @@ use std::{
 
 mod device_binding;
 mod io_binding;
+mod shared_kv;
 mod shared_initializers;
 pub use device_binding::{DeviceBinding, DeviceBindingOutputs, DeviceTensor};
 pub use shared_initializers::{InitializerRange, SharedInitializers};
@@ -34,6 +35,7 @@ pub use io_binding::{
     PinnedCudaF32IoBinding, PinnedCudaIoBinding, ResidentBindingOutputs, ResidentCudaTensor,
     ResidentIoBinding, ResidentTensorInput,
 };
+pub use shared_kv::{SharedKvBinding, SharedKvPair};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -725,11 +727,9 @@ impl RealSession {
         options: Option<CpuSessionOptions>,
         extras: &SessionExtras<'_>,
     ) -> Result<Self> {
-        // The `ort` dependency is configured with `download-binaries` and
-        // `copy-dylibs`, so build/check does not depend on a system-wide ORT
-        // installation. At runtime, ORT's downloaded CPU dylib is copied beside
-        // test/app binaries; deployments can still override with ort-supported
-        // environment variables such as ORT_LIB_PATH.
+        // ONNX Runtime is loaded on first use (`load-dynamic`): from
+        // ORT_DYLIB_PATH, else onnxruntime.dll / libonnxruntime.so beside the
+        // executable or on the library search path. Building never needs it.
         let mut builder = Session::builder().map_err(map_ort_err)?;
         if let Some(options) = options {
             builder = builder
@@ -895,6 +895,13 @@ impl RealSession {
                 )));
             }
 
+            if expected_len == 0 {
+                values.push((
+                    Cow::Owned(input.name.clone()),
+                    io_binding::empty_tensor(&input.data, shape)?,
+                ));
+                continue;
+            }
             let tensor = match &input.data {
                 OrtTensorData::F32(data) => {
                     Tensor::from_array((shape, data.clone().into_boxed_slice()))
@@ -1361,21 +1368,24 @@ mod tests {
     }
 
     #[test]
-    fn generated_f32_identity_documents_zero_length_dimension_gate() {
+    fn generated_f32_identity_runs_zero_length_dimension() {
+        // Empty caches (e.g. IndexTTS_E's prefill) are allocated by ORT, which
+        // rejects zero dimensions only for tensors wrapping caller data.
         let dir = tempfile::tempdir().expect("tempdir");
         let model_path = dir.path().join("identity_zero_dim.onnx");
         fs::write(&model_path, identity_model_with_shape(1, &[1, 20, 0, 64])).expect("write model");
 
         let mut session = OrtSession::load(&model_path, ProviderSelection::default())
             .expect("load identity model");
-        let error = session
+        let outputs = session
             .run_tensors(&[OrtTensorInput {
                 name: "x".to_string(),
                 shape: vec![1, 20, 0, 64],
                 data: OrtTensorData::F32(Vec::new()),
             }])
-            .expect_err("the pinned ORT tensor constructor currently rejects zero dimensions");
-        assert!(error.to_string().contains("all dimensions must be >= 1"));
+            .expect("run identity on an empty tensor");
+        assert_eq!(outputs[0].shape, vec![1, 20, 0, 64]);
+        assert_eq!(outputs[0].data, OrtTensorData::F32(Vec::new()));
     }
 
     #[test]

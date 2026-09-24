@@ -7,18 +7,34 @@ use axum::{
     Json, Router,
 };
 use local_core::{
-    EmbeddingInputType, FileRef, InferenceInput, InferenceOutput, InferenceTask, ModelSpec,
-    TaskKind,
+    EmbeddingInputType, FileRef, InferenceEvent, InferenceInput, InferenceOutput, InferenceTask,
+    ModelSpec, TaskKind,
 };
-use local_error::Result;
+use local_error::{InfraError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
+
+mod chat;
+
+pub use chat::ChatCompletionRequest;
 
 #[async_trait]
 pub trait OpenAiApi: Send + Sync + 'static {
     async fn list_models(&self) -> Result<Vec<ModelSpec>>;
     async fn dispatch(&self, task: InferenceTask) -> Result<InferenceOutput>;
+
+    /// Runs `task` and returns its events as they happen; the last one is
+    /// `output` or `error`. Dropping the receiver cancels the inference.
+    async fn dispatch_stream(
+        &self,
+        task: InferenceTask,
+    ) -> Result<tokio::sync::mpsc::Receiver<InferenceEvent>> {
+        let _ = task;
+        Err(InfraError::Unsupported(
+            "streaming inference is not available".to_string(),
+        ))
+    }
 }
 
 #[derive(Clone)]
@@ -41,6 +57,7 @@ pub fn inference_router(state: OpenAiApiState) -> Router {
         .route("/v1/audio/transcriptions", post(transcriptions))
         .route("/v1/audio/speech", post(speech))
         .route("/v1/embeddings", post(embeddings))
+        .route("/v1/chat/completions", post(chat::chat_completions))
         .route("/rerank", post(rerank))
         .route("/v1/rerank", post(rerank))
         .route("/v2/rerank", post(rerank))
@@ -429,8 +446,151 @@ mod tests {
                     }],
                     total_tokens: 5,
                 },
+                TaskKind::ChatComplete => chat_output(),
             })
         }
+
+        async fn dispatch_stream(
+            &self,
+            task: InferenceTask,
+        ) -> Result<tokio::sync::mpsc::Receiver<InferenceEvent>> {
+            self.tasks.lock().expect("tasks lock").push(task);
+            let (sender, receiver) = tokio::sync::mpsc::channel(8);
+            for event in [
+                InferenceEvent::ChatDelta {
+                    content: "你好".to_string(),
+                },
+                InferenceEvent::ChatToolCall {
+                    index: 0,
+                    call: local_core::ChatToolCall {
+                        id: "call_1".to_string(),
+                        name: "silence".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                },
+                InferenceEvent::Output {
+                    output: chat_output(),
+                },
+            ] {
+                sender.send(event).await.expect("send");
+            }
+            Ok(receiver)
+        }
+    }
+
+    fn chat_output() -> InferenceOutput {
+        InferenceOutput::ChatCompletion {
+            content: "你好".to_string(),
+            tool_calls: vec![local_core::ChatToolCall {
+                id: "call_1".to_string(),
+                name: "silence".to_string(),
+                arguments: "{}".to_string(),
+            }],
+            finish_reason: local_core::ChatFinishReason::ToolCalls,
+            usage: local_core::ChatUsage {
+                prompt_tokens: 10,
+                cached_prompt_tokens: 4,
+                completion_tokens: 3,
+            },
+            timings: local_core::ChatTimings::default(),
+        }
+    }
+
+    const CHAT_BODY: &str = r#"{"model":"qwen3","messages":[{"role":"system","content":"s"},{"role":"user","content":[{"type":"text","text":"hi"}]},{"role":"assistant","content":null,"tool_calls":[{"id":"c","type":"function","function":{"name":"backend_task","arguments":"{\"task\":\"x\"}"}}]},{"role":"tool","tool_call_id":"c","content":"done"}],"tools":[{"type":"function","function":{"name":"silence","parameters":{}}}],"max_tokens":32,"stop":"END","logit_bias":{"151657":2.5},"tool_bias":{"silence":4}STREAM}"#;
+
+    async fn chat_request(app: axum::Router, stream: bool) -> (StatusCode, String) {
+        let body = CHAT_BODY.replace(
+            "STREAM",
+            if stream {
+                r#","stream":true,"stream_options":{"include_usage":true}"#
+            } else {
+                ""
+            },
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (status, String::from_utf8(body.to_vec()).expect("utf8"))
+    }
+
+    #[tokio::test]
+    async fn chat_completions_maps_openai_messages_and_result() {
+        let service = std::sync::Arc::new(RecordingOpenAiApi::default());
+        let app = router(OpenAiApiState {
+            service: service.clone(),
+        });
+        let (status, body) = chat_request(app, false).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let payload: serde_json::Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(payload["object"], "chat.completion");
+        assert_eq!(payload["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(payload["choices"][0]["message"]["content"], "你好");
+        assert_eq!(
+            payload["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "silence"
+        );
+        assert_eq!(payload["usage"]["total_tokens"], 13);
+        assert_eq!(
+            payload["usage"]["prompt_tokens_details"]["cached_tokens"],
+            4
+        );
+
+        let tasks = service.tasks.lock().expect("tasks");
+        let InferenceInput::ChatComplete {
+            messages,
+            tools,
+            options,
+        } = &tasks[0].input
+        else {
+            panic!("not a chat task");
+        };
+        assert_eq!(tasks[0].kind, TaskKind::ChatComplete);
+        assert_eq!(messages[1].content.as_deref(), Some("hi"));
+        assert_eq!(messages[2].content, None);
+        assert_eq!(messages[2].tool_calls[0].arguments, r#"{"task":"x"}"#);
+        assert_eq!(messages[3].tool_call_id.as_deref(), Some("c"));
+        assert_eq!(tools.len(), 1);
+        assert_eq!(options.max_tokens, Some(32));
+        assert_eq!(options.stop, vec!["END".to_string()]);
+        assert_eq!(options.logit_bias.get(&151657), Some(&2.5));
+        assert_eq!(options.tool_bias.get("silence"), Some(&4.0));
+    }
+
+    #[tokio::test]
+    async fn chat_completions_stream_as_server_sent_events() {
+        let service = std::sync::Arc::new(RecordingOpenAiApi::default());
+        let app = router(OpenAiApiState { service });
+        let (status, body) = chat_request(app, true).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let data = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .collect::<Vec<_>>();
+        assert_eq!(data.last(), Some(&"[DONE]"));
+        let chunks = data[..data.len() - 1]
+            .iter()
+            .map(|chunk| serde_json::from_str::<serde_json::Value>(chunk).expect("chunk"))
+            .collect::<Vec<_>>();
+        assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
+        assert_eq!(chunks[1]["choices"][0]["delta"]["content"], "你好");
+        assert_eq!(
+            chunks[2]["choices"][0]["delta"]["tool_calls"][0]["function"]["name"],
+            "silence"
+        );
+        assert_eq!(chunks[3]["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(chunks[4]["usage"]["completion_tokens"], 3);
     }
 
     #[tokio::test]

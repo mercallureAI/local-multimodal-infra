@@ -22,6 +22,7 @@ members = [
     "crates/adapter-sensevoice-asr",
     "crates/adapter-e5-embedding",
     "crates/adapter-mmarco-reranker",
+    "crates/adapter-qwen3-chat",
     "crates/telemetry",
     "crates/cli",
 ]
@@ -36,6 +37,7 @@ publish = false
 async-trait = "0.1"
 axum = { version = "0.7", features = ["macros"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 half = { version = "2.1", default-features = false }
 hound = "3.5"
 hmac = "0.12"

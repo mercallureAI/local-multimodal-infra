@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import time
+import urllib.request
 from collections import Counter
 from pathlib import Path
 from collections.abc import Iterable
@@ -45,11 +46,12 @@ TEST_ALIASES = {
     "indextts2",
     "indextts2_asr",
     "embedding",
+    "chat",
     "rerank",
     "text",
     "mcp_standard",
 }
-RPC_TESTS = {"assets", "yolo", "sensevoice-asr", "indextts", "indextts_asr", "indextts2", "indextts2_asr", "embedding", "rerank"}
+RPC_TESTS = {"assets", "yolo", "sensevoice-asr", "indextts", "indextts_asr", "indextts2", "indextts2_asr", "embedding", "rerank", "chat"}
 MCP_TESTS = {"mcp_standard"}
 INDEXTTS_MODEL_ID = "indextts-1.5-onnx"
 INDEXTTS2_MODEL_ID = "indextts-2.5-onnx"
@@ -58,6 +60,7 @@ INDEXTTS2_REQUIRED = ["manifest.json", "tokenizer.json"]
 # garbled output (for example NaN-poisoned float16 graphs).
 INDEXTTS2_MIN_SIMILARITY = 0.5
 EMBEDDING_MODEL_ID = "multilingual-e5-small-onnx"
+CHAT_MODEL_ID = "qwen3-4b-instruct-2507-int4-onnx"
 RERANK_MODEL_ID = "mmarco-minilm-l12-onnx"
 ADMIN_TOKEN = "local-smoke-admin-token"
 INFER_TOKEN = "local-smoke-infer-token"
@@ -100,6 +103,13 @@ def main(argv: list[str] | None = None) -> int:
 
         controller_bin = locate_bin(root, "controller", args.controller_bin, release=args.release)
         worker_bin = locate_bin(root, "worker", args.worker_bin, release=args.release)
+        ort_library = "onnxruntime.dll" if os.name == "nt" else "libonnxruntime.so"
+        if not os.environ.get("ORT_DYLIB_PATH") and not (worker_bin.parent / ort_library).exists():
+            print(
+                f"[smoke] warning: no {ort_library} beside {worker_bin} and ORT_DYLIB_PATH is unset; "
+                "run `python -m scripts.local.fetch_onnxruntime` first",
+                file=sys.stderr,
+            )
 
         print(f"[smoke] root={root}")
         print(f"[smoke] workdir={workdir}")
@@ -266,6 +276,12 @@ def main(argv: list[str] | None = None) -> int:
             except SmokeError as exc:
                 failures.append(f"rerank: {exc}")
 
+        if "chat" in requested_tests:
+            try:
+                run_chat(model_dir, data_dir, timestamp, args.request_timeout)
+            except SmokeError as exc:
+                failures.append(f"chat: {exc}")
+
     except KeyboardInterrupt:
         print("[smoke] interrupted; cleaning up launched services", file=sys.stderr)
         failures.append("interrupted")
@@ -315,7 +331,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         default="assets,yolo,sensevoice-asr,indextts",
         help=(
             "Comma-separated smoke tests or groups: rpc,mcp,all,assets,yolo,sensevoice-asr,indextts,"
-            "indextts_asr,embedding,rerank,text,mcp_standard. "
+            "indextts_asr,embedding,rerank,text,chat,mcp_standard. "
             "rpc expands to legacy JSON-RPC coverage on /rpc/admin and /rpc/infer. "
             "mcp expands to standard MCP SDK coverage on /mcp/admin and /mcp/infer. "
             "all runs both groups. OCR smoke aliases were removed after withdrawal."
@@ -778,6 +794,87 @@ def run_embedding(data_dir: Path, timestamp: str, timeout: float) -> None:
     if not isinstance(usage.get("prompt_tokens"), int) or usage["prompt_tokens"] <= 0:
         raise SmokeError(f"OpenAI embeddings usage is missing prompt token count: {payload}")
     save_json(data_dir / f"smoke-embedding-{timestamp}.json", payload)
+
+
+CHAT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "backend_task",
+            "description": "交给后台执行：查询实时信息（时间、天气、新闻）或执行操作。",
+            "parameters": {
+                "type": "object",
+                "properties": {"task": {"type": "string", "description": "要完成的任务。"}},
+                "required": ["task"],
+            },
+        },
+    }
+]
+
+
+def run_chat(model_dir: Path, data_dir: Path, timestamp: str, timeout: float) -> None:
+    out = data_dir / f"smoke-chat-{timestamp}.json"
+    if not (model_dir / CHAT_MODEL_ID / "genai_config.json").exists():
+        save_json(out, {"status": "skipped", "reason": f"no local export under {model_dir / CHAT_MODEL_ID}"})
+        print(f"[smoke] chat skipped: no local {CHAT_MODEL_ID} export; details saved {out}")
+        return
+    system = {
+        "role": "system",
+        "content": "你是语音助手小乐。需要实时信息时调用 backend_task，其他问题直接用一句中文回答。",
+    }
+    tool_turn = checked_json_request(
+        "POST",
+        f"{CONTROLLER_URL}/v1/chat/completions",
+        {
+            "model": CHAT_MODEL_ID,
+            "messages": [system, {"role": "user", "content": "现在几点了？"}],
+            "tools": CHAT_TOOLS,
+            "temperature": 0,
+            "max_tokens": 64,
+        },
+        max(timeout, 120.0),
+        INFER_AUTH_HEADERS,
+    )
+    choice = tool_turn.get("choices", [{}])[0]
+    calls = choice.get("message", {}).get("tool_calls") or []
+    if choice.get("finish_reason") != "tool_calls" or not calls or calls[0]["function"]["name"] != "backend_task":
+        raise SmokeError(f"chat did not call backend_task for a time question: {tool_turn}")
+
+    body = json.dumps(
+        {
+            "model": CHAT_MODEL_ID,
+            "messages": [system, {"role": "user", "content": "一加一等于几？"}],
+            "tools": CHAT_TOOLS,
+            "temperature": 0,
+            "max_tokens": 64,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+    ).encode()
+    request = urllib.request.Request(
+        f"{CONTROLLER_URL}/v1/chat/completions",
+        data=body,
+        headers={"content-type": "application/json", **INFER_AUTH_HEADERS},
+        method="POST",
+    )
+    chunks = []
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        for raw in response:
+            line = raw.decode("utf-8").strip()
+            if line.startswith("data: "):
+                chunks.append(line[6:])
+    if not chunks or chunks[-1] != "[DONE]":
+        raise SmokeError(f"chat stream did not end with [DONE]: {chunks[-3:]}")
+    events = [json.loads(chunk) for chunk in chunks[:-1]]
+    text = "".join(
+        choice.get("delta", {}).get("content") or "" for event in events for choice in event.get("choices", [])
+    )
+    usage = next((event["usage"] for event in events if event.get("usage")), None)
+    if not text.strip() or usage is None:
+        raise SmokeError(f"chat stream carried no content or usage: {events[-3:]}")
+    if usage.get("prompt_tokens_details", {}).get("cached_tokens", 0) <= 0:
+        raise SmokeError(f"chat stream did not reuse the cached system prompt: {usage}")
+    save_json(out, {"status": "ok", "tool_turn": tool_turn, "stream_text": text, "stream_usage": usage})
 
 
 def run_rerank(data_dir: Path, timestamp: str, timeout: float) -> None:

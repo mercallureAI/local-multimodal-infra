@@ -34,8 +34,9 @@
 | 语音合成 | `indextts-1.5-onnx` | 实验性，默认禁用 | WAV 音频 |
 | 文本向量 | `multilingual-e5-small-onnx` | 默认启用 | 384 维归一化向量 |
 | 文本重排 | `mmarco-minilm-l12-onnx` | 默认启用 | 文档相关性排序与分数 |
+| 对话补全 | `qwen3-4b-instruct-2507-int4-onnx` | 本地导出后启用 | 流式文本与工具调用（Qwen3 模板，KV 前缀复用） |
 
-所有模型均通过 ONNX Runtime 运行。模型配置表达 CUDA 优先、CPU 回退；实际 provider 仍取决于构建方式、运行环境和具体模型算子支持情况。
+所有模型均通过 ONNX Runtime 运行（运行时加载官方 ONNX Runtime 1.30，见 `docs/implementation-notes.md`）。模型配置表达 CUDA 优先、CPU 回退；实际 provider 仍取决于构建方式、运行环境和具体模型算子支持情况。
 
 SenseVoice ASR 集成 FSMN-VAD 和 CAM++ 发言人识别，默认返回纯文本、约 10 秒粒度的 `timestamped_text`、`segments[].speaker` 和 `speakers[]`。可通过 `timestamps`、`timestamp_granularity_sec`、`token_timestamps`、`speaker_diarization` 调整或关闭这些结果。
 
@@ -51,6 +52,7 @@ SenseVoice ASR 集成 FSMN-VAD 和 CAM++ 发言人识别，默认返回纯文本
 | `/v1/audio/transcriptions` | OpenAI-compatible ASR | `LOCAL_MCP_INFER_TOKENS` |
 | `/v1/audio/speech` | OpenAI-compatible TTS | `LOCAL_MCP_INFER_TOKENS` |
 | `/v1/embeddings` | OpenAI-compatible Embeddings | `LOCAL_MCP_INFER_TOKENS` |
+| `/v1/chat/completions` | OpenAI-compatible Chat（`stream: true` 为 SSE） | `LOCAL_MCP_INFER_TOKENS` |
 | `/rerank`、`/v1/rerank`、`/v2/rerank` | vLLM / Jina / Cohere 风格重排 | `LOCAL_MCP_INFER_TOKENS` |
 
 Admin 和所有 MCP、RPC、OpenAI-compatible 推理接口接受 `Authorization: Bearer <token>`；legacy JSON-RPC 与 OpenAI-compatible 推理也接受 `x-local-infer-token`，Admin 接口接受 `x-local-admin-token`。

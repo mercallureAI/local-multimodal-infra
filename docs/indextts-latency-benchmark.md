@@ -86,7 +86,7 @@ decode tail; high queue wait indicates same-model admission backlog.
 
 ## CUDA-resident E KV cache experiment
 
-On eligible CUDA builds, IndexTTS E/E-prefill uses I/O Binding by default so the
+On eligible CUDA builds, IndexTTS E (prefill and decode) uses I/O Binding by default so the
 48 FP32 KV cache tensors remain on the selected CUDA device between decode
 steps. Set `LOCAL_INDEXTTS_RESIDENT_KV=0` for a host-cache A/B run or emergency
 rollback. Accepted explicit false values are `0`, `false`, `no`, and `off`;
@@ -94,8 +94,8 @@ accepted true values are `1`, `true`, `yes`, and `on` (case-insensitive and
 whitespace-trimmed). Unset, empty, and unknown values remain enabled; a
 non-empty unknown value emits a warning so typos are visible.
 
-The adapter enables the resident path only when E and E-prefill are
-CUDA-selected without a whole-session CPU retry and use the same device ID.
+The adapter enables the resident path only when E is CUDA-selected without a
+whole-session CPU retry.
 CPU and other ineligible provider selections quietly use host caches. Actual
 bound KV placement, type, shape, progression, and device ID are validated on
 every generation. ORT may still intentionally assign ordinary shape/control

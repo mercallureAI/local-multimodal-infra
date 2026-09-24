@@ -64,22 +64,6 @@ pub(crate) fn validate_sessions(sessions: [&OrtSession; 6]) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn validate_e_prefill(session: &OrtSession) -> Result<()> {
-    require_inputs(
-        session,
-        &["hidden_state", "attention_mask"],
-        "IndexTTS_E_Prefill",
-    )?;
-    if session.inputs().len() != 2 {
-        return Err(InfraError::Backend(
-            "IndexTTS_E_Prefill must have exactly hidden_state and attention_mask inputs"
-                .to_string(),
-        ));
-    }
-    validate_hidden_and_mask_inputs(session, "IndexTTS_E_Prefill")?;
-    validate_e_outputs(session, "IndexTTS_E_Prefill", false)
-}
-
 fn validate_e_decode(session: &OrtSession) -> Result<()> {
     for forbidden in ["history_len", "ids_len", "repeat_penality"] {
         if has_input(session, forbidden) {

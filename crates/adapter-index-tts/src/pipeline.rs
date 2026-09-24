@@ -22,8 +22,10 @@ pub struct IndexTtsAdapter {
     b: OrtSession,
     c: OrtSession,
     d: OrtSession,
+    /// Decodes every step, including the prompt prefill (with empty
+    /// caches, which gives the caches and outputs of the former separate
+    /// prefill graph without a second copy of the GPT weights).
     e: OrtSession,
-    e_prefill: OrtSession,
     f: OrtSession,
     tokenizer: SentencePieceTokenizer,
     config: IndexTtsModelConfig,
@@ -47,10 +49,8 @@ impl IndexTtsAdapter {
         let c = backend.load_session(&artifacts.c)?;
         let d = backend.load_session(&artifacts.d)?;
         let e = backend.load_session(&artifacts.e)?;
-        let e_prefill = backend.load_session(&artifacts.e_prefill)?;
         let f = backend.load_session(&artifacts.f)?;
         validate_sessions([&a, &b, &c, &d, &e, &f])?;
-        validate_e_prefill(&e_prefill)?;
         let tokenizer = SentencePieceTokenizer::load(&artifacts.bpe_model)?;
         let config = IndexTtsModelConfig::load(&artifacts, spec)?;
         let output_dir = env::var_os("LOCAL_DATA_DIR")
@@ -61,8 +61,8 @@ impl IndexTtsAdapter {
             resident_kv_setting,
             e.provider_report(),
             e.device_id(),
-            e_prefill.provider_report(),
-            e_prefill.device_id(),
+            e.provider_report(),
+            e.device_id(),
         );
         if let Some(device_id) = resident_kv_device_id {
             tracing::info!(
@@ -90,7 +90,6 @@ impl IndexTtsAdapter {
             c,
             d,
             e,
-            e_prefill,
             f,
             tokenizer,
             config,
@@ -229,7 +228,6 @@ impl IndexTtsAdapter {
             IndexTtsSession::C => self.c.provider_report(),
             IndexTtsSession::D => self.d.provider_report(),
             IndexTtsSession::E => self.e.provider_report(),
-            IndexTtsSession::EPrefill => self.e_prefill.provider_report(),
             IndexTtsSession::F => self.f.provider_report(),
         })
     }
@@ -512,7 +510,9 @@ impl IndexTtsAdapter {
         for step_index in 0..budget {
             let mut inputs = Vec::new();
             let first_step = step_index == 0;
-            if !first_step {
+            if first_step {
+                inputs.extend(empty_e_caches(&self.e, layer_count)?);
+            } else {
                 for idx in 0..layer_count {
                     inputs.push(clone_as_input(&format!("in_key_{idx}"), &keys[idx])?);
                     inputs.push(clone_as_input(&format!("in_value_{idx}"), &values[idx])?);
@@ -529,17 +529,9 @@ impl IndexTtsAdapter {
                 1
             };
             inputs.push(clone_as_input("hidden_state", &hidden_state)?);
-            inputs.push(attention_mask_input(
-                if first_step { &self.e_prefill } else { &self.e },
-                cache_len + ids_len,
-                0,
-            )?);
+            inputs.push(attention_mask_input(&self.e, cache_len + ids_len, 0)?);
 
-            let session = if first_step {
-                &mut self.e_prefill
-            } else {
-                &mut self.e
-            };
+            let session = &mut self.e;
             let outputs = session.run_tensors(&inputs).map_err(|err| {
                 InfraError::Backend(format!("IndexTTS_E v2 execution failed: {err}"))
             })?;
@@ -747,16 +739,17 @@ impl IndexTtsAdapter {
         rng: &mut SplitMix64,
         device_id: u32,
     ) -> std::result::Result<DecodeState, ResidentDecodeError> {
-        let mut decoder = ResidentEDecoder::new(&self.e_prefill, &self.e, device_id)
-            .map_err(ResidentDecodeError::BeforeCommit)?;
+        let mut decoder =
+            ResidentEDecoder::new(&self.e, device_id).map_err(ResidentDecodeError::BeforeCommit)?;
         let hidden = clone_as_input("hidden_state", &concat.hidden_state)
             .map_err(ResidentDecodeError::BeforeCommit)?;
         let prefill_increment =
             hidden_state_token_count(&hidden).map_err(ResidentDecodeError::BeforeCommit)?;
-        let mask = attention_mask_input(&self.e_prefill, concat.concat_len as i64, 0)
+        let mask = attention_mask_input(&self.e, concat.concat_len as i64, 0)
             .map_err(ResidentDecodeError::BeforeCommit)?;
+        let caches = empty_e_caches(&self.e, 24).map_err(ResidentDecodeError::BeforeCommit)?;
         let mut step = decoder
-            .prefill(&mut self.e_prefill, hidden, mask, prefill_increment)
+            .prefill(&mut self.e, hidden, mask, caches, prefill_increment)
             .map_err(ResidentDecodeError::BeforeCommit)?;
 
         let budget = checked_decode_budget(self.config.max_generate_length, concat.concat_len)
@@ -962,7 +955,6 @@ pub(crate) enum IndexTtsSession {
     C,
     D,
     E,
-    EPrefill,
     F,
 }
 
@@ -975,7 +967,6 @@ pub(crate) fn index_tts_provider_report_with(
         c: report(IndexTtsSession::C),
         d: report(IndexTtsSession::D),
         e: report(IndexTtsSession::E),
-        e_prefill: report(IndexTtsSession::EPrefill),
         f: report(IndexTtsSession::F),
     }
 }
@@ -1185,6 +1176,36 @@ pub(crate) fn validate_cache_sequence_lengths(actual: &[usize], expected: usize)
     Ok(())
 }
 
+/// Zero-length `in_key_*`/`in_value_*` inputs: IndexTTS_E prefills the
+/// prompt when it has no past.
+fn empty_e_caches(e: &OrtSession, layer_count: usize) -> Result<Vec<OrtTensorInput>> {
+    let key = e
+        .inputs()
+        .iter()
+        .find(|input| input.name == "in_key_0")
+        .ok_or_else(|| InfraError::Backend("IndexTTS_E has no in_key_0 input".to_string()))?;
+    if key.shape.len() != 4 || key.shape[1] <= 0 || key.shape[3] <= 0 {
+        return Err(InfraError::Backend(format!(
+            "IndexTTS_E in_key_0 shape {:?} is not [1, heads, past, head_dim]",
+            key.shape
+        )));
+    }
+    let shape = vec![1, key.shape[1] as usize, 0, key.shape[3] as usize];
+    let empty = |name: String| OrtTensorInput {
+        name,
+        shape: shape.clone(),
+        data: OrtTensorData::F32(Vec::new()),
+    };
+    Ok((0..layer_count)
+        .flat_map(|idx| {
+            [
+                empty(format!("in_key_{idx}")),
+                empty(format!("in_value_{idx}")),
+            ]
+        })
+        .collect())
+}
+
 #[derive(Debug)]
 struct ResidentEDecoder {
     prefill: ResidentIoBinding,
@@ -1195,7 +1216,7 @@ struct ResidentEDecoder {
 }
 
 impl ResidentEDecoder {
-    fn new(prefill: &OrtSession, decode: &OrtSession, device_id: u32) -> Result<Self> {
+    fn new(decode: &OrtSession, device_id: u32) -> Result<Self> {
         let mut cache_input_names = Vec::with_capacity(48);
         let mut cache_output_names = Vec::with_capacity(48);
         for index in 0..24 {
@@ -1206,7 +1227,7 @@ impl ResidentEDecoder {
         }
         let cpu_outputs = vec!["last_hidden_state".to_string(), "raw_logits".to_string()];
         let prefill_binding =
-            prefill.create_resident_cuda_binding(device_id, &cache_output_names, &cpu_outputs)?;
+            decode.create_resident_cuda_binding(device_id, &cache_output_names, &cpu_outputs)?;
         let decode_a =
             decode.create_resident_cuda_binding(device_id, &cache_output_names, &cpu_outputs)?;
         let decode_b =
@@ -1225,14 +1246,13 @@ impl ResidentEDecoder {
         session: &mut OrtSession,
         hidden_state: OrtTensorInput,
         attention_mask: OrtTensorInput,
+        empty_caches: Vec<OrtTensorInput>,
         hidden_token_count: usize,
     ) -> Result<ResidentEStep> {
         let expected = expected_cache_sequence_len(None, hidden_token_count)?;
-        let outputs = session.run_resident_binding(
-            &mut self.prefill,
-            vec![hidden_state, attention_mask],
-            &[],
-        )?;
+        let mut inputs = vec![hidden_state, attention_mask];
+        inputs.extend(empty_caches);
+        let outputs = session.run_resident_binding(&mut self.prefill, inputs, &[])?;
         self.collect_step(outputs, expected)
     }
 

@@ -291,10 +291,6 @@ fn validate_deployment_config(root: &Path) -> Result<()> {
         ("/contract/manifest_json_sha256", "manifest.json"),
         ("/contract/manifest_yaml_sha256", "manifest.yaml"),
         ("/contract/index_tts_e_sha256", "IndexTTS_E.onnx"),
-        (
-            "/contract/index_tts_e_prefill_sha256",
-            "IndexTTS_E_Prefill.onnx",
-        ),
     ];
     for (pointer, filename) in hash_files {
         let expected = required_sha256(&value, pointer, &path)?;

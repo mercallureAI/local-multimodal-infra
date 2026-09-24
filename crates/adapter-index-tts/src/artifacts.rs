@@ -53,7 +53,6 @@ pub struct IndexTtsArtifacts {
     pub c: PathBuf,
     pub d: PathBuf,
     pub e: PathBuf,
-    pub e_prefill: PathBuf,
     pub f: PathBuf,
     pub bpe_model: PathBuf,
     pub manifest: Option<PathBuf>,
@@ -110,13 +109,6 @@ impl IndexTtsArtifacts {
                 ),
             });
         }
-        let e_prefill = root.join("IndexTTS_E_Prefill.onnx");
-        if !e_prefill.exists() {
-            return Err(InfraError::ModelNotConfigured {
-                model_id: "index-tts".to_string(),
-                reason: "legacy IndexTTS split graph detected: IndexTTS_E_Prefill.onnx is missing; re-export the original checkpoint with split contract v2".to_string(),
-            });
-        }
         let manifests = ["manifest.yaml", "manifest.yml", "manifest.json"]
             .iter()
             .map(|name| root.join(name))
@@ -132,7 +124,6 @@ impl IndexTtsArtifacts {
             c: paths[2].clone(),
             d: paths[3].clone(),
             e: paths[4].clone(),
-            e_prefill,
             f: paths[5].clone(),
             bpe_model,
             manifest,

@@ -1,4 +1,5 @@
 use axum::{
+    body::Body,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
@@ -6,7 +7,7 @@ use axum::{
     Json, Router,
 };
 use local_core::{
-    AdapterKind, BackendKind, InferenceTask, WorkerHeartbeat, WorkerRegistration,
+    AdapterKind, BackendKind, InferenceEvent, InferenceTask, WorkerHeartbeat, WorkerRegistration,
     WorkerRegistrationResponse,
 };
 use local_error::{InfraError, Result};
@@ -14,7 +15,7 @@ use local_registry::ModelRegistry;
 use local_runtime::{IdleMaintenanceLoopHandle, RuntimeManager, RuntimeManagerConfig};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 
 const WORKER_TOKEN_HEADER: &str = "x-local-worker-token";
 
@@ -55,6 +56,7 @@ impl WorkerState {
         Router::new()
             .route("/health", get(health))
             .route("/internal/infer", post(infer))
+            .route("/internal/infer_stream", post(infer_stream))
             .with_state(self)
     }
 
@@ -71,6 +73,7 @@ impl WorkerState {
                 AdapterKind::IndexTts2,
                 AdapterKind::E5Embedding,
                 AdapterKind::MmarcoReranker,
+                AdapterKind::Qwen3Chat,
             ],
             resources: local_hardware::snapshot(),
         }
@@ -174,22 +177,30 @@ async fn health() -> impl IntoResponse {
     )
 }
 
+async fn authorized(state: &WorkerState, headers: &HeaderMap) -> bool {
+    let expected = state.session_token().await;
+    let provided = headers
+        .get(WORKER_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok());
+    expected.is_some() && provided == expected.as_deref()
+}
+
+fn unauthorized() -> axum::response::Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "error": "missing or invalid worker session token" })),
+    )
+        .into_response()
+}
+
 async fn infer(
     State(state): State<WorkerState>,
     headers: HeaderMap,
     Json(task): Json<InferenceTask>,
 ) -> impl IntoResponse {
     let handler_started = std::time::Instant::now();
-    let expected = state.session_token().await;
-    let provided = headers
-        .get(WORKER_TOKEN_HEADER)
-        .and_then(|value| value.to_str().ok());
-    if expected.as_deref().is_none() || provided != expected.as_deref() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "missing or invalid worker session token" })),
-        )
-            .into_response();
+    if !authorized(&state, &headers).await {
+        return unauthorized();
     }
     let request_id = task.id;
     let result = state.runtime.infer(task).await;
@@ -209,6 +220,56 @@ async fn infer(
         )
             .into_response(),
     }
+}
+
+/// Streams the task's [`InferenceEvent`]s as newline-delimited JSON; the
+/// last line is the `output` or an `error`. Dropping the response (the
+/// controller's client went away) stops the inference.
+async fn infer_stream(
+    State(state): State<WorkerState>,
+    headers: HeaderMap,
+    Json(task): Json<InferenceTask>,
+) -> axum::response::Response {
+    if !authorized(&state, &headers).await {
+        return unauthorized();
+    }
+    let (events, receiver) = mpsc::channel::<InferenceEvent>(64);
+    let runtime = state.runtime.clone();
+    tokio::spawn(async move {
+        let request_id = task.id;
+        let started = std::time::Instant::now();
+        let result = runtime.infer_streaming(task, events.clone()).await;
+        tracing::info!(
+            request_id = %request_id,
+            handler_total_ms = started.elapsed().as_millis() as u64,
+            success = result.is_ok(),
+            "worker streaming inference completed"
+        );
+        let last = match result {
+            Ok(output) => InferenceEvent::Output { output },
+            Err(err) => InferenceEvent::Error {
+                message: err.to_string(),
+            },
+        };
+        let _ = events.send(last).await;
+    });
+    let lines = futures_util::stream::unfold(receiver, |mut receiver| async move {
+        let event = receiver.recv().await?;
+        let mut line = serde_json::to_vec(&event).unwrap_or_else(|err| {
+            serde_json::to_vec(&InferenceEvent::Error {
+                message: format!("encode inference event: {err}"),
+            })
+            .unwrap_or_default()
+        });
+        line.push(b'\n');
+        Some((Ok::<_, std::convert::Infallible>(line), receiver))
+    });
+    (
+        StatusCode::OK,
+        [("content-type", "application/x-ndjson")],
+        Body::from_stream(lines),
+    )
+        .into_response()
 }
 
 #[cfg(test)]

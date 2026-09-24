@@ -37,26 +37,38 @@ class IndexTtsExportV2Tests(unittest.TestCase):
             self.assertFalse(export.invoke_local_exporter(args, notes))
             self.assertIn("disabled", notes[0])
 
-    def test_layout_requires_prefill_graph(self):
+    def test_layout_accepts_six_graph_set_without_prefill_graph(self):
+        self.assertNotIn("IndexTTS_E_Prefill.onnx", export.REQUIRED_ONNX_FILES)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for name in export.MODEL_FILES:
-                (root / name).write_bytes(b"legacy")
+                (root / name).write_bytes(b"graph")
+            (root / "bpe.model").write_bytes(b"bpe")
+            export.validate_layout(root, require_onnx=True)
+
+    def test_layout_requires_e_graph(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in export.MODEL_FILES:
+                if name != "IndexTTS_E.onnx":
+                    (root / name).write_bytes(b"graph")
             with self.assertRaises(SystemExit) as error:
                 export.validate_layout(root, require_onnx=True)
-            self.assertIn("IndexTTS_E_Prefill.onnx", str(error.exception))
+            self.assertIn("IndexTTS_E.onnx", str(error.exception))
 
-    def test_raw_export_completeness_requires_prefill(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            args = SimpleNamespace(output_dir=root)
-            for name in export.MODEL_FILES:
-                (root / name).write_bytes(b"legacy")
-            with (
-                mock.patch.object(export, "require_raw_export_dependencies"),
-                mock.patch.object(export.RawIndexTtsExporter, "export_all"),
-            ):
-                self.assertFalse(export.raw_export(args, []))
+    def test_raw_export_completeness_requires_only_six_graphs(self):
+        for missing in [None, "IndexTTS_E.onnx"]:
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                args = SimpleNamespace(output_dir=root)
+                for name in export.MODEL_FILES:
+                    if name != missing:
+                        (root / name).write_bytes(b"graph")
+                with (
+                    mock.patch.object(export, "require_raw_export_dependencies"),
+                    mock.patch.object(export.RawIndexTtsExporter, "export_all"),
+                ):
+                    self.assertEqual(export.raw_export(args, []), missing is None)
 
     def test_no_overwrite_preflight_preserves_ready_manifests_byte_for_byte(self):
         for mode in ["raw-export", "auto"]:
@@ -140,44 +152,46 @@ class IndexTtsExportV2Tests(unittest.TestCase):
 
     def test_strict_e_metadata_validator_rejects_abi_mismatches(self):
         mutations = {
-            "too few cache": lambda prefill, decode: decode.inputs.pop(0),
-            "wrong name": lambda prefill, decode: setattr(decode.inputs[0], "name", "wrong"),
-            "wrong order": lambda prefill, decode: decode.inputs.__setitem__(
+            "too few cache": lambda decode: decode.inputs.pop(0),
+            "missing cache inputs": lambda decode: decode.inputs.__delitem__(slice(0, 48)),
+            "wrong name": lambda decode: setattr(decode.inputs[0], "name", "wrong"),
+            "wrong order": lambda decode: decode.inputs.__setitem__(
                 slice(0, 2), list(reversed(decode.inputs[:2]))
             ),
-            "wrong dtype": lambda prefill, decode: setattr(prefill.inputs[0], "type", "tensor(float16)"),
-            "wrong heads": lambda prefill, decode: decode.inputs[0].shape.__setitem__(1, 16),
-            "wrong head dim": lambda prefill, decode: decode.outputs[0].shape.__setitem__(3, 80),
-            "wrong hidden width": lambda prefill, decode: prefill.inputs[0].shape.__setitem__(2, 1024),
-            "wrong logits width": lambda prefill, decode: decode.outputs[-1].shape.__setitem__(2, 8193),
-            "extra output": lambda prefill, decode: decode.outputs.append(
+            "wrong dtype": lambda decode: setattr(decode.inputs[-2], "type", "tensor(float16)"),
+            "wrong heads": lambda decode: decode.inputs[0].shape.__setitem__(1, 16),
+            "wrong head dim": lambda decode: decode.outputs[0].shape.__setitem__(3, 80),
+            "wrong hidden width": lambda decode: decode.inputs[-2].shape.__setitem__(2, 1024),
+            "wrong logits width": lambda decode: decode.outputs[-1].shape.__setitem__(2, 8193),
+            "extra output": lambda decode: decode.outputs.append(
                 self._meta("extra", "tensor(float)", [1])
             ),
-            "static sequence": lambda prefill, decode: prefill.inputs[0].shape.__setitem__(1, 4),
+            "static sequence": lambda decode: decode.inputs[-2].shape.__setitem__(1, 4),
+            "static cache length": lambda decode: decode.inputs[0].shape.__setitem__(2, 0),
         }
         for label, mutate in mutations.items():
             with self.subTest(label=label), self._validator_fixture() as fixture:
-                prefill, decode = self._valid_e_sessions()
-                mutate(prefill, decode)
+                decode = self._valid_e_session()
+                mutate(decode)
                 with self.assertRaises(export.UnsupportedExport):
-                    self._run_real_validator(fixture, prefill, decode)
+                    self._run_real_validator(fixture, decode)
 
     def test_strict_e_metadata_validator_accepts_exact_contract(self):
         with self._validator_fixture() as fixture:
-            prefill, decode = self._valid_e_sessions()
-            self._run_real_validator(fixture, prefill, decode)
+            decode = self._valid_e_session()
+            self._run_real_validator(fixture, decode)
 
     def test_validator_rejects_source_config_mismatch(self):
         with self._validator_fixture() as fixture:
             (fixture.source / "config.yaml").write_text(self._config_yaml(layers=23))
-            prefill, decode = self._valid_e_sessions()
+            decode = self._valid_e_session()
             with self.assertRaisesRegex(export.UnsupportedExport, "source config"):
-                self._run_real_validator(fixture, prefill, decode)
+                self._run_real_validator(fixture, decode)
 
     def test_main_never_marks_ready_when_certification_fails(self):
         failures = [
             "wrong pinned provenance",
-            "missing IndexTTS_E_Prefill.onnx",
+            "missing IndexTTS_E.onnx",
             "ONNX checker failure",
             "ORT load failure",
             "invalid E ABI",
@@ -305,7 +319,7 @@ class IndexTtsExportV2Tests(unittest.TestCase):
         return SimpleNamespace(name=name, type=element_type, shape=list(shape))
 
     @classmethod
-    def _valid_e_sessions(cls):
+    def _valid_e_session(cls):
         cache_inputs = []
         cache_outputs = []
         for index in range(24):
@@ -328,17 +342,13 @@ class IndexTtsExportV2Tests(unittest.TestCase):
             cls._meta("raw_logits", "tensor(float)", [1, 1, 8194]),
         ]
 
-        def session(inputs, outputs):
-            return SimpleNamespace(
-                inputs=inputs,
-                outputs=outputs,
-                get_inputs=lambda: inputs,
-                get_outputs=lambda: outputs,
-            )
-
-        return (
-            session([hidden, mask], [*cache_outputs, *tails]),
-            session([*cache_inputs, hidden, mask], [*cache_outputs, *tails]),
+        inputs = [*cache_inputs, hidden, mask]
+        outputs = [*cache_outputs, *tails]
+        return SimpleNamespace(
+            inputs=inputs,
+            outputs=outputs,
+            get_inputs=lambda: inputs,
+            get_outputs=lambda: outputs,
         )
 
     @staticmethod
@@ -371,12 +381,9 @@ class IndexTtsExportV2Tests(unittest.TestCase):
             self.temp.cleanup()
 
     @staticmethod
-    def _run_real_validator(fixture, prefill, decode):
+    def _run_real_validator(fixture, decode):
         args = SimpleNamespace(source_model_dir=fixture.source, output_dir=fixture.output)
-        sessions = {
-            "IndexTTS_E_Prefill.onnx": prefill,
-            "IndexTTS_E.onnx": decode,
-        }
+        sessions = {"IndexTTS_E.onnx": decode}
         fallback = SimpleNamespace(get_inputs=lambda: [], get_outputs=lambda: [])
         fake_onnx = SimpleNamespace(checker=SimpleNamespace(check_model=mock.Mock()))
         fake_ort = SimpleNamespace(

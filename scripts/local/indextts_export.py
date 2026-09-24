@@ -32,7 +32,7 @@ from typing import Any, Iterable, Sequence
 
 
 MODEL_FILES = [f"IndexTTS_{stage}.onnx" for stage in "ABCDEF"]
-REQUIRED_ONNX_FILES = [*MODEL_FILES, "IndexTTS_E_Prefill.onnx"]
+REQUIRED_ONNX_FILES = list(MODEL_FILES)
 SUPPORTED_PRECISION = "cpu-fp32"
 SAMPLE_RATE = 24_000
 START_TOKEN = 8192
@@ -183,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         if not ready:
             raise UnsupportedExport(
-                "No complete seven-graph IndexTTS split-contract-v2 set was produced. "
+                "No complete six-graph IndexTTS split-contract-v2 set was produced. "
                 "Use --mode raw-export with the pinned official PyTorch checkpoint."
             )
         apply_precision(args, notes)
@@ -383,7 +383,7 @@ def raw_export(args: argparse.Namespace, notes: list[str]) -> bool:
         raise UnsupportedExport(f"raw PyTorch export failed: {exc}") from exc
     complete = all((args.output_dir / name).exists() for name in REQUIRED_ONNX_FILES)
     if complete:
-        notes.append("raw PyTorch export produced the complete seven-graph split-contract-v2 set")
+        notes.append("raw PyTorch export produced the complete six-graph split-contract-v2 set")
     return complete
 
 
@@ -511,7 +511,7 @@ class RawIndexTtsExporter:
         self._export_b(torch, gpt, text_len)
         self._export_c(torch, gpt)
         self._export_d(torch, conds_latent, text_hidden, gpt_hidden)
-        self._export_e(torch, gpt, heads, head_dim, hidden, mel_len, dtype)
+        self._export_e(torch, gpt, heads, head_dim, hidden, dtype)
         self._export_f(torch, bigvgan, hidden, mel_len, dtype)
 
     def _export_a(self, torch: Any, tts: Any, dtype: Any) -> None:
@@ -566,31 +566,11 @@ class RawIndexTtsExporter:
             dynamic_axes,
         )
 
-    def _export_e(self, torch: Any, gpt: Any, heads: int, head_dim: int, hidden: int, mel_len: int, dtype: Any) -> None:
+    def _export_e(self, torch: Any, gpt: Any, heads: int, head_dim: int, hidden: int, dtype: Any) -> None:
         layers = int(gpt.layers)
-        prefill = IndexTtsE(gpt, layers, prefill=True).to(self.args.device)
-        hidden_state = torch.zeros((1, mel_len, hidden), dtype=dtype, device=self.args.device)
-        attention_mask = torch.ones((1, mel_len), dtype=torch.int64, device=self.args.device)
-        prefill_outputs: list[str] = []
-        prefill_axes = {
-            "hidden_state": {1: "ids_len"},
-            "attention_mask": {1: "ids_len"},
-        }
-        for idx in range(layers):
-            prefill_outputs.extend([f"out_key_{idx}", f"out_value_{idx}"])
-            prefill_axes[f"out_key_{idx}"] = {2: "next_past_len"}
-            prefill_axes[f"out_value_{idx}"] = {2: "next_past_len"}
-        prefill_outputs.extend(["last_hidden_state", "raw_logits"])
-        self._export_onnx(
-            prefill,
-            (hidden_state, attention_mask),
-            "IndexTTS_E_Prefill.onnx",
-            ["hidden_state", "attention_mask"],
-            prefill_outputs,
-            prefill_axes,
-        )
-
-        module = IndexTtsE(gpt, layers, prefill=False).to(self.args.device)
+        # One graph serves both phases: the runtime prefills the prompt by
+        # feeding zero-length caches ([1, heads, 0, head_dim]).
+        module = IndexTtsE(gpt, layers).to(self.args.device)
         inputs: list[Any] = []
         input_names: list[str] = []
         dynamic_axes: dict[str, dict[int, str]] = {}
@@ -972,26 +952,21 @@ class IndexTtsD:
 
 
 class IndexTtsE:
-    def __new__(cls, gpt: Any, layers: int, prefill: bool = False):
+    def __new__(cls, gpt: Any, layers: int):
         import torch
 
         class _IndexTtsE(torch.nn.Module):
-            def __init__(self, gpt_model: Any, layer_count: int, is_prefill: bool):
+            def __init__(self, gpt_model: Any, layer_count: int):
                 super().__init__()
                 self.gpt = gpt_model
                 self.layer_count = layer_count
-                self.prefill = is_prefill
 
             def forward(self, *inputs):
-                if self.prefill:
-                    hidden_state, attention_mask = inputs
-                    past = None
-                else:
-                    past_inputs = inputs[: self.layer_count * 2]
-                    hidden_state, attention_mask = inputs[self.layer_count * 2 :]
-                    past = tuple(
-                        (past_inputs[idx * 2], past_inputs[idx * 2 + 1]) for idx in range(self.layer_count)
-                    )
+                past_inputs = inputs[: self.layer_count * 2]
+                hidden_state, attention_mask = inputs[self.layer_count * 2 :]
+                past = tuple(
+                    (past_inputs[idx * 2], past_inputs[idx * 2 + 1]) for idx in range(self.layer_count)
+                )
                 transformer_outputs = self.gpt.gpt(
                     inputs_embeds=hidden_state,
                     past_key_values=past,
@@ -1007,7 +982,7 @@ class IndexTtsE:
                     flat_present.extend([key, value])
                 return (*flat_present, last_hidden, logits)
 
-        return _IndexTtsE(gpt, layers, prefill)
+        return _IndexTtsE(gpt, layers)
 
 
 class IndexTtsF:
@@ -1201,7 +1176,7 @@ def build_manifest(args: argparse.Namespace, status: str, notes: list[str]) -> d
         "source_model_dir": str(args.source_model_dir),
         "index_tts_project": str(args.index_tts_project),
         "source_config": cfg_meta["config_source"],
-        "files": [*MODEL_FILES, "IndexTTS_E_Prefill.onnx", "bpe.model", "manifest.yaml", "manifest.json"],
+        "files": [*MODEL_FILES, "bpe.model", "manifest.yaml", "manifest.json"],
         "optional_files": optional,
         "artifacts": artifacts,
         "export_provenance": {
@@ -1312,10 +1287,7 @@ def validate_ready_export(args: argparse.Namespace) -> None:
             sessions[name] = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
         except Exception as exc:
             raise UnsupportedExport(f"ONNX Runtime failed to load {name}: {exc}") from exc
-    prefill = sessions["IndexTTS_E_Prefill.onnx"]
-    decode = sessions["IndexTTS_E.onnx"]
-    validate_e_session_metadata(prefill, prefill=True)
-    validate_e_session_metadata(decode, prefill=False)
+    validate_e_session_metadata(sessions["IndexTTS_E.onnx"])
 
 
 def validate_source_config(cfg_path: Path) -> None:
@@ -1344,19 +1316,18 @@ def validate_source_config(cfg_path: Path) -> None:
         raise UnsupportedExport(f"source config does not match the IndexTTS v2 ABI: {mismatches}")
 
 
-def validate_e_session_metadata(session: Any, *, prefill: bool) -> None:
-    label = "IndexTTS_E_Prefill.onnx" if prefill else "IndexTTS_E.onnx"
+def validate_e_session_metadata(session: Any) -> None:
+    label = "IndexTTS_E.onnx"
     inputs = list(session.get_inputs())
     outputs = list(session.get_outputs())
     expected_inputs: list[tuple[str, str, list[Any]]] = []
-    if not prefill:
-        for index in range(24):
-            expected_inputs.extend(
-                [
-                    (f"in_key_{index}", "tensor(float)", [1, 20, "dynamic", 64]),
-                    (f"in_value_{index}", "tensor(float)", [1, 20, "dynamic", 64]),
-                ]
-            )
+    for index in range(24):
+        expected_inputs.extend(
+            [
+                (f"in_key_{index}", "tensor(float)", [1, 20, "dynamic", 64]),
+                (f"in_value_{index}", "tensor(float)", [1, 20, "dynamic", 64]),
+            ]
+        )
     expected_inputs.extend(
         [
             ("hidden_state", "tensor(float)", [1, "dynamic", 1280]),
@@ -1417,7 +1388,7 @@ def metadata_dimension_matches(actual: Any, expected: Any) -> bool:
 
 
 def artifact_metadata(root: Path) -> list[dict[str, Any]]:
-    names = [*MODEL_FILES, "IndexTTS_E_Prefill.onnx", "bpe.model"]
+    names = [*MODEL_FILES, "bpe.model"]
     records = []
     for name in names:
         path = root / name

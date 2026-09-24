@@ -394,6 +394,9 @@ mod tests {
                     results: Vec::new(),
                     total_tokens: 1,
                 },
+                TaskKind::ChatComplete => InferenceOutput::Accepted {
+                    job_id: "unsupported-test".to_string(),
+                },
             })
         }
     }

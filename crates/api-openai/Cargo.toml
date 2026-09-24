@@ -7,11 +7,12 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 axum.workspace = true
+futures-util.workspace = true
 local-core = { path = "../core" }
 local-error = { path = "../error" }
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
 tower = { version = "0.5", features = ["util"] }

@@ -15,10 +15,10 @@ use local_api_openai::{OpenAiApi, OpenAiApiState};
 use local_core::{
     AssetKind, AssetListQuery, AssetRecord, AssetSignItem, AssetSignRequest, AssetSignResponse,
     AssetSignedUrl, AssetUrlOperation, CreateTaskRequest, DownloadModelResponse, DownloadState,
-    FileRef, GenericTaskResult, GenericTaskState, InferenceInput, InferenceOutput, InferenceTask,
-    JobState, ModelDownloadStatus, ModelInfo, ModelSpec, NodeStatus, StartTaskRequest, TaskStatus,
-    TaskUploadSlot, WaitTaskRequest, WorkerHeartbeat, WorkerRegistration,
-    WorkerRegistrationResponse,
+    FileRef, GenericTaskResult, GenericTaskState, InferenceEvent, InferenceInput, InferenceOutput,
+    InferenceTask, JobState, ModelDownloadStatus, ModelInfo, ModelSpec, NodeStatus,
+    StartTaskRequest, TaskStatus, TaskUploadSlot, WaitTaskRequest, WorkerHeartbeat,
+    WorkerRegistration, WorkerRegistrationResponse,
 };
 use local_error::{InfraError, Result};
 use local_files::{asset_uri, normalize_asset_path, parse_asset_uri, AssetsStore};
@@ -324,12 +324,8 @@ impl ControllerState {
         Ok(())
     }
 
-    async fn forward_to_worker(&self, task: InferenceTask) -> Result<InferenceOutput> {
-        let total_started = std::time::Instant::now();
-        let request_id = task.id;
-        if let Some(store) = &self.store {
-            store.record_job_state(&task, JobState::Queued, None, None)?;
-        }
+    /// The worker that serves `task`'s model: its base URL and session token.
+    async fn select_worker(&self, task: &InferenceTask) -> Result<(String, String)> {
         let models = if let Some(model_id) = &task.model_id {
             vec![self.registry.get(model_id).await.ok_or_else(|| {
                 InfraError::ModelNotConfigured {
@@ -357,7 +353,6 @@ impl ControllerState {
             .cloned()
             .collect::<Vec<_>>();
         let worker = self.scheduler.select_worker(&model, &nodes).ok_or_else(|| InfraError::Unsupported("no registered worker can serve the requested model; controller does not load models".to_string()))?;
-        let schedule_ms = total_started.elapsed().as_millis() as u64;
         let worker_token = self
             .worker_session_tokens
             .read()
@@ -367,13 +362,130 @@ impl ControllerState {
             .ok_or_else(|| {
                 InfraError::Backend("selected worker has no session token".to_string())
             })?;
+        Ok((
+            worker
+                .registration
+                .base_url
+                .trim_end_matches('/')
+                .to_string(),
+            worker_token,
+        ))
+    }
+
+    /// Forwards `task` to its worker's streaming endpoint; events arrive on
+    /// the returned receiver, the last being `output` or `error`. Dropping
+    /// the receiver closes the worker connection, which stops the inference.
+    async fn forward_to_worker_stream(
+        &self,
+        task: InferenceTask,
+    ) -> Result<tokio::sync::mpsc::Receiver<InferenceEvent>> {
+        if let Some(store) = &self.store {
+            store.record_job_state(&task, JobState::Queued, None, None)?;
+        }
+        let (worker_base_url, worker_token) = self.select_worker(&task).await?;
         if let Some(store) = &self.store {
             store.record_job_state(&task, JobState::Running, None, None)?;
         }
-        let url = format!(
-            "{}/internal/infer",
-            worker.registration.base_url.trim_end_matches('/')
-        );
+        let mut response = self
+            .http
+            .post(format!("{worker_base_url}/internal/infer_stream"))
+            .header(WORKER_TOKEN_HEADER, worker_token)
+            .json(&task)
+            .send()
+            .await
+            .map_err(|e| InfraError::Backend(format!("forward inference task to worker: {e}")))?;
+        if !response.status().is_success() {
+            let text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<empty worker error>".to_string());
+            let err = InfraError::Backend(format!("worker returned non-success response: {text}"));
+            if let Some(store) = &self.store {
+                store.record_job_state(&task, JobState::Failed, None, Some(&err.to_string()))?;
+            }
+            return Err(err);
+        }
+        let (events, receiver) = tokio::sync::mpsc::channel(64);
+        let store = self.store.clone();
+        tokio::spawn(async move {
+            let mut buffer = Vec::new();
+            let mut outcome: Option<std::result::Result<InferenceOutput, String>> = None;
+            'read: loop {
+                match response.chunk().await {
+                    Ok(Some(bytes)) => {
+                        buffer.extend_from_slice(&bytes);
+                        while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
+                            let line = buffer.drain(..=end).collect::<Vec<_>>();
+                            if line.iter().all(u8::is_ascii_whitespace) {
+                                continue;
+                            }
+                            let event = serde_json::from_slice::<InferenceEvent>(&line)
+                                .unwrap_or_else(|err| InferenceEvent::Error {
+                                    message: format!("decode worker event: {err}"),
+                                });
+                            match &event {
+                                InferenceEvent::Output { output } => {
+                                    outcome = Some(Ok(output.clone()))
+                                }
+                                InferenceEvent::Error { message } => {
+                                    outcome = Some(Err(message.clone()))
+                                }
+                                _ => {}
+                            }
+                            if events.send(event).await.is_err() {
+                                outcome.get_or_insert(Err("client went away".to_string()));
+                                break 'read;
+                            }
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(err) => {
+                        let message = format!("read worker event stream: {err}");
+                        let _ = events
+                            .send(InferenceEvent::Error {
+                                message: message.clone(),
+                            })
+                            .await;
+                        outcome = Some(Err(message));
+                        break;
+                    }
+                }
+            }
+            if let Some(store) = store {
+                let recorded = match outcome {
+                    Some(Ok(output)) => {
+                        store.record_job_state(&task, JobState::Succeeded, Some(&output), None)
+                    }
+                    Some(Err(message)) => {
+                        store.record_job_state(&task, JobState::Failed, None, Some(&message))
+                    }
+                    None => store.record_job_state(
+                        &task,
+                        JobState::Failed,
+                        None,
+                        Some("worker stream ended without a result"),
+                    ),
+                };
+                if let Err(err) = recorded {
+                    tracing::warn!(error = %err, "record streaming job state failed");
+                }
+            }
+        });
+        Ok(receiver)
+    }
+
+    async fn forward_to_worker(&self, task: InferenceTask) -> Result<InferenceOutput> {
+        let total_started = std::time::Instant::now();
+        let request_id = task.id;
+        if let Some(store) = &self.store {
+            store.record_job_state(&task, JobState::Queued, None, None)?;
+        }
+        let (worker_base_url, worker_token) = self.select_worker(&task).await?;
+        let schedule_ms = total_started.elapsed().as_millis() as u64;
+        if let Some(store) = &self.store {
+            store.record_job_state(&task, JobState::Running, None, None)?;
+        }
+        let url = format!("{worker_base_url}/internal/infer");
         let http_started = std::time::Instant::now();
         let response = self
             .http
@@ -1070,6 +1182,31 @@ impl ControllerState {
                     query,
                     documents,
                     top_n,
+                }
+            }
+            local_core::TaskKind::ChatComplete => {
+                let field = |name: &str| status.params.get(name).cloned();
+                let messages = field("messages")
+                    .map(serde_json::from_value)
+                    .transpose()?
+                    .filter(|messages: &Vec<local_core::ChatMessage>| !messages.is_empty())
+                    .ok_or_else(|| {
+                        InfraError::BadRequest(
+                            "chat.complete params.messages is required".to_string(),
+                        )
+                    })?;
+                let tools = field("tools")
+                    .map(serde_json::from_value)
+                    .transpose()?
+                    .unwrap_or_default();
+                let options = field("options")
+                    .map(serde_json::from_value)
+                    .transpose()?
+                    .unwrap_or_default();
+                InferenceInput::ChatComplete {
+                    messages,
+                    tools,
+                    options,
                 }
             }
         };
@@ -1956,6 +2093,13 @@ impl OpenAiApi for ControllerState {
             "controller OpenAI dispatch finished"
         );
         result
+    }
+
+    async fn dispatch_stream(
+        &self,
+        task: InferenceTask,
+    ) -> Result<tokio::sync::mpsc::Receiver<InferenceEvent>> {
+        self.forward_to_worker_stream(task).await
     }
 }
 

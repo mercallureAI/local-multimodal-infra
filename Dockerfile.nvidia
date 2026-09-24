@@ -2,7 +2,6 @@ FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04@sha256:ac55d124da4882b497f732d
 
 ARG ORT_CUDA_VERSION=12
 RUN test "${ORT_CUDA_VERSION}" = "12"
-ENV ORT_CUDA_VERSION=${ORT_CUDA_VERSION}
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /app
@@ -15,16 +14,24 @@ RUN apt-get update \
     && cargo --version
 
 COPY . .
-# The cuda feature selects ort-sys' CUDA archive; --locked fixes all Cargo inputs.
+# ONNX Runtime is loaded at run time (ort `load-dynamic`); --locked fixes all
+# Cargo inputs.
 RUN cargo build --locked --release -p local-cli --bin worker --features cuda
-RUN set -eux; \
-    mkdir -p /ort-libs; \
-    find /app/target -name 'libonnxruntime*.so*' ! -name '*tensorrt*' -exec cp -Lv {} /ort-libs/ \;; \
-    test -e /ort-libs/libonnxruntime_providers_shared.so; \
-    test -e /ort-libs/libonnxruntime_providers_cuda.so
 
-# Use Ubuntu 24.04 for both stages: glibc 2.39 satisfies the CUDA archive's
-# GLIBC_2.38 symbols, while keeping the runtime CUDA and cuDNN versions fixed.
+# The official ONNX Runtime 1.30.0 CUDA 12 build, pinned by digest.
+ARG ORT_VERSION=1.30.0
+ARG ORT_SHA256=f9886932ee7bb0b4d3fcab736a392d4ff5efaa0672b47f19f0cec03437cf64f1
+RUN set -eux; \
+    curl -fsSL -o /tmp/ort.tgz \
+        "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-gpu_cuda12-${ORT_VERSION}.tgz"; \
+    echo "${ORT_SHA256}  /tmp/ort.tgz" | sha256sum -c -; \
+    mkdir -p /tmp/ort /ort-libs; \
+    tar -xzf /tmp/ort.tgz -C /tmp/ort --strip-components=1; \
+    cp -av /tmp/ort/lib/libonnxruntime.so* /tmp/ort/lib/libonnxruntime_providers_shared.so \
+        /tmp/ort/lib/libonnxruntime_providers_cuda.so /ort-libs/
+
+# Use Ubuntu 24.04 for both stages, keeping the runtime CUDA and cuDNN
+# versions fixed.
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04@sha256:ac55d124da4882b497f732d8dfd9a702d5447a5f29d08d56da6f64f0a1eb34bc
 
 WORKDIR /app
@@ -39,19 +46,14 @@ COPY configs ./configs
 RUN set -eux; \
     ldconfig; \
     test -x /usr/local/bin/worker; \
-    test -e /usr/local/lib/libonnxruntime_providers_shared.so; \
-    test -e /usr/local/lib/libonnxruntime_providers_cuda.so; \
-    ln -s ../lib/libonnxruntime_providers_shared.so /usr/local/bin/libonnxruntime_providers_shared.so; \
-    ln -s ../lib/libonnxruntime_providers_cuda.so /usr/local/bin/libonnxruntime_providers_cuda.so; \
-    test -e /usr/local/bin/libonnxruntime_providers_shared.so; \
-    test -e /usr/local/bin/libonnxruntime_providers_cuda.so; \
     for file in \
         /usr/local/bin/worker \
-        /usr/local/bin/libonnxruntime_providers_shared.so \
-        /usr/local/bin/libonnxruntime_providers_cuda.so; do \
+        /usr/local/lib/libonnxruntime.so \
+        /usr/local/lib/libonnxruntime_providers_shared.so \
+        /usr/local/lib/libonnxruntime_providers_cuda.so; do \
         ldd "${file}" | tee /tmp/ldd.txt; \
         ! grep -q 'not found' /tmp/ldd.txt; \
     done
 
-ENV ORT_CUDA_VERSION=12
+ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
 ENV RUST_LOG=info

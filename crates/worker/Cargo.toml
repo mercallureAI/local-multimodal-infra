@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 axum.workspace = true
+futures-util.workspace = true
 local-core = { path = "../core" }
 local-error = { path = "../error" }
 local-hardware = { path = "../hardware" }

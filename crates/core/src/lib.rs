@@ -19,6 +19,7 @@ pub enum AdapterKind {
     IndexTts2,
     E5Embedding,
     MmarcoReranker,
+    Qwen3Chat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -33,6 +34,8 @@ pub enum TaskKind {
     TextEmbed,
     #[serde(rename = "text.rerank")]
     TextRerank,
+    #[serde(rename = "chat.complete")]
+    ChatComplete,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -507,6 +510,14 @@ pub enum InferenceInput {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         top_n: Option<usize>,
     },
+    ChatComplete {
+        messages: Vec<ChatMessage>,
+        /// OpenAI-style tool definitions, rendered by the model's chat template.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tools: Vec<serde_json::Value>,
+        #[serde(default)]
+        options: ChatOptions,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -535,9 +546,109 @@ pub enum InferenceOutput {
         results: Vec<RerankResult>,
         total_tokens: usize,
     },
+    ChatCompletion {
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tool_calls: Vec<ChatToolCall>,
+        finish_reason: ChatFinishReason,
+        usage: ChatUsage,
+        #[serde(default)]
+        timings: ChatTimings,
+    },
     Accepted {
         job_id: String,
     },
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ChatMessage {
+    /// `system`, `user`, `assistant` or `tool`.
+    pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ChatToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ChatToolCall {
+    pub id: String,
+    pub name: String,
+    /// The arguments as a JSON text, as in the OpenAI API.
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ChatOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<usize>,
+    /// 0 selects greedy decoding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop: Vec<String>,
+    /// Token id -> logit offset, applied at every step (OpenAI `logit_bias`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub logit_bias: BTreeMap<u32, f32>,
+    /// Logit offset for starting a tool call at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_bias: Option<f32>,
+    /// Tool name -> logit offset on the name's first token when the model
+    /// picks which tool to call.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_bias: BTreeMap<String, f32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatFinishReason {
+    #[default]
+    Stop,
+    Length,
+    ToolCalls,
+    /// The caller stopped reading (a streaming client went away).
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct ChatUsage {
+    pub prompt_tokens: usize,
+    /// Prompt tokens whose KV cache was reused from the previous request.
+    #[serde(default)]
+    pub cached_prompt_tokens: usize,
+    pub completion_tokens: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct ChatTimings {
+    pub prefill_ms: u64,
+    pub first_token_ms: u64,
+    pub decode_ms: u64,
+}
+
+/// Incremental results of a streaming inference, in order; the last event is
+/// `output` (the complete result) or `error`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InferenceEvent {
+    ChatDelta { content: String },
+    ChatToolCall { index: usize, call: ChatToolCall },
+    Output { output: InferenceOutput },
+    Error { message: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

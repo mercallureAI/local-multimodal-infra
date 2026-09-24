@@ -53,12 +53,13 @@ Repo-specific instructions for future OpenCode agents. Higher-priority user inst
 
 ## Verification commands
 
+- ONNX Runtime 1.30 is loaded at run time (ort `load-dynamic`): run `python -m scripts.local.fetch_onnxruntime` (add `--pypi-mirror https://pypi.tuna.tsinghua.edu.cn` if PyPI is unreachable) to put the pinned libraries beside `target/{release,debug}` binaries; tests that create ORT sessions also need `ORT_DYLIB_PATH=<that onnxruntime.dll/.so>` because test binaries run from `target/<profile>/deps`. On Windows never let it fall back to `System32\onnxruntime.dll`.
 - Cheap/default Rust checks: `cargo check --workspace --all-targets`, `cargo build --bins`, `cargo test --workspace`.
 - Opt-in real FunASR pipeline test: `LOCAL_SENSEVOICE_ASR_MODEL_DIR=workdir/models/sensevoice-small-onnx cargo test -p local-adapter-sensevoice-asr real_model_smoke_if_env_set -- --nocapture` (add `--features cuda` to require the CUDA provider; do not use PowerShell if the user forbids it).
 
 ## Script entrypoints
 
-- Help: `python -m scripts.local.smoke --help`, `python -m scripts.local.indextts_export --help`, `python scripts/indextts_export.py --help`.
+- Help: `python -m scripts.local.fetch_onnxruntime --help`, `python -m scripts.local.smoke --help`, `python -m scripts.local.indextts_export --help`, `python scripts/indextts_export.py --help`.
 - Standard MCP validation client: `python -m scripts.local.mcp_standard_client --admin-token <token> --full` (requires the official Python `mcp` SDK in that interpreter).
 - IndexTTS export top-level entrypoint `scripts/indextts_export.py` delegates to `scripts.local.indextts_export`; do not use old `tools/indextts` paths.
 

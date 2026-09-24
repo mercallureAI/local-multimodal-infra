@@ -2,11 +2,13 @@ use local_adapter_e5_embedding::E5EmbeddingAdapter;
 use local_adapter_index_tts::IndexTtsAdapter;
 use local_adapter_index_tts2::IndexTts2Adapter;
 use local_adapter_mmarco_reranker::MmarcoRerankerAdapter;
+use local_adapter_qwen3_chat::Qwen3ChatAdapter;
 use local_adapter_sensevoice_asr::SenseVoiceAsrAdapter;
 use local_adapter_yolo::YoloAdapter;
 use local_backend_ort::probe_runtime_execution_provider_availability;
 use local_core::{
-    AdapterKind, InferenceInput, InferenceOutput, InferenceTask, ModelSpec, ModelState, TaskKind,
+    AdapterKind, InferenceEvent, InferenceInput, InferenceOutput, InferenceTask, ModelSpec,
+    ModelState, TaskKind,
 };
 use local_error::{InfraError, Result};
 use std::{
@@ -18,7 +20,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 
 pub const DEFAULT_IDLE_UNLOAD_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -94,6 +96,25 @@ impl RuntimeManager {
     }
 
     pub async fn infer(&self, task: InferenceTask) -> Result<InferenceOutput> {
+        self.infer_with_events(task, None).await
+    }
+
+    /// Like [`Self::infer`], and incremental results (chat tokens) go to
+    /// `events` as they are produced. When `events` is closed (the caller
+    /// went away) the adapter stops early.
+    pub async fn infer_streaming(
+        &self,
+        task: InferenceTask,
+        events: mpsc::Sender<InferenceEvent>,
+    ) -> Result<InferenceOutput> {
+        self.infer_with_events(task, Some(events)).await
+    }
+
+    async fn infer_with_events(
+        &self,
+        task: InferenceTask,
+        events: Option<mpsc::Sender<InferenceEvent>>,
+    ) -> Result<InferenceOutput> {
         let total_started = Instant::now();
         let spec = self.resolve_spec(&task)?;
         let model_id = spec.id.clone();
@@ -138,7 +159,13 @@ impl RuntimeManager {
             })?;
             loaded.state = ModelState::Busy;
             let infer_started = Instant::now();
-            let (result, panicked) = infer_model_catching_panic(loaded, &task, &model_id);
+            let mut sink = |event: InferenceEvent| {
+                events
+                    .as_ref()
+                    .is_none_or(|events| events.blocking_send(event).is_ok())
+            };
+            let (result, panicked) =
+                infer_model_catching_panic(loaded, &task, &model_id, &mut sink);
             let execution = infer_started.elapsed();
             tracing::info!(
                 request_id = %request_id,
@@ -336,8 +363,9 @@ fn infer_model_catching_panic(
     loaded: &mut LoadedEntry,
     task: &InferenceTask,
     model_id: &str,
+    sink: &mut dyn FnMut(InferenceEvent) -> bool,
 ) -> (Result<InferenceOutput>, bool) {
-    match catch_unwind(AssertUnwindSafe(|| loaded.model.infer(task))) {
+    match catch_unwind(AssertUnwindSafe(|| loaded.model.infer(task, sink))) {
         Ok(result) => {
             loaded.last_used = Instant::now();
             loaded.last_cache_released_at = None;
@@ -453,6 +481,9 @@ impl LoadedEntry {
             AdapterKind::MmarcoReranker => {
                 LoadedModel::MmarcoReranker(MmarcoRerankerAdapter::load(&spec)?)
             }
+            AdapterKind::Qwen3Chat => {
+                LoadedModel::Qwen3Chat(Box::new(Qwen3ChatAdapter::load(&spec)?))
+            }
         };
         match &model {
             LoadedModel::E5Embedding(adapter) => {
@@ -566,6 +597,7 @@ fn validated_runtime_providers_for_model(model_id: &str) -> Option<&'static [&'s
         "indextts-2.5-onnx" => Some(&["cuda", "cpu"]),
         "multilingual-e5-small-onnx" => Some(&["cuda", "cpu"]),
         "mmarco-minilm-l12-onnx" => Some(&["cuda", "cpu"]),
+        "qwen3-4b-instruct-2507-int4-onnx" => Some(&["cuda", "cpu"]),
         _ => None,
     }
 }
@@ -578,6 +610,7 @@ enum LoadedModel {
     IndexTts2(IndexTts2Adapter),
     E5Embedding(E5EmbeddingAdapter),
     MmarcoReranker(MmarcoRerankerAdapter),
+    Qwen3Chat(Box<Qwen3ChatAdapter>),
     #[cfg(test)]
     Test {
         cache_releases: Arc<std::sync::atomic::AtomicUsize>,
@@ -586,7 +619,11 @@ enum LoadedModel {
 }
 
 impl LoadedModel {
-    fn infer(&mut self, task: &InferenceTask) -> Result<InferenceOutput> {
+    fn infer(
+        &mut self,
+        task: &InferenceTask,
+        sink: &mut dyn FnMut(InferenceEvent) -> bool,
+    ) -> Result<InferenceOutput> {
         #[cfg(test)]
         if let LoadedModel::Test { panic_on_infer, .. } = self {
             if panic_on_infer.swap(false, Ordering::SeqCst) {
@@ -642,6 +679,15 @@ impl LoadedModel {
                     top_n,
                 },
             ) => adapter.rerank(query, documents, *top_n),
+            (
+                LoadedModel::Qwen3Chat(adapter),
+                TaskKind::ChatComplete,
+                InferenceInput::ChatComplete {
+                    messages,
+                    tools,
+                    options,
+                },
+            ) => adapter.complete(messages, tools, options, sink),
             (_, kind, _) => Err(InfraError::Unsupported(format!(
                 "loaded adapter does not support task {kind:?}"
             ))),
@@ -655,7 +701,8 @@ impl LoadedModel {
             | LoadedModel::IndexTts(_)
             | LoadedModel::IndexTts2(_)
             | LoadedModel::E5Embedding(_)
-            | LoadedModel::MmarcoReranker(_) => {
+            | LoadedModel::MmarcoReranker(_)
+            | LoadedModel::Qwen3Chat(_) => {
                 tracing::debug!(
                     model_id,
                     "idle cache release hook reached; adapters currently keep no reusable per-request cache separate from the loaded model/session"
@@ -980,7 +1027,8 @@ mod tests {
             },
         );
 
-        let (result, panicked) = infer_model_catching_panic(&mut entry, &task, "test");
+        let (result, panicked) =
+            infer_model_catching_panic(&mut entry, &task, "test", &mut |_| true);
         assert!(panicked);
         assert!(result
             .expect_err("typed panic error")
@@ -1236,6 +1284,7 @@ mod tests {
             AdapterKind::IndexTts | AdapterKind::IndexTts2 => vec![TaskKind::TtsSynthesize],
             AdapterKind::E5Embedding => vec![TaskKind::TextEmbed],
             AdapterKind::MmarcoReranker => vec![TaskKind::TextRerank],
+            AdapterKind::Qwen3Chat => vec![TaskKind::ChatComplete],
         };
         ModelSpec {
             id: id.to_string(),

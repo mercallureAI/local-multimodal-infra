@@ -1,0 +1,32 @@
+id: qwen3-4b-instruct-2507-int4-onnx
+name: Qwen3-4B-Instruct-2507 INT4 ONNX
+enabled: true
+task_kinds:
+  - chat.complete
+adapter: qwen3_chat
+backend: ort
+artifacts:
+  # Local export (path omitted: <model_dir>/qwen3-4b-instruct-2507-int4-onnx):
+  #   python -m onnxruntime_genai.models.builder -i Qwen/Qwen3-4B-Instruct-2507 \
+  #     -o <dir> -p int4 -e cuda --extra_options int4_algo_config=rtn_last prune_lm_head=true
+  # The directory holds model.onnx(.data), genai_config.json, tokenizer.json
+  # and chat_template.jinja.
+  - type: local
+runtime:
+  provider_order: [cuda, cpu]
+  max_concurrency: 1
+  idle_ttl_sec: 600
+resources:
+  min_ram_mb: 4096
+  min_vram_mb: 4096
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  runtime: onnxruntime
+  model_family: qwen3
+  task: chat-completion
+  precision: int4
+  # KV cache capacity in tokens, allocated once on load (~144 KB/token).
+  max_context: 8192

@@ -196,16 +196,16 @@ impl OrtSession {
         let input_allocator =
             Allocator::new(&self.real.session, input_memory).map_err(map_ort_err)?;
         let output_allocator =
-            Allocator::new(&self.real.session, output_memory).map_err(map_ort_err)?;
+            Allocator::new(&self.real.session, output_memory.clone()).map_err(map_ort_err)?;
         let input =
             Tensor::<f32>::new(&input_allocator, input_shape.to_vec()).map_err(map_ort_err)?;
-        let output =
-            Tensor::<f32>::new(&output_allocator, output_shape.to_vec()).map_err(map_ort_err)?;
         let input_name = self.inputs()[0].name.clone();
         let output_name = self.outputs()[0].name.clone();
         let mut binding = self.real.session.create_binding().map_err(map_ort_err)?;
+        // ORT allocates the pinned output: since 1.30 a caller-allocated
+        // pinned output fails the device-to-host copy (source == target).
         binding
-            .bind_output(output_name.clone(), output)
+            .bind_output_to_device(output_name.clone(), &output_memory)
             .map_err(map_ort_err)?;
         Ok(PinnedCudaF32IoBinding {
             binding,
@@ -355,7 +355,7 @@ impl OrtSession {
         let input_allocator =
             Allocator::new(&self.real.session, input_memory).map_err(map_ort_err)?;
         let output_allocator =
-            Allocator::new(&self.real.session, output_memory).map_err(map_ort_err)?;
+            Allocator::new(&self.real.session, output_memory.clone()).map_err(map_ort_err)?;
         let mut inputs = Vec::with_capacity(self.inputs().len());
         for input in self.inputs() {
             let tensor =
@@ -364,10 +364,10 @@ impl OrtSession {
         }
 
         let mut binding = self.real.session.create_binding().map_err(map_ort_err)?;
-        let output_tensor =
-            Tensor::<f32>::new(&output_allocator, output_shape.to_vec()).map_err(map_ort_err)?;
+        // ORT allocates the pinned output: since 1.30 a caller-allocated
+        // pinned output fails the device-to-host copy (source == target).
         binding
-            .bind_output(output_name, output_tensor)
+            .bind_output_to_device(output_name, &output_memory)
             .map_err(map_ort_err)?;
         Ok(PinnedCudaIoBinding {
             binding,
@@ -738,7 +738,7 @@ fn validate_resident_output_names<'a>(
     Ok(())
 }
 
-fn owned_tensor(input: OrtTensorInput) -> Result<DynTensor> {
+pub(crate) fn owned_tensor(input: OrtTensorInput) -> Result<DynTensor> {
     let expected_len = input.shape.iter().try_fold(1usize, |acc, dim| {
         acc.checked_mul(*dim).ok_or_else(|| {
             InfraError::Backend(format!(
@@ -760,6 +760,9 @@ fn owned_tensor(input: OrtTensorInput) -> Result<DynTensor> {
         .iter()
         .map(|dim| i64::try_from(*dim).map_err(|_| shape_overflow(&input.name, *dim)))
         .collect::<Result<Vec<_>>>()?;
+    if expected_len == 0 {
+        return empty_tensor(&input.data, shape);
+    }
     match input.data {
         OrtTensorData::F32(data) => Tensor::from_array((shape, data.into_boxed_slice()))
             .map(|tensor| tensor.upcast())
@@ -783,6 +786,21 @@ fn owned_tensor(input: OrtTensorInput) -> Result<DynTensor> {
             .map(|tensor| tensor.upcast())
             .map_err(map_ort_err),
     }
+}
+
+/// A tensor with a zero-sized dimension (such as an empty KV cache): ORT
+/// rejects those when they wrap caller data, so it allocates them.
+pub(crate) fn empty_tensor(data: &OrtTensorData, shape: Vec<i64>) -> Result<DynTensor> {
+    let element = match data {
+        OrtTensorData::F32(_) => TensorElementType::Float32,
+        OrtTensorData::F16(_) => TensorElementType::Float16,
+        OrtTensorData::Bool(_) => TensorElementType::Bool,
+        OrtTensorData::I8(_) => TensorElementType::Int8,
+        OrtTensorData::I16(_) => TensorElementType::Int16,
+        OrtTensorData::I32(_) => TensorElementType::Int32,
+        OrtTensorData::I64(_) => TensorElementType::Int64,
+    };
+    DynTensor::new(&Allocator::default(), element, shape).map_err(map_ort_err)
 }
 
 fn extract_cpu_output(name: &str, value: DynValue) -> Result<OrtTensorOutput> {
