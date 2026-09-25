@@ -95,7 +95,9 @@ pub struct EmbeddingsRequest {
 #[derive(Debug, Serialize)]
 struct EmbeddingObject {
     object: &'static str,
-    embedding: Vec<f32>,
+    /// Numbers, or with `encoding_format: base64` their little-endian f32
+    /// bytes in base64 (what the OpenAI clients ask for by default).
+    embedding: serde_json::Value,
     index: usize,
 }
 
@@ -103,16 +105,16 @@ async fn embeddings(
     State(state): State<OpenAiApiState>,
     Json(req): Json<EmbeddingsRequest>,
 ) -> impl IntoResponse {
-    if req
-        .encoding_format
-        .as_deref()
-        .is_some_and(|value| value != "float")
-    {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "only encoding_format=float is supported".to_string(),
-        );
-    }
+    let base64 = match req.encoding_format.as_deref() {
+        None | Some("float") => false,
+        Some("base64") => true,
+        Some(other) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("encoding_format must be float or base64, got {other:?}"),
+            )
+        }
+    };
     if req.dimensions.is_some_and(|dimensions| dimensions != 384) {
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -145,7 +147,18 @@ async fn embeddings(
                 .enumerate()
                 .map(|(index, embedding)| EmbeddingObject {
                     object: "embedding",
-                    embedding,
+                    embedding: if base64 {
+                        use base64::Engine;
+                        let bytes: Vec<u8> = embedding
+                            .iter()
+                            .flat_map(|value| value.to_le_bytes())
+                            .collect();
+                        base64::engine::general_purpose::STANDARD
+                            .encode(bytes)
+                            .into()
+                    } else {
+                        embedding.into()
+                    },
                     index,
                 })
                 .collect::<Vec<_>>();
@@ -759,6 +772,39 @@ mod tests {
         assert_eq!(payload["usage"]["prompt_tokens"], 3);
         let tasks = service.tasks.lock().expect("tasks");
         assert_eq!(tasks[0].kind, TaskKind::TextEmbed);
+    }
+
+    #[tokio::test]
+    async fn embeddings_come_as_base64_when_asked() {
+        use base64::Engine;
+        let service = std::sync::Arc::new(RecordingOpenAiApi::default());
+        let app = router(OpenAiApiState { service });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/embeddings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"multilingual-e5-small-onnx","input":"hello","encoding_format":"base64"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(
+                payload["data"][0]["embedding"]
+                    .as_str()
+                    .expect("a base64 string"),
+            )
+            .expect("base64");
+        assert_eq!(bytes.len(), 384 * 4);
     }
 
     #[tokio::test]
