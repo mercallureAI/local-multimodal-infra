@@ -1,9 +1,15 @@
 //! IndexTTS-2.5 text frontend, mirroring `IndexTTS2.infer_generator` in
 //! `indextts/infer_v2_5.py`: character replacement plus zh/en normalization,
 //! per-language casing, `<word|pronunciation>` annotations and token-budgeted
-//! segmentation. zh/en normalization reuses the IndexTTS 1.5 Rust rules, which
-//! approximate the official wetext TextNormalizer; ja/es (NeMo TN upstream) are
-//! passed through unnormalized.
+//! segmentation. Per language, as upstream:
+//! - zh/zhen/en: TextNormalizer (reusing the IndexTTS 1.5 Rust rules, which
+//!   approximate the official wetext normalizer), then lowercase;
+//! - ja: character replacement only, lowercase. NeMo has no Japanese grammar
+//!   and upstream runs its G2P with `g2p_ratio=0`, so both are identity;
+//! - es: character replacement only, uppercase. Upstream's NeMo TN needs the
+//!   optional `nemo_text_processing` package (not in its lock file) and falls
+//!   back to the unchanged text without it;
+//! - any other code: character replacement only.
 
 use crate::tokenizer::MultilingualTokenizer;
 use local_adapter_index_tts::normalize_text;
@@ -257,6 +263,13 @@ mod tests {
         let text = prepare_text("最<重|ZHONG4>要的是2个", "zh", true);
         assert!(text.contains("<|SPECIAL_TOKEN_2|>ZHONG4<|SPECIAL_TOKEN_2|>"), "{text}");
         assert!(!text.contains('2') || text.contains("ZHONG4"), "{text}");
+    }
+
+    #[test]
+    fn non_zh_en_languages_only_replace_characters_and_case() {
+        assert_eq!(prepare_text("今日は「晴れ」です。", "ja", true), "今日は'晴れ'です.");
+        assert_eq!(prepare_text("Hola, ¿cómo estás? 25 años", "es", true), "HOLA, ¿CÓMO ESTÁS? 25 AÑOS");
+        assert_eq!(prepare_text("مرحبا، العالم (1)", "ar", true), "مرحبا، العالم '1'");
     }
 
     #[test]

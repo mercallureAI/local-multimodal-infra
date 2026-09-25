@@ -108,17 +108,18 @@ impl MultilingualTokenizer {
         self.bpe.encode_with_special_tokens(text).len()
     }
 
-    /// Returns the normalized language code and the GPT language-embedding id.
-    /// Unknown codes fall back to `common`, as `lang_to_token` does upstream.
+    /// Returns the lowercased language code and the GPT language-embedding id.
+    /// As upstream, the code itself is kept for the `<|code|>` text prefix even
+    /// when unknown; only the embedding id falls back to `common`
+    /// (`lang_to_token`).
     pub fn language(&self, code: &str) -> (String, i64) {
         let code = code.trim().to_lowercase();
-        match self.languages.get(&code) {
-            Some(id) => (code, *id),
-            None => (
-                self.fallback_language.clone(),
-                self.languages[&self.fallback_language],
-            ),
-        }
+        let id = self
+            .languages
+            .get(&code)
+            .copied()
+            .unwrap_or(self.languages[&self.fallback_language]);
+        (code, id)
     }
 }
 
@@ -199,6 +200,6 @@ mod tests {
             assert_eq!(tokenizer.encode(text), expected, "{text}");
         }
         assert_eq!(tokenizer.language("ZH"), ("zh".to_string(), 1));
-        assert_eq!(tokenizer.language("klingon"), ("common".to_string(), 105));
+        assert_eq!(tokenizer.language("klingon"), ("klingon".to_string(), 105));
     }
 }

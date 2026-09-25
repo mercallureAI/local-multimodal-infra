@@ -737,6 +737,12 @@ mod real_model {
             ("zh", "大家好，我现在正在体验 IndexTTS 二点五的 Rust 推理。", json!({"seed": 9527})),
             ("zh-sad", "对不起嘛！我的记性真的不太好。", json!({"seed": 9527, "emotion_vector": {"sad": 0.8}})),
             ("en", "Hello! This sentence was synthesized by the Rust pipeline.", json!({"seed": 9527})),
+            ("ja", "今日はいい天気ですね。一緒に公園へ散歩に行きませんか？", json!({"seed": 9527})),
+            (
+                "es",
+                "Hola, ¿cómo estás? Hoy hace muy buen tiempo para pasear.",
+                json!({"seed": 9527, "language": "es"}),
+            ),
             // One segment near the 120-token budget: the VRAM worst case.
             (
                 "zh-long",

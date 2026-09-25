@@ -139,9 +139,14 @@ fn emotion_vector(params: &BTreeMap<String, Value>) -> Result<Option<[f32; 8]>> 
     Ok(Some(vector))
 }
 
-/// zh when the text contains CJK ideographs, otherwise en.
+/// Best-effort default when the request names no language: ja when the text
+/// contains kana, zh for other CJK ideographs, otherwise en. Callers should
+/// pass `language` explicitly for es and other Latin-script languages.
 pub fn detect_language(text: &str) -> &'static str {
-    if text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) {
+    let is_kana = |c: char| ('\u{3040}'..='\u{30ff}').contains(&c) || ('\u{31f0}'..='\u{31ff}').contains(&c);
+    if text.chars().any(is_kana) {
+        "ja"
+    } else if text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) {
         "zh"
     } else {
         "en"
@@ -218,6 +223,14 @@ mod tests {
         assert_eq!(params.emotion_vector, None);
         assert_eq!((params.top_k, params.top_p, params.cfg_rate), (20, 0.9, 0.7));
         assert_eq!(SynthesisParams::from_map(&map(json!({})), "hello").unwrap().language, "en");
+    }
+
+    #[test]
+    fn language_detection_prefers_kana_for_japanese() {
+        assert_eq!(detect_language("今日はいい天気ですね"), "ja");
+        assert_eq!(detect_language("カタカナ"), "ja");
+        assert_eq!(detect_language("今天天气很好"), "zh");
+        assert_eq!(detect_language("¡Hola, amigo!"), "en");
     }
 
     #[test]
