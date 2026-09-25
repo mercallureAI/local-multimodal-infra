@@ -23,7 +23,7 @@ use local_error::{InfraError, Result};
 use local_runtime::RuntimeManager;
 use serde_json::Value;
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     future::Future,
     path::{Path, PathBuf},
     sync::{
@@ -83,9 +83,27 @@ pub enum Outbound {
     Audio(Vec<u8>),
 }
 
+/// Emotions IndexTTS-2.5 takes in `emotion_vector` (IndexTTS 1.5 ignores it).
+const TTS_EMOTIONS: [&str; 8] = [
+    "happy",
+    "angry",
+    "sad",
+    "afraid",
+    "disgusted",
+    "melancholic",
+    "surprised",
+    "calm",
+];
+/// Weight of the configured emotion; the reference voice's own makes up the
+/// rest.
+const DEFAULT_EMOTION_STRENGTH: f64 = 0.8;
+
 /// The models of a `voice_cascade` spec: its artifact is the Silero VAD
 /// model; `metadata` names the chat, ASR and TTS models and may give a
-/// `default_reference_audio` (a path the worker reads).
+/// `default_reference_audio` (a path the worker reads) and the emotion the
+/// bot speaks with by default (`tts_emotion`, calm unless set, `none` for the
+/// reference voice's own; `tts_emotion_strength`, 0 to 1), which a session
+/// may override.
 #[derive(Debug, Clone)]
 pub struct CascadeModels {
     pub vad_model: PathBuf,
@@ -93,6 +111,8 @@ pub struct CascadeModels {
     pub asr_model: String,
     pub tts_model: String,
     pub default_reference_audio: Option<PathBuf>,
+    /// The spec's emotion settings (`tts_emotion`, `tts_emotion_strength`).
+    pub tts_emotion: BTreeMap<String, Value>,
     /// Where a conversation keeps its short-lived audio files.
     pub temp_dir: PathBuf,
 }
@@ -136,9 +156,56 @@ impl CascadeModels {
                 .and_then(Value::as_str)
                 .filter(|path| !path.is_empty())
                 .map(PathBuf::from),
+            tts_emotion: {
+                let emotion: BTreeMap<String, Value> = spec
+                    .metadata
+                    .iter()
+                    .filter(|(key, _)| key.starts_with("tts_emotion"))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                // Checked now: a typo fails the session, not every sentence.
+                tts_params(&emotion).map_err(|reason| InfraError::ModelNotConfigured {
+                    model_id: spec.id.clone(),
+                    reason,
+                })?;
+                emotion
+            },
             temp_dir: data_dir.join("voice-cascade"),
         })
     }
+}
+
+/// The TTS parameters the emotion settings (`tts_emotion`,
+/// `tts_emotion_strength`) ask for; an error says what is wrong with them.
+fn tts_params(
+    settings: &BTreeMap<String, Value>,
+) -> std::result::Result<BTreeMap<String, Value>, String> {
+    let emotion = match settings.get("tts_emotion") {
+        None | Some(Value::Null) => "calm",
+        Some(Value::String(emotion)) => emotion.as_str(),
+        Some(other) => return Err(format!("tts_emotion must be a string, got {other}")),
+    };
+    let mut params = BTreeMap::new();
+    if emotion.is_empty() || emotion == "none" {
+        return Ok(params);
+    }
+    if !TTS_EMOTIONS.contains(&emotion) {
+        return Err(format!(
+            "tts_emotion `{emotion}` is none of {TTS_EMOTIONS:?} (or `none`)"
+        ));
+    }
+    let strength = match settings.get("tts_emotion_strength") {
+        None | Some(Value::Null) => DEFAULT_EMOTION_STRENGTH,
+        Some(value) => value
+            .as_f64()
+            .filter(|strength| (0.0..=1.0).contains(strength))
+            .ok_or_else(|| format!("tts_emotion_strength must be 0 to 1, got {value}"))?,
+    };
+    params.insert(
+        "emotion_vector".to_string(),
+        serde_json::json!({ emotion: strength }),
+    );
+    Ok(params)
 }
 
 /// One count of a counter, given back when dropped (also when the task
@@ -245,6 +312,15 @@ async fn converse(
     mut inbound: mpsc::Receiver<Inbound>,
     out: mpsc::UnboundedSender<Outbound>,
 ) -> Result<()> {
+    // The session's emotion settings over the model's.
+    let mut emotion = models.tts_emotion.clone();
+    if let Some(name) = &config.tts_emotion {
+        emotion.insert("tts_emotion".to_string(), Value::from(name.as_str()));
+    }
+    if let Some(strength) = config.tts_emotion_strength {
+        emotion.insert("tts_emotion_strength".to_string(), Value::from(strength));
+    }
+    let tts_params = tts_params(&emotion).map_err(InfraError::BadRequest)?;
     let vad_path = models.vad_model.clone();
     let vad = blocking(move || SileroVad::load(&vad_path)).await?;
     let (speech_tx, speech_rx) = mpsc::unbounded_channel();
@@ -254,6 +330,7 @@ async fn converse(
         chat_model: config.chat_model.clone().unwrap_or(models.chat_model),
         asr_model: config.asr_model.clone().unwrap_or(models.asr_model),
         tts_model: config.tts_model.clone().unwrap_or(models.tts_model),
+        tts_params,
         ref_audio,
         temp_dir: models.temp_dir,
         tool_filler: config.tool_filler.clone().unwrap_or_default(),
@@ -871,6 +948,7 @@ struct Shared {
     chat_model: String,
     asr_model: String,
     tts_model: String,
+    tts_params: BTreeMap<String, Value>,
     ref_audio: PathBuf,
     temp_dir: PathBuf,
     tool_filler: String,
@@ -1009,7 +1087,7 @@ impl Shared {
     }
 
     async fn synthesize(&self, text: &str) -> Result<Vec<f32>> {
-        let task = InferenceTask::new(
+        let mut task = InferenceTask::new(
             TaskKind::TtsSynthesize,
             Some(self.tts_model.clone()),
             InferenceInput::TtsSynthesize {
@@ -1017,6 +1095,7 @@ impl Shared {
                 reference_audio: Some(FileRef::local(&self.ref_audio)),
             },
         );
+        task.params.extend(self.tts_params.clone());
         let runtime = self.runtime.clone();
         // In a task of its own: the audio file goes even when the caller is
         // aborted.
@@ -1341,6 +1420,29 @@ mod tests {
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         drop(job);
         assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn the_bot_speaks_calmly_unless_told_otherwise() {
+        let settings =
+            |value: Value| -> BTreeMap<String, Value> { serde_json::from_value(value).unwrap() };
+        let calm = tts_params(&BTreeMap::new()).unwrap();
+        assert_eq!(calm["emotion_vector"], serde_json::json!({"calm": 0.8}));
+        let happy = tts_params(&settings(
+            serde_json::json!({"tts_emotion": "happy", "tts_emotion_strength": 0.5}),
+        ))
+        .unwrap();
+        assert_eq!(happy["emotion_vector"], serde_json::json!({"happy": 0.5}));
+        assert!(
+            tts_params(&settings(serde_json::json!({"tts_emotion": "none"})))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(tts_params(&settings(serde_json::json!({"tts_emotion": "bored"}))).is_err());
+        assert!(tts_params(&settings(
+            serde_json::json!({"tts_emotion": "sad", "tts_emotion_strength": 2})
+        ))
+        .is_err());
     }
 
     #[test]

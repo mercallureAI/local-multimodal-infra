@@ -30,8 +30,11 @@ ends the bot's speech and its generation, and the server sends
 
 The chat, ASR and TTS models are named by the `voice-cascade` model
 (`configs/models.d/voice-cascade.yaml`, whose artifact is the VAD model) and
-must be enabled; a session loads them all before `session.started` (IndexTTS
-takes tens of seconds the first time).
+must be enabled. With IndexTTS-2.5 the bot speaks with a fixed emotion,
+`tts_emotion` (default `calm`; `none` keeps the reference voice's own) at
+`tts_emotion_strength` (default 0.8); a session may choose its own
+(`session.start` config). A session loads them all before
+`session.started` (IndexTTS takes tens of seconds the first time).
 
 The conversation the chat model reads keeps the last 32 messages and about
 4000 characters (utterances are cut to their last 600 characters, tool
@@ -80,6 +83,7 @@ clients are not browsers.
 | `ref_audio` | model's `default_reference_audio` | The voice: a WAV file, base64. |
 | `tool_filler` | none | Said right away when a task is handed off. |
 | `chat_model`, `asr_model`, `tts_model` | the model's `metadata` | |
+| `tts_emotion`, `tts_emotion_strength` | the model's `metadata` (`calm`, 0.8) | IndexTTS-2.5 emotion: happy, angry, sad, afraid, disgusted, melancholic, surprised, calm, or none; strength 0 to 1. |
 | `vad_threshold` | 0.5 | |
 | `min_silence_ms` | 600 | |
 | `barge_in_ms` | 1200 | |

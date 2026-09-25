@@ -58,6 +58,15 @@ pub struct SessionConfig {
     pub asr_model: Option<String>,
     #[serde(default)]
     pub tts_model: Option<String>,
+    /// The emotion the bot speaks with (IndexTTS-2.5): happy, angry, sad,
+    /// afraid, disgusted, melancholic, surprised, calm, or none for the
+    /// reference voice's own. Without it, the model's `tts_emotion`.
+    #[serde(default)]
+    pub tts_emotion: Option<String>,
+    /// Weight of that emotion, 0 to 1. Without it, the model's
+    /// `tts_emotion_strength`.
+    #[serde(default)]
+    pub tts_emotion_strength: Option<f64>,
     /// Speech probability at which speech starts (Silero VAD).
     #[serde(default)]
     pub vad_threshold: Option<f32>,

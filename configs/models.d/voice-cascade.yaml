@@ -31,3 +31,9 @@ metadata:
   tts_model: indextts-1.5-onnx
   # A WAV path the worker reads, used when a session sends no ref_audio.
   default_reference_audio: ""
+  # The emotion the bot speaks with (IndexTTS-2.5; 1.5 ignores it): happy,
+  # angry, sad, afraid, disgusted, melancholic, surprised, calm, or none for
+  # the reference voice's own. Strength 0 to 1; the reference makes up the
+  # rest.
+  tts_emotion: calm
+  tts_emotion_strength: 0.8
