@@ -43,6 +43,8 @@ RUN apt-get update \
 COPY --from=builder /app/target/release/worker /usr/local/bin/worker
 COPY --from=builder /ort-libs/ /usr/local/lib/
 COPY configs ./configs
+# Every library must resolve, except the driver's libcuda.so.1, which the
+# NVIDIA container runtime mounts when the container starts.
 RUN set -eux; \
     ldconfig; \
     test -x /usr/local/bin/worker; \
@@ -52,7 +54,7 @@ RUN set -eux; \
         /usr/local/lib/libonnxruntime_providers_shared.so \
         /usr/local/lib/libonnxruntime_providers_cuda.so; do \
         ldd "${file}" | tee /tmp/ldd.txt; \
-        ! grep -q 'not found' /tmp/ldd.txt; \
+        if grep 'not found' /tmp/ldd.txt | grep -v 'libcuda\.so\.1 '; then exit 1; fi; \
     done
 
 ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
