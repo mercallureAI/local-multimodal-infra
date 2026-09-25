@@ -53,7 +53,8 @@ async fn main() -> Result<()> {
         registry,
         runtime_config,
     )
-    .await;
+    .await
+    .with_data_dir(layout.data_dir.clone());
     if let Err(err) = state.register_with_controller(&config.controller_url).await {
         tracing::warn!(error = %err, "initial worker registration failed; heartbeat loop will keep trying after controller is available");
     }

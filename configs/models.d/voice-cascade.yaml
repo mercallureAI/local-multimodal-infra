@@ -1,0 +1,33 @@
+id: voice-cascade
+name: Realtime voice cascade (Silero VAD, SenseVoice, Qwen3 chat, IndexTTS)
+enabled: true
+task_kinds:
+  - voice.realtime
+adapter: voice_cascade
+backend: ort
+artifacts:
+  # Silero VAD v6.2.3; the conversation's other models are named below.
+  - type: url
+    url: https://github.com/snakers4/silero-vad/raw/v6.2.3/src/silero_vad/data/silero_vad.onnx
+    sha256: 1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3
+runtime:
+  # The VAD always runs on CPU (one small session per conversation); the
+  # named models keep their own provider order.
+  provider_order: [cuda, cpu]
+  max_concurrency: 1
+  idle_ttl_sec: 600
+resources:
+  min_ram_mb: 256
+  min_vram_mb: 0
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  runtime: onnxruntime
+  task: realtime-voice
+  chat_model: qwen3-4b-instruct-2507-int4-onnx
+  asr_model: sensevoice-small-onnx
+  tts_model: indextts-1.5-onnx
+  # A WAV path the worker reads, used when a session sends no ref_audio.
+  default_reference_audio: ""

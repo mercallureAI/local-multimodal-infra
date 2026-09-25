@@ -74,7 +74,7 @@ impl OrtSession {
                 "shared KV binding needs at least one cache layer".to_string(),
             ));
         }
-        if shape.iter().any(|dim| *dim == 0) {
+        if shape.contains(&0) {
             return Err(InfraError::Backend(format!(
                 "shared KV cache shape {shape:?} has an empty dimension"
             )));

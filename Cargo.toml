@@ -23,6 +23,8 @@ members = [
     "crates/adapter-e5-embedding",
     "crates/adapter-mmarco-reranker",
     "crates/adapter-qwen3-chat",
+    "crates/adapter-silero-vad",
+    "crates/voice-cascade",
     "crates/telemetry",
     "crates/cli",
 ]
@@ -35,9 +37,9 @@ publish = false
 
 [workspace.dependencies]
 async-trait = "0.1"
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.7", features = ["macros", "ws"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 half = { version = "2.1", default-features = false }
 hound = "3.5"
 hmac = "0.12"
@@ -52,6 +54,7 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 sysinfo = "0.30"
 thiserror = "1"
+tokio-tungstenite = "0.24"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "net", "sync"] }
 tower-http = { version = "0.5", features = ["trace"] }
 tracing = "0.1"

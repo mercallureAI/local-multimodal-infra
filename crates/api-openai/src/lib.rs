@@ -423,6 +423,7 @@ mod tests {
                     timestamped_text: None,
                     segments: Vec::new(),
                     speakers: Vec::new(),
+                    speaker_embedding: None,
                 },
                 TaskKind::TtsSynthesize => InferenceOutput::TtsAudio {
                     audio: FileRef {
@@ -447,6 +448,9 @@ mod tests {
                     total_tokens: 5,
                 },
                 TaskKind::ChatComplete => chat_output(),
+                TaskKind::VoiceRealtime => InferenceOutput::Accepted {
+                    job_id: "unsupported-test".to_string(),
+                },
             })
         }
 

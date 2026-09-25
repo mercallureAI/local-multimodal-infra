@@ -38,6 +38,7 @@ use std::{
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
+mod realtime;
 mod standard_mcp;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -221,9 +222,16 @@ impl ControllerState {
             service: openai_service,
         })
         .route_layer(axum::middleware::from_fn_with_state(
-            infer_auth,
+            infer_auth.clone(),
             standard_mcp::authorize_api,
         ));
+        let realtime = Router::new()
+            .route("/v1/realtime", get(realtime::realtime))
+            .route_layer(axum::middleware::from_fn_with_state(
+                infer_auth,
+                standard_mcp::authorize_api,
+            ))
+            .with_state(self.clone());
         Router::new()
             .route("/health", get(health))
             .route("/internal/workers/register", post(register_worker))
@@ -246,6 +254,7 @@ impl ControllerState {
             .merge(infer)
             .merge(openai_models)
             .merge(openai_inference)
+            .merge(realtime)
     }
 
     pub async fn register_worker(
@@ -325,23 +334,24 @@ impl ControllerState {
     }
 
     /// The worker that serves `task`'s model: its base URL and session token.
-    async fn select_worker(&self, task: &InferenceTask) -> Result<(String, String)> {
-        let models = if let Some(model_id) = &task.model_id {
+    async fn select_worker(
+        &self,
+        model_id: Option<&str>,
+        kind: local_core::TaskKind,
+    ) -> Result<(String, String)> {
+        let models = if let Some(model_id) = model_id {
             vec![self.registry.get(model_id).await.ok_or_else(|| {
                 InfraError::ModelNotConfigured {
-                    model_id: model_id.clone(),
+                    model_id: model_id.to_string(),
                     reason: "model is not registered".to_string(),
                 }
             })?]
         } else {
-            self.registry.enabled_for_task(task.kind).await
+            self.registry.enabled_for_task(kind).await
         };
         let model = models.into_iter().find(|m| m.enabled).ok_or_else(|| {
             InfraError::ModelNotConfigured {
-                model_id: task
-                    .model_id
-                    .clone()
-                    .unwrap_or_else(|| "<auto>".to_string()),
+                model_id: model_id.unwrap_or("<auto>").to_string(),
                 reason: "no enabled model available for task".to_string(),
             }
         })?;
@@ -382,7 +392,9 @@ impl ControllerState {
         if let Some(store) = &self.store {
             store.record_job_state(&task, JobState::Queued, None, None)?;
         }
-        let (worker_base_url, worker_token) = self.select_worker(&task).await?;
+        let (worker_base_url, worker_token) = self
+            .select_worker(task.model_id.as_deref(), task.kind)
+            .await?;
         if let Some(store) = &self.store {
             store.record_job_state(&task, JobState::Running, None, None)?;
         }
@@ -480,7 +492,9 @@ impl ControllerState {
         if let Some(store) = &self.store {
             store.record_job_state(&task, JobState::Queued, None, None)?;
         }
-        let (worker_base_url, worker_token) = self.select_worker(&task).await?;
+        let (worker_base_url, worker_token) = self
+            .select_worker(task.model_id.as_deref(), task.kind)
+            .await?;
         let schedule_ms = total_started.elapsed().as_millis() as u64;
         if let Some(store) = &self.store {
             store.record_job_state(&task, JobState::Running, None, None)?;
@@ -1208,6 +1222,12 @@ impl ControllerState {
                     tools,
                     options,
                 }
+            }
+            local_core::TaskKind::VoiceRealtime => {
+                return Err(InfraError::BadRequest(
+                    "voice.realtime is served over the /v1/realtime WebSocket, not as a task"
+                        .to_string(),
+                ))
             }
         };
         let mut task = InferenceTask::new(status.task_kind, status.model_id.clone(), input);

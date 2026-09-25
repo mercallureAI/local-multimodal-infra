@@ -1,19 +1,28 @@
 use axum::{
     body::Body,
-    extract::State,
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Query, State,
+    },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
+use futures_util::{SinkExt, StreamExt};
 use local_core::{
-    AdapterKind, BackendKind, InferenceEvent, InferenceTask, WorkerHeartbeat, WorkerRegistration,
-    WorkerRegistrationResponse,
+    AdapterKind, BackendKind, InferenceEvent, InferenceTask, ModelSpec, WorkerHeartbeat,
+    WorkerRegistration, WorkerRegistrationResponse,
 };
 use local_error::{InfraError, Result};
 use local_registry::ModelRegistry;
 use local_runtime::{IdleMaintenanceLoopHandle, RuntimeManager, RuntimeManagerConfig};
+use local_voice_cascade::{
+    protocol::{ClientEvent, ServerEvent},
+    CascadeModels, Inbound, Outbound,
+};
 use serde_json::json;
+use std::collections::HashMap;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{mpsc, RwLock};
 
@@ -26,6 +35,9 @@ pub struct WorkerState {
     registration_token: Option<String>,
     session_token: Arc<RwLock<Option<String>>>,
     runtime: Arc<RuntimeManager>,
+    specs: Arc<HashMap<String, ModelSpec>>,
+    /// Where realtime conversations keep short-lived audio files.
+    data_dir: Arc<std::path::PathBuf>,
     _idle_maintenance_loop: Arc<IdleMaintenanceLoopHandle>,
     http: reqwest::Client,
 }
@@ -39,6 +51,10 @@ impl WorkerState {
         runtime_config: RuntimeManagerConfig,
     ) -> Self {
         let specs = registry.list().await;
+        let by_id = specs
+            .iter()
+            .map(|spec| (spec.id.clone(), spec.clone()))
+            .collect();
         let runtime = Arc::new(RuntimeManager::new(specs, runtime_config));
         let idle_maintenance_loop = Arc::new(runtime.clone().spawn_idle_maintenance_loop());
         Self {
@@ -47,9 +63,17 @@ impl WorkerState {
             registration_token,
             session_token: Arc::new(RwLock::new(None)),
             runtime,
+            specs: Arc::new(by_id),
+            data_dir: Arc::new(std::path::PathBuf::from("workdir/data")),
             _idle_maintenance_loop: idle_maintenance_loop,
             http: reqwest::Client::new(),
         }
+    }
+
+    /// Sets the data directory (default `workdir/data`).
+    pub fn with_data_dir(mut self, data_dir: std::path::PathBuf) -> Self {
+        self.data_dir = Arc::new(data_dir);
+        self
     }
 
     pub fn app(self) -> Router {
@@ -57,6 +81,7 @@ impl WorkerState {
             .route("/health", get(health))
             .route("/internal/infer", post(infer))
             .route("/internal/infer_stream", post(infer_stream))
+            .route("/internal/realtime", get(realtime))
             .with_state(self)
     }
 
@@ -74,6 +99,7 @@ impl WorkerState {
                 AdapterKind::E5Embedding,
                 AdapterKind::MmarcoReranker,
                 AdapterKind::Qwen3Chat,
+                AdapterKind::VoiceCascade,
             ],
             resources: local_hardware::snapshot(),
         }
@@ -270,6 +296,110 @@ async fn infer_stream(
         Body::from_stream(lines),
     )
         .into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RealtimeQuery {
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// A realtime voice conversation (see `local_voice_cascade::protocol`) on a
+/// `voice_cascade` model, `voice-cascade` unless `?model=` names another.
+async fn realtime(
+    State(state): State<WorkerState>,
+    headers: HeaderMap,
+    Query(query): Query<RealtimeQuery>,
+    upgrade: WebSocketUpgrade,
+) -> axum::response::Response {
+    if !authorized(&state, &headers).await {
+        return unauthorized();
+    }
+    let model_id = query.model.unwrap_or_else(|| "voice-cascade".to_string());
+    let spec = state
+        .specs
+        .get(&model_id)
+        .filter(|spec| spec.enabled && spec.adapter == AdapterKind::VoiceCascade);
+    let Some(spec) = spec else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("no enabled voice cascade `{model_id}`") })),
+        )
+            .into_response();
+    };
+    let models = match CascadeModels::from_spec(spec, &state.data_dir) {
+        Ok(models) => models,
+        Err(err) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": err.to_string() })),
+            )
+                .into_response()
+        }
+    };
+    let runtime = state.runtime.clone();
+    upgrade.on_upgrade(move |socket| serve_realtime(runtime, models, socket))
+}
+
+async fn serve_realtime(runtime: Arc<RuntimeManager>, models: CascadeModels, socket: WebSocket) {
+    let (mut sink, mut stream) = socket.split();
+    let (inbound, inbound_rx) = mpsc::channel(256);
+    let (out, mut out_rx) = mpsc::unbounded_channel::<Outbound>();
+    let reader_out = out.clone();
+    let reader = tokio::spawn(async move {
+        while let Some(Ok(message)) = stream.next().await {
+            let inbound_message = match message {
+                Message::Text(text) => match serde_json::from_str::<ClientEvent>(&text) {
+                    Ok(event) => Inbound::Event(event),
+                    Err(err) => {
+                        let _ = reader_out.send(Outbound::Event(ServerEvent::Error {
+                            message: format!("bad event: {err}"),
+                        }));
+                        continue;
+                    }
+                },
+                Message::Binary(bytes) => Inbound::Audio(bytes),
+                Message::Close(_) => break,
+                _ => continue,
+            };
+            if inbound.send(inbound_message).await.is_err() {
+                break;
+            }
+        }
+    });
+    let writer = tokio::spawn(async move {
+        while let Some(outbound) = out_rx.recv().await {
+            let message = match outbound {
+                Outbound::Event(event) => match serde_json::to_string(&event) {
+                    Ok(text) => Message::Text(text),
+                    Err(_) => continue,
+                },
+                Outbound::Audio(bytes) => Message::Binary(bytes),
+            };
+            if sink.send(message).await.is_err() {
+                return;
+            }
+        }
+        let _ = sink.close().await;
+    });
+    if let Err(err) = local_voice_cascade::run(runtime, models, inbound_rx, out.clone()).await {
+        tracing::warn!(error = %err, "realtime voice session ended with an error");
+        let _ = out.send(Outbound::Event(ServerEvent::Error {
+            message: err.to_string(),
+        }));
+    }
+    drop(out);
+    reader.abort();
+    // Replies still finishing hold the sender a moment; the socket closes
+    // once the last event (an error, if any) is sent.
+    let abort = writer.abort_handle();
+    if tokio::time::timeout(Duration::from_secs(2), writer)
+        .await
+        .is_err()
+    {
+        abort.abort();
+        tracing::debug!("realtime writer did not finish; socket dropped");
+    }
 }
 
 #[cfg(test)]

@@ -328,6 +328,7 @@ fn real_model_smoke_if_env_set() {
         timestamped_text,
         segments,
         speakers,
+        ..
     } = output
     else {
         panic!("unexpected output")

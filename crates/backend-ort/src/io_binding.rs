@@ -262,6 +262,16 @@ impl OrtSession {
         }
         target.copy_from_slice(source);
         binding.binding.clear_inputs();
+        // A fresh output allocation each run: ORT 1.30 fails the copy into a
+        // pinned output kept bound from an earlier run (source == target).
+        binding.binding.clear_outputs();
+        binding
+            .binding
+            .bind_output_to_device(
+                binding.output_name.clone(),
+                &pinned_output_memory(binding.device_id)?,
+            )
+            .map_err(map_ort_err)?;
         binding
             .binding
             .bind_input(binding.input_name.clone(), &binding.input)
@@ -278,6 +288,15 @@ impl OrtSession {
             ))
         })?;
         let (_, data) = output.try_extract_tensor::<f32>().map_err(map_ort_err)?;
+        let expected: usize = binding.output_shape.iter().product();
+        if data.len() != expected {
+            return Err(InfraError::Backend(format!(
+                "pinned output `{}` has {} values, expected {:?}",
+                binding.output_name,
+                data.len(),
+                binding.output_shape
+            )));
+        }
         let result = OrtTensorOutput {
             name: binding.output_name.clone(),
             shape: binding.output_shape.clone(),
@@ -426,6 +445,14 @@ impl OrtSession {
             }
             target.copy_from_slice(source);
         }
+        binding.binding.clear_outputs();
+        binding
+            .binding
+            .bind_output_to_device(
+                binding.output_name.clone(),
+                &pinned_output_memory(binding.device_id)?,
+            )
+            .map_err(map_ort_err)?;
         for (name, tensor) in &binding.inputs {
             binding
                 .binding
@@ -445,6 +472,15 @@ impl OrtSession {
             ))
         })?;
         let (_, data) = output.try_extract_tensor::<f32>().map_err(map_ort_err)?;
+        let expected: usize = binding.output_shape.iter().product();
+        if data.len() != expected {
+            return Err(InfraError::Backend(format!(
+                "pinned output `{}` has {} values, expected {:?}",
+                binding.output_name,
+                data.len(),
+                binding.output_shape
+            )));
+        }
         let result = OrtTensorOutput {
             name: binding.output_name.clone(),
             shape: binding.output_shape.clone(),
@@ -736,6 +772,16 @@ fn validate_resident_output_names<'a>(
         )));
     }
     Ok(())
+}
+
+fn pinned_output_memory(device_id: u32) -> Result<MemoryInfo> {
+    MemoryInfo::new(
+        AllocationDevice::CUDA_PINNED,
+        device_id as i32,
+        AllocatorType::Device,
+        MemoryType::CPUOutput,
+    )
+    .map_err(map_ort_err)
 }
 
 pub(crate) fn owned_tensor(input: OrtTensorInput) -> Result<DynTensor> {

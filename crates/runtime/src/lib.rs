@@ -484,6 +484,12 @@ impl LoadedEntry {
             AdapterKind::Qwen3Chat => {
                 LoadedModel::Qwen3Chat(Box::new(Qwen3ChatAdapter::load(&spec)?))
             }
+            AdapterKind::VoiceCascade => {
+                return Err(InfraError::Unsupported(format!(
+                    "model `{}` is a realtime voice pipeline, served over /v1/realtime",
+                    spec.id
+                )))
+            }
         };
         match &model {
             LoadedModel::E5Embedding(adapter) => {
@@ -598,6 +604,7 @@ fn validated_runtime_providers_for_model(model_id: &str) -> Option<&'static [&'s
         "multilingual-e5-small-onnx" => Some(&["cuda", "cpu"]),
         "mmarco-minilm-l12-onnx" => Some(&["cuda", "cpu"]),
         "qwen3-4b-instruct-2507-int4-onnx" => Some(&["cuda", "cpu"]),
+        "voice-cascade" => Some(&["cpu"]),
         _ => None,
     }
 }
@@ -1285,6 +1292,7 @@ mod tests {
             AdapterKind::E5Embedding => vec![TaskKind::TextEmbed],
             AdapterKind::MmarcoReranker => vec![TaskKind::TextRerank],
             AdapterKind::Qwen3Chat => vec![TaskKind::ChatComplete],
+            AdapterKind::VoiceCascade => vec![TaskKind::VoiceRealtime],
         };
         ModelSpec {
             id: id.to_string(),

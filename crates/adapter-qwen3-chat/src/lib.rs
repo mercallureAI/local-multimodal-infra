@@ -24,6 +24,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use template::ChatTemplate;
@@ -364,20 +365,21 @@ impl Qwen3ChatAdapter {
             };
             self.cached.push(token);
         }
-        let (content, mut tool_calls) = state.finish(&self.tokenizer)?;
-        for (index, call) in tool_calls.iter().enumerate().skip(state.emitted_calls) {
-            sink(InferenceEvent::ChatToolCall {
-                index,
-                call: call.clone(),
-            });
+        let (content, tail, tool_calls) = state.finish(&self.tokenizer)?;
+        if finish != ChatFinishReason::Cancelled {
+            // What was held back (a possible stop string's start) is content.
+            if !tail.is_empty() {
+                sink(InferenceEvent::ChatDelta { content: tail });
+            }
+            for (index, call) in tool_calls.iter().enumerate().skip(state.emitted_calls) {
+                sink(InferenceEvent::ChatToolCall {
+                    index,
+                    call: call.clone(),
+                });
+            }
         }
         if !tool_calls.is_empty() && finish == ChatFinishReason::Stop {
             finish = ChatFinishReason::ToolCalls;
-        }
-        for call in &mut tool_calls {
-            if call.id.is_empty() {
-                call.id = format!("call_{:08x}", rng_u32(&mut rng));
-            }
         }
         let completion_tokens = counts.values().sum();
         tracing::info!(
@@ -510,8 +512,16 @@ fn time_seed() -> u64 {
         .unwrap_or(0x5EED)
 }
 
-fn rng_u32(rng: &mut Rng) -> u32 {
-    (rng.next_f32() * u32::MAX as f32) as u32 ^ (rng.next_f32() * 65535.0) as u32
+/// A tool call id unique in this process (and unlikely to repeat across
+/// restarts), independent of the sampling seed.
+fn new_call_id() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "call_{:x}{:04x}",
+        time_seed() & 0xffff_ffff,
+        serial & 0xffff
+    )
 }
 
 // ---------------------------------------------------------------- decoding state
@@ -657,10 +667,11 @@ impl Decoding {
         })
     }
 
-    /// The content and tool calls of the whole turn. A tool call cut short
-    /// (the model sometimes ends right after the JSON) still counts when its
-    /// JSON is complete.
-    fn finish(&mut self, tokenizer: &Tokenizer) -> Result<(String, Vec<ChatToolCall>)> {
+    /// The content and tool calls of the whole turn, and the content not
+    /// streamed yet (held back as a possible stop string). A tool call cut
+    /// short (the model sometimes ends right after the JSON) still counts
+    /// when its JSON is complete.
+    fn finish(&mut self, tokenizer: &Tokenizer) -> Result<(String, String, Vec<ChatToolCall>)> {
         if let Some(call) = self.call.take() {
             let text = tokenizer
                 .decode(&call, false)
@@ -678,7 +689,10 @@ impl Decoding {
         {
             content.truncate(cut);
         }
-        Ok((content.trim().to_string(), self.calls.clone()))
+        let complete = content.trim_end_matches('\u{FFFD}');
+        let tail: String = complete.chars().skip(self.sent_chars).collect();
+        self.sent_chars += tail.chars().count();
+        Ok((content.trim().to_string(), tail, self.calls.clone()))
     }
 }
 
@@ -698,7 +712,7 @@ fn parse_tool_call(text: &str) -> Option<ChatToolCall> {
         Some(other) => other.to_string(),
     };
     Some(ChatToolCall {
-        id: String::new(),
+        id: new_call_id(),
         name,
         arguments,
     })
@@ -718,6 +732,84 @@ mod tests {
         let call = parse_tool_call(r#"{"name": "silence", "arguments": "{}"}"#).unwrap();
         assert_eq!(call.arguments, "{}");
         assert!(parse_tool_call(r#"{"name": "x""#).is_none());
+    }
+
+    /// A word-level tokenizer whose decoder concatenates tokens.
+    fn tiny_tokenizer(words: &[&str]) -> Tokenizer {
+        use tokenizers::{decoders::fuse::Fuse, models::wordlevel::WordLevel};
+        let vocab = words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| (w.to_string(), i as u32))
+            .collect();
+        let model = WordLevel::builder()
+            .vocab(vocab)
+            .unk_token(words[0].to_string())
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer.with_decoder(Some(Fuse::new()));
+        tokenizer
+    }
+
+    fn deltas(events: &[InferenceEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                InferenceEvent::ChatDelta { content } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn text_held_for_a_stop_string_is_sent_at_the_end() {
+        let tokenizer = tiny_tokenizer(&["?", "你", "好", "E", "N", "D"]);
+        let mut state = Decoding::new(&["END".to_string()]);
+        let mut events = Vec::new();
+        for token in [1, 2, 3, 4] {
+            events.extend(state.push(token, None, None, &tokenizer).unwrap().events);
+        }
+        assert_eq!(deltas(&events), "你好"); // "EN" may start "END"
+        let (content, tail, _) = state.finish(&tokenizer).unwrap();
+        assert_eq!(content, "你好EN");
+        assert_eq!(tail, "EN");
+
+        let mut state = Decoding::new(&["END".to_string()]);
+        let mut events = Vec::new();
+        for token in [1, 3, 4, 5] {
+            let pushed = state.push(token, None, None, &tokenizer).unwrap();
+            events.extend(pushed.events);
+            if pushed.stopped {
+                break;
+            }
+        }
+        let (content, tail, _) = state.finish(&tokenizer).unwrap();
+        assert_eq!(deltas(&events) + &tail, "你");
+        assert_eq!(content, "你");
+    }
+
+    #[test]
+    fn streamed_tool_calls_have_ids() {
+        let tokenizer = tiny_tokenizer(&["?", r#"{"name": "silence", "arguments": {}}"#]);
+        let mut state = Decoding::new(&[]);
+        let (start, end) = (90, 91);
+        state
+            .push(start, Some(start), Some(end), &tokenizer)
+            .unwrap();
+        state.push(1, Some(start), Some(end), &tokenizer).unwrap();
+        let events = state
+            .push(end, Some(start), Some(end), &tokenizer)
+            .unwrap()
+            .events;
+        let InferenceEvent::ChatToolCall { call, .. } = &events[0] else {
+            panic!("no tool call: {events:?}");
+        };
+        assert_eq!(call.name, "silence");
+        assert!(call.id.starts_with("call_"));
+        let (_, _, calls) = state.finish(&tokenizer).unwrap();
+        assert_eq!(calls[0].id, call.id);
+        assert_ne!(new_call_id(), new_call_id());
     }
 
     #[test]

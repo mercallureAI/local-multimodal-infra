@@ -747,7 +747,10 @@ impl IndexTtsAdapter {
             hidden_state_token_count(&hidden).map_err(ResidentDecodeError::BeforeCommit)?;
         let mask = attention_mask_input(&self.e, concat.concat_len as i64, 0)
             .map_err(ResidentDecodeError::BeforeCommit)?;
-        let caches = empty_e_caches(&self.e, 24).map_err(ResidentDecodeError::BeforeCommit)?;
+        let layer_count =
+            infer_layer_count(self.e.outputs().len()).map_err(ResidentDecodeError::BeforeCommit)?;
+        let caches =
+            empty_e_caches(&self.e, layer_count).map_err(ResidentDecodeError::BeforeCommit)?;
         let mut step = decoder
             .prefill(&mut self.e, hidden, mask, caches, prefill_increment)
             .map_err(ResidentDecodeError::BeforeCommit)?;

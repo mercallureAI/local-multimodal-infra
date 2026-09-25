@@ -210,6 +210,7 @@ impl SenseVoiceAsrAdapter {
                 timestamped_text: None,
                 segments: Vec::new(),
                 speakers: Vec::new(),
+                speaker_embedding: None,
             });
         }
         let speech_segments = self.vad.segment(&samples)?;
@@ -244,6 +245,12 @@ impl SenseVoiceAsrAdapter {
             ));
         }
         let speakers = summarize_speakers(&segments);
+        let speaker_embedding = if options.speaker_embedding {
+            self.speaker
+                .utterance_embedding(&samples, &speech_segments)?
+        } else {
+            None
+        };
         if !options.timestamps {
             segments.clear();
         } else {
@@ -258,6 +265,7 @@ impl SenseVoiceAsrAdapter {
             timestamped_text,
             segments,
             speakers,
+            speaker_embedding,
         })
     }
 
@@ -358,6 +366,7 @@ fn metadata_bool(spec: &ModelSpec, key: &str, default: bool) -> Result<bool> {
 #[derive(Debug, Clone, Copy)]
 struct AsrOptions {
     speaker_diarization: bool,
+    speaker_embedding: bool,
     timestamps: bool,
     timestamp_granularity_ms: u64,
     token_timestamps: bool,
@@ -375,6 +384,7 @@ impl AsrOptions {
                 ],
                 true,
             )?,
+            speaker_embedding: bool_param(params, &["speaker_embedding"], false)?,
             timestamps: bool_param(params, &["timestamps", "return_timestamps"], true)?,
             timestamp_granularity_ms: timestamp_granularity_ms(params)?,
             token_timestamps: bool_param(

@@ -20,6 +20,9 @@ pub enum AdapterKind {
     E5Embedding,
     MmarcoReranker,
     Qwen3Chat,
+    /// Pseudo-realtime voice (VAD, ASR, chat and TTS models of the worker),
+    /// served over `/v1/realtime` only.
+    VoiceCascade,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -36,6 +39,8 @@ pub enum TaskKind {
     TextRerank,
     #[serde(rename = "chat.complete")]
     ChatComplete,
+    #[serde(rename = "voice.realtime")]
+    VoiceRealtime,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -531,6 +536,10 @@ pub enum InferenceOutput {
         segments: Vec<AsrSegment>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         speakers: Vec<AsrSpeaker>,
+        /// The whole utterance's speaker (voiceprint) embedding, L2-normalised,
+        /// when asked for (`speaker_embedding`): comparable across requests.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        speaker_embedding: Option<Vec<f32>>,
     },
     ObjectDetections {
         objects: Vec<DetectedObject>,
@@ -897,6 +906,7 @@ mod tests {
             timestamped_text,
             segments,
             speakers,
+            speaker_embedding,
         } = output
         else {
             panic!("wrong output")
@@ -905,5 +915,6 @@ mod tests {
         assert!(timestamped_text.is_none());
         assert!(segments.is_empty());
         assert!(speakers.is_empty());
+        assert!(speaker_embedding.is_none());
     }
 }

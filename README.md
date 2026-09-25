@@ -53,6 +53,7 @@ SenseVoice ASR 集成 FSMN-VAD 和 CAM++ 发言人识别，默认返回纯文本
 | `/v1/audio/speech` | OpenAI-compatible TTS | `LOCAL_MCP_INFER_TOKENS` |
 | `/v1/embeddings` | OpenAI-compatible Embeddings | `LOCAL_MCP_INFER_TOKENS` |
 | `/v1/chat/completions` | OpenAI-compatible Chat（`stream: true` 为 SSE） | `LOCAL_MCP_INFER_TOKENS` |
+| `/v1/realtime` | 实时语音 WebSocket（VAD→ASR→对话→TTS，见 `docs/realtime-voice.md`） | `LOCAL_MCP_INFER_TOKENS` |
 | `/rerank`、`/v1/rerank`、`/v2/rerank` | vLLM / Jina / Cohere 风格重排 | `LOCAL_MCP_INFER_TOKENS` |
 
 Admin 和所有 MCP、RPC、OpenAI-compatible 推理接口接受 `Authorization: Bearer <token>`；legacy JSON-RPC 与 OpenAI-compatible 推理也接受 `x-local-infer-token`，Admin 接口接受 `x-local-admin-token`。

@@ -517,6 +517,7 @@ def check_auth_policy(timeout: float) -> dict:
         "/v1/audio/transcriptions",
         "/v1/audio/speech",
         "/v1/embeddings",
+        "/v1/chat/completions",
         "/rerank",
         "/v1/rerank",
         "/v2/rerank",
@@ -534,6 +535,13 @@ def check_auth_policy(timeout: float) -> dict:
         if status != 401:
             preview = body[:200].decode("utf-8", errors="replace")
             raise SmokeError(f"POST {url} without credentials must return 401; got HTTP {status}: {preview}")
+    # The realtime voice WebSocket is guarded before its upgrade.
+    url = f"{CONTROLLER_URL}/v1/realtime"
+    status, body, _headers = raw_bytes_request("GET", url, None, {"Accept": "application/json"}, timeout)
+    checks.append({"method": "GET", "url": url, "expected_status": 401, "status": status, "ok": status == 401})
+    if status != 401:
+        preview = body[:200].decode("utf-8", errors="replace")
+        raise SmokeError(f"GET {url} without credentials must return 401; got HTTP {status}: {preview}")
     print("[smoke] auth policy ok: configured admin and all MCP/RPC/OpenAI inference routes rejected missing credentials")
     return {"ok": True, "checks": checks}
 

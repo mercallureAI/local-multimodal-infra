@@ -379,6 +379,7 @@ mod tests {
                         id: "speaker_0".to_string(),
                         speech_ms: 1_000,
                     }],
+                    speaker_embedding: None,
                 },
                 TaskKind::ObjectDetect => InferenceOutput::ObjectDetections {
                     objects: Vec::new(),
@@ -394,7 +395,7 @@ mod tests {
                     results: Vec::new(),
                     total_tokens: 1,
                 },
-                TaskKind::ChatComplete => InferenceOutput::Accepted {
+                TaskKind::ChatComplete | TaskKind::VoiceRealtime => InferenceOutput::Accepted {
                     job_id: "unsupported-test".to_string(),
                 },
             })

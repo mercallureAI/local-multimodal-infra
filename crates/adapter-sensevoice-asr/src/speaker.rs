@@ -81,6 +81,29 @@ impl CampPlus {
             .collect())
     }
 
+    /// The mean embedding of the speech in `vad_segments`, L2-normalised
+    /// (`None` without speech): one voiceprint for the whole input.
+    pub fn utterance_embedding(
+        &mut self,
+        samples: &[f32],
+        vad_segments: &[SpeechSegment],
+    ) -> Result<Option<Vec<f32>>> {
+        let chunks = speaker_chunks(samples, vad_segments);
+        let mut sum: Option<Vec<f32>> = None;
+        for batch in chunks.chunks(self.batch_size) {
+            for embedding in self.embedding_batch(batch)? {
+                match &mut sum {
+                    Some(sum) => sum.iter_mut().zip(&embedding).for_each(|(s, e)| *s += e),
+                    None => sum = Some(embedding),
+                }
+            }
+        }
+        Ok(sum.map(|mut sum| {
+            normalize(&mut sum);
+            sum
+        }))
+    }
+
     pub fn provider_report(&self) -> SessionProviderReport {
         self.session.provider_report()
     }

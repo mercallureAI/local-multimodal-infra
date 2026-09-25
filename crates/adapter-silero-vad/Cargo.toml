@@ -1,0 +1,9 @@
+[package]
+name = "local-adapter-silero-vad"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+local-backend-ort = { path = "../backend-ort" }
+local-error = { path = "../error" }
