@@ -16,6 +16,7 @@ pub enum AdapterKind {
     Yolo,
     SenseVoiceAsr,
     IndexTts,
+    IndexTts2,
     E5Embedding,
     MmarcoReranker,
 }

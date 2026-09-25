@@ -17,6 +17,7 @@ members = [
     "crates/api-openai",
     "crates/backend-ort",
     "crates/adapter-index-tts",
+    "crates/adapter-index-tts2",
     "crates/adapter-yolo",
     "crates/adapter-sensevoice-asr",
     "crates/adapter-e5-embedding",

@@ -42,14 +42,21 @@ TEST_ALIASES = {
     "sensevoice-asr",
     "indextts",
     "indextts_asr",
+    "indextts2",
+    "indextts2_asr",
     "embedding",
     "rerank",
     "text",
     "mcp_standard",
 }
-RPC_TESTS = {"assets", "yolo", "sensevoice-asr", "indextts", "indextts_asr", "embedding", "rerank"}
+RPC_TESTS = {"assets", "yolo", "sensevoice-asr", "indextts", "indextts_asr", "indextts2", "indextts2_asr", "embedding", "rerank"}
 MCP_TESTS = {"mcp_standard"}
 INDEXTTS_MODEL_ID = "indextts-1.5-onnx"
+INDEXTTS2_MODEL_ID = "indextts-2.5-onnx"
+INDEXTTS2_REQUIRED = ["manifest.json", "tokenizer.json"]
+# Minimum ASR similarity for the IndexTTS-2.5 round trip; catches silent or
+# garbled output (for example NaN-poisoned float16 graphs).
+INDEXTTS2_MIN_SIMILARITY = 0.5
 EMBEDDING_MODEL_ID = "multilingual-e5-small-onnx"
 RERANK_MODEL_ID = "mmarco-minilm-l12-onnx"
 ADMIN_TOKEN = "local-smoke-admin-token"
@@ -87,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         indextts_artifacts = inspect_indextts_artifacts(model_dir)
+        indextts2_artifacts = inspect_indextts2_artifacts(model_dir)
         if args.build:
             run_build(root, release=args.release)
 
@@ -141,6 +149,9 @@ def main(argv: list[str] | None = None) -> int:
         if ({"indextts", "indextts_asr", "mcp_standard"} & requested_tests) and indextts_artifacts["ready"]:
             print("[smoke] enabling IndexTTS before worker starts so worker registry snapshot can serve it")
             rpc_enable_indextts(args.request_timeout)
+        if ({"indextts2", "indextts2_asr"} & requested_tests) and indextts2_artifacts["ready"]:
+            print("[smoke] enabling IndexTTS-2.5 before worker starts so worker registry snapshot can serve it")
+            rpc_enable_model(INDEXTTS2_MODEL_ID, args.request_timeout)
 
         worker_args = [
             str(worker_bin),
@@ -227,6 +238,21 @@ def main(argv: list[str] | None = None) -> int:
                 )
             except SmokeError as exc:
                 failures.append(f"indextts_asr: {exc}")
+
+        for test, check_asr in (("indextts2", False), ("indextts2_asr", True)):
+            if test in requested_tests:
+                try:
+                    run_indextts2(
+                        indextts2_artifacts,
+                        indextts_reference,
+                        args.indextts2_text,
+                        check_asr,
+                        data_dir,
+                        timestamp,
+                        args.request_timeout,
+                    )
+                except SmokeError as exc:
+                    failures.append(f"{test}: {exc}")
 
         if "embedding" in requested_tests:
             try:
@@ -328,6 +354,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Local IndexTTS reference WAV override. Default: scripts/assets/tts-input-mon3tr.wav.",
     )
     parser.add_argument("--indextts-text", default="你好，这是本地 IndexTTS 冒烟测试。")
+    parser.add_argument("--indextts2-text", default="你好，这是本地 IndexTTS 二点五的冒烟测试。")
     parser.add_argument(
         "--indextts-frontend",
         choices=("auto", "rust", "official-python", "rust-fallback"),
@@ -366,6 +393,8 @@ def selected_tests(args: argparse.Namespace) -> set[str]:
     if args.skip_indextts:
         tests.discard("indextts")
         tests.discard("indextts_asr")
+        tests.discard("indextts2")
+        tests.discard("indextts2_asr")
     if args.indextts_asr_check:
         tests.add("indextts_asr")
     return tests
@@ -904,6 +933,70 @@ def inspect_indextts_artifacts(model_dir: Path) -> dict:
 
 
 
+def inspect_indextts2_artifacts(model_dir: Path) -> dict:
+    env_root = os.environ.get("LOCAL_INDEXTTS2_MODEL_DIR")
+    root = Path(env_root).resolve() if env_root else (model_dir / INDEXTTS2_MODEL_ID).resolve()
+    missing = [str(root / name) for name in INDEXTTS2_REQUIRED if not (root / name).exists()]
+    return {
+        "ready": not missing,
+        "root": str(root),
+        "source": "LOCAL_INDEXTTS2_MODEL_DIR" if env_root else "--model-dir/default",
+        "required": INDEXTTS2_REQUIRED,
+        "missing": missing,
+    }
+
+
+def rpc_enable_model(model_id: str, timeout: float) -> None:
+    status, payload = rpc_admin("enable_model", {"id": model_id}, f"smoke-enable-{model_id}", timeout)
+    assert_rpc_success(status, payload, f"{model_id} enable_model")
+
+
+def run_indextts2(
+    artifacts: dict,
+    reference: Path,
+    text: str,
+    check_asr: bool,
+    data_dir: Path,
+    timestamp: str,
+    timeout: float,
+) -> None:
+    label = "indextts2-asr" if check_asr else "indextts2"
+    out = data_dir / f"smoke-{label}-{timestamp}.json"
+    if not artifacts["ready"]:
+        save_json(out, {"status": "skipped", "reason": "missing IndexTTS-2.5 package; no export attempted", "artifacts": artifacts})
+        print(f"[smoke] {label} skipped; details saved {out}")
+        return
+    if not reference.exists():
+        raise SmokeError(f"IndexTTS-2.5 reference audio does not exist: {reference}")
+    tts_payload = synthesize_indextts(
+        reference, text, f"{timestamp}-{label}", timeout, {"language": "zh", "seed": 9527}, INDEXTTS2_MODEL_ID
+    )
+    payload: dict = {"source_text": text, "tts_task": tts_payload}
+    if tts_payload.get("state") != "succeeded":
+        save_json(out, payload)
+        raise SmokeError(f"IndexTTS-2.5 task did not succeed: {tts_payload}")
+    if check_asr:
+        audio_ref = extract_tts_audio_ref(tts_payload)
+        tts_wav = resolve_audio_path(audio_ref)
+        if tts_wav is None or not tts_wav.exists():
+            raise SmokeError(f"IndexTTS-2.5 ASR check could not resolve synthesized wav: {audio_ref}")
+        asr_payload = transcribe_audio_generic(tts_wav, f"{timestamp}-{label}", timeout)
+        if asr_payload.get("state") != "succeeded":
+            raise SmokeError(f"IndexTTS-2.5 ASR check transcription did not succeed: {asr_payload}")
+        asr_text = extract_asr_text(asr_payload)
+        comparison = compare_text(normalize_expected_text(text), normalize_expected_text(asr_text))
+        payload.update({"tts_wav": str(tts_wav), "asr_text": asr_text, **comparison, "asr_task": asr_payload})
+        save_json(out, payload)
+        if comparison["similarity"] < INDEXTTS2_MIN_SIMILARITY:
+            raise SmokeError(
+                f"IndexTTS-2.5 ASR similarity {comparison['similarity']:.2f} < {INDEXTTS2_MIN_SIMILARITY}: {asr_text!r}"
+            )
+        print(f"[smoke] {label} asr_text={asr_text!r} similarity={comparison['similarity']:.2f}")
+    else:
+        save_json(out, payload)
+    print(f"[smoke] {label} saved {out}")
+
+
 def rpc_enable_indextts(timeout: float) -> None:
     status, payload = rpc_admin("enable_model", {"id": INDEXTTS_MODEL_ID}, "smoke-enable-indextts", timeout)
     assert_rpc_success(status, payload, "IndexTTS enable_model")
@@ -947,14 +1040,21 @@ def run_indextts(
     print(f"[smoke] indextts saved {out}")
 
 
-def synthesize_indextts(reference: Path, text: str, timestamp: str, timeout: float, extra_params: dict | None = None) -> dict:
+def synthesize_indextts(
+    reference: Path,
+    text: str,
+    timestamp: str,
+    timeout: float,
+    extra_params: dict | None = None,
+    model_id: str = INDEXTTS_MODEL_ID,
+) -> dict:
     task_params = {"text": text}
     if extra_params:
         task_params.update(extra_params)
     create = rpc_create_task(
         {
             "task_kind": "tts.synthesize",
-            "model": INDEXTTS_MODEL_ID,
+            "model": model_id,
             "files": [
                 {"name": reference.name, "mime": "audio/wav", "role": "reference_audio", "required": False}
             ],

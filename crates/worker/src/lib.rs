@@ -68,6 +68,7 @@ impl WorkerState {
                 AdapterKind::Yolo,
                 AdapterKind::SenseVoiceAsr,
                 AdapterKind::IndexTts,
+                AdapterKind::IndexTts2,
                 AdapterKind::E5Embedding,
                 AdapterKind::MmarcoReranker,
             ],

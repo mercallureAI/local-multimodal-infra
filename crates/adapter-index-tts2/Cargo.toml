@@ -1,0 +1,31 @@
+[package]
+name = "local-adapter-index-tts2"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+cuda = ["local-backend-ort/cuda"]
+directml = ["local-backend-ort/directml"]
+tensorrt = ["local-backend-ort/tensorrt"]
+
+[dependencies]
+base64 = "0.22"
+half.workspace = true
+hound.workspace = true
+local-adapter-index-tts = { path = "../adapter-index-tts" }
+local-backend-ort = { path = "../backend-ort" }
+local-core = { path = "../core" }
+local-error = { path = "../error" }
+local-files = { path = "../files" }
+regex = "1"
+rustc-hash = "2"
+serde.workspace = true
+serde_json.workspace = true
+tiktoken-rs = "0.12"
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

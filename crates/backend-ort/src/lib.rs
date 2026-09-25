@@ -7,7 +7,7 @@ use local_error::{InfraError, Result};
 use ort::ep::ExecutionProvider;
 use ort::{
     session::{builder::GraphOptimizationLevel, Session},
-    value::{DynTensor, Tensor, TensorElementType, ValueType},
+    value::{DynTensor, DynValue, Tensor, TensorElementType, ValueType},
 };
 use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "cuda", test))]
@@ -18,7 +18,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod device_binding;
 mod io_binding;
+pub use device_binding::{DeviceBinding, DeviceBindingOutputs, DeviceTensor};
 pub use io_binding::{
     PinnedCudaF32IoBinding, PinnedCudaIoBinding, ResidentBindingOutputs, ResidentCudaTensor,
     ResidentIoBinding, ResidentTensorInput,
@@ -403,6 +405,7 @@ impl TryFrom<OrtTensorOutput> for OrtOutput {
 pub struct OrtBackend {
     selection: ProviderSelection,
     cpu_session_options: Option<CpuSessionOptions>,
+    config_entries: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -416,7 +419,16 @@ impl OrtBackend {
         Self {
             selection,
             cpu_session_options: None,
+            config_entries: Vec::new(),
         }
+    }
+
+    /// Adds an ORT session config entry (for example
+    /// `optimization.disable_specified_optimizers`) to every session this
+    /// backend loads, on every provider.
+    pub fn with_config_entry(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.config_entries.push((key.into(), value.into()));
+        self
     }
 
     pub fn with_cpu_session_options(mut self, options: CpuSessionOptions) -> Result<Self> {
@@ -430,10 +442,13 @@ impl OrtBackend {
     }
 
     pub fn load_session(&self, model_path: impl AsRef<Path>) -> Result<OrtSession> {
-        OrtSession::load_with_cpu_options(
+        let entries = &self.config_entries;
+        OrtSession::load_with_provider_loaders(
             model_path.as_ref(),
             self.selection.clone(),
             self.cpu_session_options,
+            |path, options| RealSession::load_cpu_with(path, options, entries),
+            |path, provider| RealSession::load_cuda_with(path, provider, entries),
         )
     }
 }
@@ -640,6 +655,28 @@ struct RealSession {
 
 impl RealSession {
     fn load_cpu(model_path: &Path, options: Option<CpuSessionOptions>) -> Result<Self> {
+        Self::load_cpu_with(model_path, options, &[])
+    }
+
+    fn load_cuda(model_path: &Path, provider: &ProviderOptions) -> Result<Self> {
+        Self::load_cuda_with(model_path, provider, &[])
+    }
+
+    fn apply_config_entries(
+        mut builder: ort::session::builder::SessionBuilder,
+        entries: &[(String, String)],
+    ) -> Result<ort::session::builder::SessionBuilder> {
+        for (key, value) in entries {
+            builder = builder.with_config_entry(key, value).map_err(map_ort_err)?;
+        }
+        Ok(builder)
+    }
+
+    fn load_cpu_with(
+        model_path: &Path,
+        options: Option<CpuSessionOptions>,
+        entries: &[(String, String)],
+    ) -> Result<Self> {
         // The `ort` dependency is configured with `download-binaries` and
         // `copy-dylibs`, so build/check does not depend on a system-wide ORT
         // installation. At runtime, ORT's downloaded CPU dylib is copied beside
@@ -655,10 +692,15 @@ impl RealSession {
                 .with_parallel_execution(false)
                 .map_err(map_ort_err)?;
         }
+        let builder = Self::apply_config_entries(builder, entries)?;
         Self::load_with_builder(builder, model_path)
     }
 
-    fn load_cuda(model_path: &Path, provider: &ProviderOptions) -> Result<Self> {
+    fn load_cuda_with(
+        model_path: &Path,
+        provider: &ProviderOptions,
+        entries: &[(String, String)],
+    ) -> Result<Self> {
         #[cfg(feature = "cuda")]
         {
             let cuda = ort::ep::CUDA::default();
@@ -676,12 +718,13 @@ impl RealSession {
                 .map_err(map_ort_err)?
                 .with_execution_providers([cuda.build().error_on_failure()])
                 .map_err(map_ort_err)?;
+            let builder = Self::apply_config_entries(builder, entries)?;
             return Self::load_with_builder(builder, model_path);
         }
 
         #[cfg(not(feature = "cuda"))]
         {
-            let _ = model_path;
+            let _ = (model_path, entries);
             Err(InfraError::Unsupported(format!(
                 "CUDA ORT execution provider support is not compiled into local-backend-ort (requested device {:?}); falling back to CPU if configured",
                 provider.device_id
@@ -847,61 +890,7 @@ impl RealSession {
         let outputs = self.session.run(values).map_err(map_ort_err)?;
         outputs
             .into_iter()
-            .map(|(name, value)| {
-                if let Ok((shape, data)) = value.try_extract_tensor::<f32>() {
-                    return Ok(OrtTensorOutput {
-                        name: name.to_string(),
-                        shape: shape_to_usize(name, shape)?,
-                        data: OrtTensorData::F32(data.to_vec()),
-                    });
-                }
-                if let Ok((shape, data)) = value.try_extract_tensor::<half::f16>() {
-                    return Ok(OrtTensorOutput {
-                        name: name.to_string(),
-                        shape: shape_to_usize(name, shape)?,
-                        data: OrtTensorData::F16(data.to_vec()),
-                    });
-                }
-                if let Ok((shape, data)) = value.try_extract_tensor::<bool>() {
-                    return Ok(OrtTensorOutput {
-                        name: name.to_string(),
-                        shape: shape_to_usize(name, shape)?,
-                        data: OrtTensorData::Bool(data.to_vec()),
-                    });
-                }
-                if let Ok((shape, data)) = value.try_extract_tensor::<i8>() {
-                    return Ok(OrtTensorOutput {
-                        name: name.to_string(),
-                        shape: shape_to_usize(name, shape)?,
-                        data: OrtTensorData::I8(data.to_vec()),
-                    });
-                }
-                if let Ok((shape, data)) = value.try_extract_tensor::<i16>() {
-                    return Ok(OrtTensorOutput {
-                        name: name.to_string(),
-                        shape: shape_to_usize(name, shape)?,
-                        data: OrtTensorData::I16(data.to_vec()),
-                    });
-                }
-                if let Ok((shape, data)) = value.try_extract_tensor::<i32>() {
-                    return Ok(OrtTensorOutput {
-                        name: name.to_string(),
-                        shape: shape_to_usize(name, shape)?,
-                        data: OrtTensorData::I32(data.to_vec()),
-                    });
-                }
-                if let Ok((shape, data)) = value.try_extract_tensor::<i64>() {
-                    return Ok(OrtTensorOutput {
-                        name: name.to_string(),
-                        shape: shape_to_usize(name, shape)?,
-                        data: OrtTensorData::I64(data.to_vec()),
-                    });
-                }
-                Err(InfraError::Backend(format!(
-                    "output `{name}` has unsupported tensor type; extractable output element types are f32, f16, bool, i8, i16, i32, and i64; available outputs: {}",
-                    format_names(self.metadata.outputs.iter().map(|output| output.name.as_str()))
-                )))
-            })
+            .map(|(name, value)| host_tensor_output(name, &value, &self.metadata.outputs))
             .collect()
     }
 
@@ -912,6 +901,67 @@ impl RealSession {
     fn validate_inputs(&self, inputs: &[OrtTensorInput]) -> Result<()> {
         self.validate_input_names(inputs.iter().map(|input| input.name.as_str()))
     }
+}
+
+/// Copies a CPU-accessible output value into an owned host tensor.
+pub(crate) fn host_tensor_output(
+    name: &str,
+    value: &DynValue,
+    available_outputs: &[TensorMetadata],
+) -> Result<OrtTensorOutput> {
+        if let Ok((shape, data)) = value.try_extract_tensor::<f32>() {
+            return Ok(OrtTensorOutput {
+                name: name.to_string(),
+                shape: shape_to_usize(name, shape)?,
+                data: OrtTensorData::F32(data.to_vec()),
+            });
+        }
+        if let Ok((shape, data)) = value.try_extract_tensor::<half::f16>() {
+            return Ok(OrtTensorOutput {
+                name: name.to_string(),
+                shape: shape_to_usize(name, shape)?,
+                data: OrtTensorData::F16(data.to_vec()),
+            });
+        }
+        if let Ok((shape, data)) = value.try_extract_tensor::<bool>() {
+            return Ok(OrtTensorOutput {
+                name: name.to_string(),
+                shape: shape_to_usize(name, shape)?,
+                data: OrtTensorData::Bool(data.to_vec()),
+            });
+        }
+        if let Ok((shape, data)) = value.try_extract_tensor::<i8>() {
+            return Ok(OrtTensorOutput {
+                name: name.to_string(),
+                shape: shape_to_usize(name, shape)?,
+                data: OrtTensorData::I8(data.to_vec()),
+            });
+        }
+        if let Ok((shape, data)) = value.try_extract_tensor::<i16>() {
+            return Ok(OrtTensorOutput {
+                name: name.to_string(),
+                shape: shape_to_usize(name, shape)?,
+                data: OrtTensorData::I16(data.to_vec()),
+            });
+        }
+        if let Ok((shape, data)) = value.try_extract_tensor::<i32>() {
+            return Ok(OrtTensorOutput {
+                name: name.to_string(),
+                shape: shape_to_usize(name, shape)?,
+                data: OrtTensorData::I32(data.to_vec()),
+            });
+        }
+        if let Ok((shape, data)) = value.try_extract_tensor::<i64>() {
+            return Ok(OrtTensorOutput {
+                name: name.to_string(),
+                shape: shape_to_usize(name, shape)?,
+                data: OrtTensorData::I64(data.to_vec()),
+            });
+        }
+    Err(InfraError::Backend(format!(
+        "output `{name}` has unsupported tensor type; extractable output element types are f32, f16, bool, i8, i16, i32, and i64; available outputs: {}",
+        format_names(available_outputs.iter().map(|output| output.name.as_str()))
+    )))
 }
 
 fn validate_requested_input_names<'a>(

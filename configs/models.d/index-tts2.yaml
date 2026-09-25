@@ -1,0 +1,34 @@
+id: indextts-2.5-onnx
+name: IndexTTS 2.5 ONNX FP16 (experimental)
+enabled: false
+task_kinds:
+  - tts.synthesize
+adapter: index_tts2
+backend: ort
+artifacts:
+  # Local export (path omitted: <model_dir>/indextts-2.5-onnx):
+  #   python scripts/indextts2_export.py export   ... --raw-dir <raw>
+  #   python scripts/indextts2_export.py optimize ... --raw-dir <raw> --output-dir <dir> --precision fp16
+  #   python scripts/indextts2_export.py package  ... --output-dir <dir> --precision fp16
+  # The directory holds the IndexTTS2_*.onnx runtime graphs, the shared
+  # initializer blob, the tiktoken vocabulary, tokenizer.json and manifest.json.
+  - type: local
+runtime:
+  # FP16 weights target NVIDIA GPUs; CPU remains a slow functional fallback.
+  provider_order: [cuda, cpu]
+  max_concurrency: 1
+  idle_ttl_sec: 300
+resources:
+  min_ram_mb: 8192
+  min_vram_mb: 6144
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  runtime: onnxruntime
+  model_family: index_tts2
+  task: text-to-speech
+  experimental: true
+  precision: fp16
+  sample_rate: 22050

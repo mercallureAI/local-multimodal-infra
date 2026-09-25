@@ -1,5 +1,6 @@
 use local_adapter_e5_embedding::E5EmbeddingAdapter;
 use local_adapter_index_tts::IndexTtsAdapter;
+use local_adapter_index_tts2::IndexTts2Adapter;
 use local_adapter_mmarco_reranker::MmarcoRerankerAdapter;
 use local_adapter_sensevoice_asr::SenseVoiceAsrAdapter;
 use local_adapter_yolo::YoloAdapter;
@@ -447,6 +448,7 @@ impl LoadedEntry {
                 LoadedModel::SenseVoiceAsr(SenseVoiceAsrAdapter::load(&spec)?)
             }
             AdapterKind::IndexTts => LoadedModel::IndexTts(IndexTtsAdapter::load(&spec)?),
+            AdapterKind::IndexTts2 => LoadedModel::IndexTts2(IndexTts2Adapter::load(&spec)?),
             AdapterKind::E5Embedding => LoadedModel::E5Embedding(E5EmbeddingAdapter::load(&spec)?),
             AdapterKind::MmarcoReranker => {
                 LoadedModel::MmarcoReranker(MmarcoRerankerAdapter::load(&spec)?)
@@ -559,6 +561,9 @@ fn validated_runtime_providers_for_model(model_id: &str) -> Option<&'static [&'s
         // All A-F/prefill sessions receive the same provider selection. Root
         // FP32 CUDA is policy-enabled, but still needs real NVIDIA validation.
         "indextts-1.5-onnx" => Some(&["cuda", "cpu"]),
+        // IndexTTS-2.5 packages are exported FP16 for NVIDIA GPUs; CPU stays a
+        // functional (slow) fallback.
+        "indextts-2.5-onnx" => Some(&["cuda", "cpu"]),
         "multilingual-e5-small-onnx" => Some(&["cuda", "cpu"]),
         "mmarco-minilm-l12-onnx" => Some(&["cuda", "cpu"]),
         _ => None,
@@ -570,6 +575,7 @@ enum LoadedModel {
     Yolo(YoloAdapter),
     SenseVoiceAsr(SenseVoiceAsrAdapter),
     IndexTts(IndexTtsAdapter),
+    IndexTts2(IndexTts2Adapter),
     E5Embedding(E5EmbeddingAdapter),
     MmarcoReranker(MmarcoRerankerAdapter),
     #[cfg(test)]
@@ -615,6 +621,14 @@ impl LoadedModel {
                 &task.params,
             ),
             (
+                LoadedModel::IndexTts2(adapter),
+                TaskKind::TtsSynthesize,
+                InferenceInput::TtsSynthesize {
+                    text,
+                    reference_audio,
+                },
+            ) => adapter.synthesize(task.id, text, reference_audio.as_ref(), &task.params),
+            (
                 LoadedModel::E5Embedding(adapter),
                 TaskKind::TextEmbed,
                 InferenceInput::TextEmbed { texts, input_type },
@@ -639,6 +653,7 @@ impl LoadedModel {
             LoadedModel::Yolo(_)
             | LoadedModel::SenseVoiceAsr(_)
             | LoadedModel::IndexTts(_)
+            | LoadedModel::IndexTts2(_)
             | LoadedModel::E5Embedding(_)
             | LoadedModel::MmarcoReranker(_) => {
                 tracing::debug!(
@@ -1218,7 +1233,7 @@ mod tests {
         let task_kinds = match adapter {
             AdapterKind::Yolo => vec![TaskKind::ObjectDetect],
             AdapterKind::SenseVoiceAsr => vec![TaskKind::AsrTranscribe],
-            AdapterKind::IndexTts => vec![TaskKind::TtsSynthesize],
+            AdapterKind::IndexTts | AdapterKind::IndexTts2 => vec![TaskKind::TtsSynthesize],
             AdapterKind::E5Embedding => vec![TaskKind::TextEmbed],
             AdapterKind::MmarcoReranker => vec![TaskKind::TextRerank],
         };

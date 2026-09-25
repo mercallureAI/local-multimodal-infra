@@ -298,6 +298,10 @@ pub struct SpeechRequest {
     pub reference_audio: Option<FileRef>,
     #[serde(default)]
     pub reference_path: Option<std::path::PathBuf>,
+    /// Remaining fields (for example `language`, `emotion_vector`, `speed`,
+    /// `seed`) are forwarded to the adapter as task params.
+    #[serde(flatten)]
+    pub params: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -324,7 +328,7 @@ async fn speech(
             ..FileRef::default()
         })
     });
-    let task = InferenceTask::new(
+    let mut task = InferenceTask::new(
         TaskKind::TtsSynthesize,
         Some(req.model),
         InferenceInput::TtsSynthesize {
@@ -332,6 +336,7 @@ async fn speech(
             reference_audio,
         },
     );
+    task.params = req.params;
     match state.service.dispatch(task).await {
         Ok(InferenceOutput::TtsAudio { audio }) => {
             (StatusCode::OK, Json(json!(SpeechResponse { audio }))).into_response()
@@ -527,6 +532,34 @@ mod tests {
             }
             other => panic!("unexpected input: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn audio_speech_route_forwards_extra_fields_as_params() {
+        let service = std::sync::Arc::new(RecordingOpenAiApi::default());
+        let app = router(OpenAiApiState {
+            service: service.clone(),
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/audio/speech")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"indextts-2.5-onnx","input":"你好","reference_path":"./ref.wav","language":"zh","speed":1.25,"emotion_vector":{"happy":0.6}}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let tasks = service.tasks.lock().expect("tasks lock");
+        let params = &tasks[0].params;
+        assert_eq!(params.get("language"), Some(&serde_json::json!("zh")));
+        assert_eq!(params.get("speed"), Some(&serde_json::json!(1.25)));
+        assert_eq!(params.get("emotion_vector"), Some(&serde_json::json!({"happy": 0.6})));
+        assert!(!params.contains_key("model") && !params.contains_key("input"));
     }
 
     #[tokio::test]

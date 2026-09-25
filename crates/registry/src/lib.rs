@@ -690,16 +690,25 @@ mod tests {
             );
             if spec.task_kinds.contains(&TaskKind::TtsSynthesize) {
                 assert!(!spec.enabled, "{} TTS must be disabled by default", spec.id);
-                assert_eq!(spec.adapter, AdapterKind::IndexTts);
-                assert!(spec
-                    .artifacts
-                    .iter()
-                    .all(|artifact| artifact.kind == ArtifactKind::HuggingFace));
-                assert!(spec
-                    .artifacts
-                    .iter()
-                    .all(|artifact| artifact.repo_id.as_deref()
-                        == Some("ModaLeap/indextts-1.5-onnx")));
+                match spec.adapter {
+                    AdapterKind::IndexTts => {
+                        assert!(spec
+                            .artifacts
+                            .iter()
+                            .all(|artifact| artifact.kind == ArtifactKind::HuggingFace));
+                        assert!(spec
+                            .artifacts
+                            .iter()
+                            .all(|artifact| artifact.repo_id.as_deref()
+                                == Some("ModaLeap/indextts-1.5-onnx")));
+                    }
+                    // IndexTTS-2.5 is exported locally; no published package yet.
+                    AdapterKind::IndexTts2 => assert!(spec
+                        .artifacts
+                        .iter()
+                        .all(|artifact| artifact.kind == ArtifactKind::Local)),
+                    other => panic!("{} TTS uses unexpected adapter {other:?}", spec.id),
+                }
             }
         }
     }
