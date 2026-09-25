@@ -1,5 +1,6 @@
 //! Packaged IndexTTS-2.5 layout written by `scripts/indextts2_export.py package`.
 
+use local_backend_ort::InitializerRange;
 use local_core::ModelSpec;
 use local_error::{InfraError, Result};
 use serde::Deserialize;
@@ -20,6 +21,16 @@ pub struct PackageManifest {
     pub runtime: PackageRuntime,
     #[serde(default)]
     pub disabled_optimizers: Vec<String>,
+    #[serde(default)]
+    pub device_shared_initializers: Option<DeviceSharedInitializers>,
+}
+
+/// Initializers the GPT prefill and decode graphs both reference; uploaded
+/// once and handed to both sessions.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeviceSharedInitializers {
+    pub data_file: Option<String>,
+    pub tensors: Vec<InitializerRange>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

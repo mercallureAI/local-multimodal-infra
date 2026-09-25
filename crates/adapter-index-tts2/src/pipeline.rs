@@ -14,7 +14,7 @@ use crate::{
 };
 use local_backend_ort::{
     DeviceBinding, DeviceTensor, OrtBackend, OrtSession, OrtTensorData, OrtTensorInput,
-    OrtTensorOutput, ProviderSelection, SessionProviderReport,
+    OrtTensorOutput, ProviderSelection, SessionProviderReport, SharedInitializers,
 };
 use local_core::{FileRef, InferenceOutput, ModelSpec};
 use local_error::{InfraError, Result};
@@ -59,7 +59,19 @@ impl std::fmt::Debug for Graph {
 
 impl Graph {
     fn load(backend: &OrtBackend, path: &Path, device: &[&str]) -> Result<Self> {
-        let session = backend.load_session(path)?;
+        Self::load_with(backend, path, device, None)
+    }
+
+    fn load_with(
+        backend: &OrtBackend,
+        path: &Path,
+        device: &[&str],
+        shared: Option<&SharedInitializers>,
+    ) -> Result<Self> {
+        let session = match shared {
+            Some(shared) => backend.load_session_with_initializers(path, shared)?,
+            None => backend.load_session(path)?,
+        };
         let host = session
             .outputs()
             .iter()
@@ -107,6 +119,9 @@ pub struct IndexTts2Adapter {
     kv_in: Vec<String>,
     cached_reference: Option<ReferenceState>,
     output_dir: PathBuf,
+    /// Device weights the prefill/decode sessions reference. Declared last so
+    /// it is dropped after those sessions.
+    _shared_gpt: Option<SharedInitializers>,
 }
 
 impl IndexTts2Adapter {
@@ -114,8 +129,11 @@ impl IndexTts2Adapter {
         let started = Instant::now();
         let artifacts = IndexTts2Artifacts::load(IndexTts2Artifacts::resolve(spec))?;
         let manifest = &artifacts.manifest;
+        // Initializers go straight to the device allocator instead of the BFC
+        // arena, which would round each weight region up to a power of two.
         let mut backend =
-            OrtBackend::new(ProviderSelection::from_strings(&spec.runtime.provider_order));
+            OrtBackend::new(ProviderSelection::from_strings(&spec.runtime.provider_order))
+                .with_config_entry("session.use_device_allocator_for_initializers", "1");
         if !manifest.disabled_optimizers.is_empty() {
             backend = backend.with_config_entry(
                 "optimization.disable_specified_optimizers",
@@ -141,15 +159,33 @@ impl IndexTts2Adapter {
             &artifacts.graph(&graphs.conditioning),
             &["speaker_latent", "emotion_vector"],
         )?;
-        let prefill = Graph::load(
+        let shared_gpt = match &manifest.device_shared_initializers {
+            Some(shared) if !shared.tensors.is_empty() => {
+                let data_file = shared.data_file.as_deref().ok_or_else(|| {
+                    InfraError::Adapter("device_shared_initializers has no data_file".to_string())
+                })?;
+                let uploaded = backend.upload_initializers(&artifacts.graph(data_file), &shared.tensors)?;
+                tracing::info!(
+                    tensors = uploaded.len(),
+                    mib = uploaded.bytes() / (1 << 20),
+                    cuda_device = ?uploaded.cuda_device(),
+                    "IndexTTS-2.5 GPT weights uploaded once for prefill and decode"
+                );
+                Some(uploaded)
+            }
+            _ => None,
+        };
+        let prefill = Graph::load_with(
             &backend,
             &artifacts.graph(&graphs.target_prefill_sampling),
             &with_kv(&["last_hidden_state"]),
+            shared_gpt.as_ref(),
         )?;
-        let decode = Graph::load(
+        let decode = Graph::load_with(
             &backend,
             &artifacts.graph(&graphs.decode_step_sampling),
             &with_kv(&["last_hidden_state"]),
+            shared_gpt.as_ref(),
         )?;
         let synthesis = Graph::load(
             &backend,
@@ -182,6 +218,7 @@ impl IndexTts2Adapter {
             kv_in,
             cached_reference: None,
             output_dir,
+            _shared_gpt: shared_gpt,
         };
         tracing::info!(
             model_id = adapter.model_id,
@@ -700,6 +737,12 @@ mod real_model {
             ("zh", "大家好，我现在正在体验 IndexTTS 二点五的 Rust 推理。", json!({"seed": 9527})),
             ("zh-sad", "对不起嘛！我的记性真的不太好。", json!({"seed": 9527, "emotion_vector": {"sad": 0.8}})),
             ("en", "Hello! This sentence was synthesized by the Rust pipeline.", json!({"seed": 9527})),
+            // One segment near the 120-token budget: the VRAM worst case.
+            (
+                "zh-long",
+                "春天来了，公园里的花都开了，红的像火，粉的像霞，白的像雪。小朋友们在草地上放风筝，老人们坐在长椅上聊天晒太阳，年轻人沿着湖边慢慢地跑步。微风吹过，柳枝轻轻摇摆，湖面泛起一圈圈涟漪，远处传来悠扬的歌声，让人觉得格外舒服和安心。",
+                json!({"seed": 9527}),
+            ),
         ];
         for (label, text, params) in cases {
             let params: BTreeMap<String, Value> = serde_json::from_value(params).unwrap();

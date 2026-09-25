@@ -56,14 +56,19 @@ RUNTIME_INT_KEYS = (
     "stop_mel_token",
 )
 PRECISIONS = ("fp16", "fp32")
-# Graphs kept FP32 in the fp16 package by default: the reference frontend runs
-# an STFT/fbank that loses precision in half and runs once per voice.
-FP16_KEEP_F32_DEFAULT = ("IndexTTS2_ReferencePreprocess",)
+ONNX_ELEMENTS = {1: "f32", 10: "f16", 6: "i32", 7: "i64", 9: "bool", 3: "i8", 5: "i16"}
+# Graphs kept FP32 in the fp16 package by default.
+FP16_KEEP_F32_DEFAULT: tuple[str, ...] = ()
+# Graphs converted only under these node-name prefixes. The reference graph's
+# fbank/STFT front end (`feature/`) and speaker/mel path (`reference/`) lose
+# frames and accuracy in half; only the w2v-BERT encoder (`semantic/`, 1.5 GiB
+# of weights) is converted.
+FP16_PARTIAL = {"IndexTTS2_ReferencePreprocess": ("semantic/",)}
 # Ops kept in float32 on top of ORT's default block list: sampling and
 # normalization arithmetic that overflows or loses resolution in half.
-# The DiT's QK^T scores exceed the float16 range (65504) late in the CFM
-# schedule; the Softmax that consumes them is already blocked by op type.
-FP16_NODE_BLOCK_SUFFIXES = ("/attention/MatMul",)
+# CFM DiT geometry (config.yaml s2mel.DiT: hidden_dim 512, num_heads 8).
+DIT_HIDDEN_SIZE = 512
+DIT_ATTENTION_HEADS = 8
 FP16_OP_BLOCK_EXTRA = {"RandomUniform", "RandomNormal", "Multinomial", "Softmax", "ReduceSum", "Pow", "Exp", "Log"}
 
 
@@ -211,16 +216,22 @@ def run_optimize(args: argparse.Namespace) -> None:
             model = onnx.load(str(inferred), load_external_data=True)
         finally:
             inferred.unlink(missing_ok=True)
+        fused = fuse_mha_attention(model)
+        if fused:
+            print(f"  fused {fused} attention block(s) into MultiHeadAttention", flush=True)
         if convert:
             neutralize_integer_sums(model)
+            partial = FP16_PARTIAL.get(graph)
             model = convert_float_to_float16(
                 model,
                 keep_io_types=True,
                 disable_shape_infer=True,
                 op_block_list=sorted(set(DEFAULT_OP_BLOCK_LIST) | FP16_OP_BLOCK_EXTRA),
-                node_block_list=[
-                    node.name for node in model.graph.node if node.name.endswith(FP16_NODE_BLOCK_SUFFIXES)
-                ],
+                node_block_list=(
+                    [node.name for node in model.graph.node if not node.name.startswith(partial)]
+                    if partial
+                    else None
+                ),
             )
             drop_duplicate_nodes(model)
             removed = remove_cast_round_trips(model)
@@ -243,6 +254,99 @@ def run_optimize(args: argparse.Namespace) -> None:
         f"{args.precision} package ready in {time.time() - started:.0f}s: "
         f"{stats['unique_initializers']} tensors, {stats['unique_bytes'] / 2**30:.2f} GiB -> {output_dir}"
     )
+
+
+def fuse_mha_attention(model: Any) -> int:
+    """Replace the DiT's explicit attention with ``com.microsoft.MultiHeadAttention``.
+
+    Upstream exports each CFM layer as ``Softmax((q*s)(k^T*s)) @ v`` over
+    ``[B, N, T, H]`` tensors (no mask), materializing a float32 ``[2, 8, T, T]``
+    score tensor per layer; at T ~ 4000 mel frames that is ~1 GB, and the
+    scores also overflow float16. The fused op runs flash / memory-efficient
+    kernels on CUDA with float32 accumulation and O(T) memory. Returns the
+    number of rewritten blocks.
+    """
+    from onnx import helper
+
+    graph = model.graph
+    producers = {output: node for node in graph.node for output in node.output}
+    consumers: dict[str, list[Any]] = {}
+    for node in graph.node:
+        for name in node.input:
+            consumers.setdefault(name, []).append(node)
+
+    def only(name: str, op: str) -> Any | None:
+        users = consumers.get(name, [])
+        return users[0] if len(users) == 1 and users[0].op_type == op else None
+
+    new_nodes = []
+    fused = 0
+    for softmax in [node for node in graph.node if node.op_type == "Softmax"]:
+        scores = producers.get(softmax.input[0])
+        if scores is None or scores.op_type != "MatMul":
+            continue
+        q_scale, k_scale = (producers.get(name) for name in scores.input)
+        context = only(softmax.output[0], "MatMul")
+        if not (q_scale and k_scale and context) or q_scale.op_type != "Mul" or k_scale.op_type != "Mul":
+            continue
+        k_transpose = producers.get(k_scale.input[0])
+        merge = only(context.output[0], "Transpose")
+        flatten = only(merge.output[0], "Reshape") if merge else None
+        if k_transpose is None or k_transpose.op_type != "Transpose" or flatten is None:
+            continue
+        prefix = softmax.name.rsplit("/", 1)[0]
+        query_bnsh, key_bnsh, value_bnsh = q_scale.input[0], k_transpose.input[0], context.input[1]
+        # Reuse the block's own [B, T, D] output shape for the flattened inputs.
+        hidden_shape = flatten.input[1]
+        new_inputs = []
+        for label, bnsh in (("query", query_bnsh), ("key", key_bnsh), ("value", value_bnsh)):
+            bsnh = f"{prefix}/mha_{label}_bsnh"
+            bsd = f"{prefix}/mha_{label}_bsd"
+            new_nodes.append((flatten, helper.make_node("Transpose", [bnsh], [bsnh], name=f"{prefix}/mha_{label}_transpose", perm=[0, 2, 1, 3])))
+            new_nodes.append((flatten, helper.make_node("Reshape", [bsnh, hidden_shape], [bsd], name=f"{prefix}/mha_{label}_reshape")))
+            new_inputs.append(bsd)
+        new_nodes.append((flatten, helper.make_node(
+            "MultiHeadAttention",
+            new_inputs,
+            [flatten.output[0]],
+            name=f"{prefix}/mha",
+            domain="com.microsoft",
+            num_heads=DIT_ATTENTION_HEADS,
+            # q and k are each pre-scaled by sqrt(1/sqrt(head_dim)) upstream.
+            scale=(DIT_ATTENTION_HEADS / DIT_HIDDEN_SIZE) ** 0.5,
+        )))
+        flatten.output[0] = f"{flatten.output[0]}_unfused"
+        fused += 1
+    if not fused:
+        return 0
+    # Insert each replacement right before the output reshape it supersedes
+    # (all of its inputs exist by then), then drop what is no longer reachable.
+    ordered = []
+    pending = {}
+    for anchor, node in new_nodes:
+        pending.setdefault(id(anchor), []).append(node)
+    for node in graph.node:
+        ordered.extend(pending.get(id(node), []))
+        ordered.append(node)
+    del graph.node[:]
+    graph.node.extend(ordered)
+    prune_dead_nodes(model)
+    if not any(opset.domain == "com.microsoft" for opset in model.opset_import):
+        model.opset_import.append(helper.make_opsetid("com.microsoft", 1))
+    return fused
+
+
+def prune_dead_nodes(model: Any) -> None:
+    graph = model.graph
+    needed = {output.name for output in graph.output}
+    kept = []
+    for node in reversed(list(graph.node)):
+        if any(output in needed for output in node.output):
+            kept.append(node)
+            needed.update(name for name in node.input if name)
+    kept.reverse()
+    del graph.node[:]
+    graph.node.extend(kept)
 
 
 def neutralize_integer_sums(model: Any) -> None:
@@ -387,6 +491,10 @@ def run_package(args: argparse.Namespace) -> None:
         "sample_rate": int(metadata["out_sample_rate"]),
         "graphs": {key.removeprefix("model_file_name_"): metadata[key] for key in RUNTIME_GRAPH_KEYS},
         "runtime": {key: int(metadata[key]) for key in RUNTIME_INT_KEYS},
+        "device_shared_initializers": device_shared_initializers(
+            output_dir,
+            [metadata["model_file_name_target_prefill_sampling"], metadata["model_file_name_decode_step_sampling"]],
+        ),
         # Session config the fp16-KV graphs need (mirrors upstream inference).
         "disabled_optimizers": (
             ["CastFloat16Transformer", "FuseFp16InitializerToFp32NodeTransformer"]
@@ -410,6 +518,41 @@ def run_package(args: argparse.Namespace) -> None:
     }
     write_json(output_dir / "manifest.json", manifest)
     print(f"packaged {len(files)} runtime files in {output_dir}")
+
+
+def device_shared_initializers(folder: Path, graphs: list[str]) -> dict[str, Any]:
+    """Blob ranges of the initializers every graph in ``graphs`` references.
+
+    The prefill and decode GPT graphs carry the same ~1.2 GiB of weights. The
+    runtime uploads these ranges to the device once and hands the same values
+    to both sessions (``AddInitializer``) instead of letting each session copy
+    its own.
+    """
+    import onnx
+
+    per_graph = []
+    for name in graphs:
+        model = onnx.load(str(folder / name), load_external_data=False)
+        per_graph.append({tensor.name: tensor for tensor in model.graph.initializer})
+    common = set(per_graph[0]).intersection(*per_graph[1:])
+    tensors = []
+    locations = set()
+    for name in sorted(common):
+        tensor = per_graph[0][name]
+        if tensor.data_location != onnx.TensorProto.EXTERNAL:
+            continue
+        external = {entry.key: entry.value for entry in tensor.external_data}
+        locations.add(external["location"])
+        tensors.append({
+            "name": name,
+            "element": ONNX_ELEMENTS[tensor.data_type],
+            "shape": [int(dim) for dim in tensor.dims],
+            "offset": int(external.get("offset", "0")),
+            "length": int(external["length"]),
+        })
+    if len(locations) > 1:
+        raise SystemExit(f"shared GPT initializers span several data files: {sorted(locations)}")
+    return {"graphs": graphs, "data_file": locations.pop() if locations else None, "tensors": tensors}
 
 
 def read_package_metadata(folder: Path) -> dict[str, str]:

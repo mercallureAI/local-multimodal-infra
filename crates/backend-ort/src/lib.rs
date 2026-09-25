@@ -20,7 +20,16 @@ use std::{
 
 mod device_binding;
 mod io_binding;
+mod shared_initializers;
 pub use device_binding::{DeviceBinding, DeviceBindingOutputs, DeviceTensor};
+pub use shared_initializers::{InitializerRange, SharedInitializers};
+
+/// Per-backend additions applied to every session builder.
+#[derive(Default)]
+struct SessionExtras<'a> {
+    config_entries: &'a [(String, String)],
+    initializers: &'a [(String, std::sync::Arc<DynValue>)],
+}
 pub use io_binding::{
     PinnedCudaF32IoBinding, PinnedCudaIoBinding, ResidentBindingOutputs, ResidentCudaTensor,
     ResidentIoBinding, ResidentTensorInput,
@@ -442,14 +451,48 @@ impl OrtBackend {
     }
 
     pub fn load_session(&self, model_path: impl AsRef<Path>) -> Result<OrtSession> {
-        let entries = &self.config_entries;
+        self.load_session_with_extras(model_path.as_ref(), &[])
+    }
+
+    /// Loads a session whose initializers named in `shared` are taken from
+    /// those values instead of the model's own data, so several sessions can
+    /// reference one device copy of common weights.
+    pub fn load_session_with_initializers(
+        &self,
+        model_path: impl AsRef<Path>,
+        shared: &SharedInitializers,
+    ) -> Result<OrtSession> {
+        self.load_session_with_extras(model_path.as_ref(), shared.values())
+    }
+
+    fn load_session_with_extras(
+        &self,
+        model_path: &Path,
+        initializers: &[(String, std::sync::Arc<DynValue>)],
+    ) -> Result<OrtSession> {
+        let extras = SessionExtras {
+            config_entries: &self.config_entries,
+            initializers,
+        };
         OrtSession::load_with_provider_loaders(
-            model_path.as_ref(),
+            model_path,
             self.selection.clone(),
             self.cpu_session_options,
-            |path, options| RealSession::load_cpu_with(path, options, entries),
-            |path, provider| RealSession::load_cuda_with(path, provider, entries),
+            |path, options| RealSession::load_cpu_with(path, options, &extras),
+            |path, provider| RealSession::load_cuda_with(path, provider, &extras),
         )
+    }
+
+    /// The CUDA device this backend prefers, when CUDA is compiled in, listed
+    /// first among accelerators and available at runtime.
+    pub fn preferred_cuda_device(&self) -> Option<u32> {
+        let first = self
+            .selection
+            .order
+            .iter()
+            .find(|provider| provider.kind != ProviderKind::Cpu)?;
+        (first.kind == ProviderKind::Cuda && probe_cuda_runtime_availability())
+            .then(|| first.device_id.unwrap_or(0))
     }
 }
 
@@ -655,19 +698,24 @@ struct RealSession {
 
 impl RealSession {
     fn load_cpu(model_path: &Path, options: Option<CpuSessionOptions>) -> Result<Self> {
-        Self::load_cpu_with(model_path, options, &[])
+        Self::load_cpu_with(model_path, options, &SessionExtras::default())
     }
 
     fn load_cuda(model_path: &Path, provider: &ProviderOptions) -> Result<Self> {
-        Self::load_cuda_with(model_path, provider, &[])
+        Self::load_cuda_with(model_path, provider, &SessionExtras::default())
     }
 
-    fn apply_config_entries(
+    fn apply_extras(
         mut builder: ort::session::builder::SessionBuilder,
-        entries: &[(String, String)],
+        extras: &SessionExtras<'_>,
     ) -> Result<ort::session::builder::SessionBuilder> {
-        for (key, value) in entries {
+        for (key, value) in extras.config_entries {
             builder = builder.with_config_entry(key, value).map_err(map_ort_err)?;
+        }
+        for (name, value) in extras.initializers {
+            builder = builder
+                .with_initializer(name, value.clone())
+                .map_err(map_ort_err)?;
         }
         Ok(builder)
     }
@@ -675,7 +723,7 @@ impl RealSession {
     fn load_cpu_with(
         model_path: &Path,
         options: Option<CpuSessionOptions>,
-        entries: &[(String, String)],
+        extras: &SessionExtras<'_>,
     ) -> Result<Self> {
         // The `ort` dependency is configured with `download-binaries` and
         // `copy-dylibs`, so build/check does not depend on a system-wide ORT
@@ -692,14 +740,14 @@ impl RealSession {
                 .with_parallel_execution(false)
                 .map_err(map_ort_err)?;
         }
-        let builder = Self::apply_config_entries(builder, entries)?;
+        let builder = Self::apply_extras(builder, extras)?;
         Self::load_with_builder(builder, model_path)
     }
 
     fn load_cuda_with(
         model_path: &Path,
         provider: &ProviderOptions,
-        entries: &[(String, String)],
+        extras: &SessionExtras<'_>,
     ) -> Result<Self> {
         #[cfg(feature = "cuda")]
         {
@@ -718,13 +766,13 @@ impl RealSession {
                 .map_err(map_ort_err)?
                 .with_execution_providers([cuda.build().error_on_failure()])
                 .map_err(map_ort_err)?;
-            let builder = Self::apply_config_entries(builder, entries)?;
+            let builder = Self::apply_extras(builder, extras)?;
             return Self::load_with_builder(builder, model_path);
         }
 
         #[cfg(not(feature = "cuda"))]
         {
-            let _ = (model_path, entries);
+            let _ = (model_path, extras);
             Err(InfraError::Unsupported(format!(
                 "CUDA ORT execution provider support is not compiled into local-backend-ort (requested device {:?}); falling back to CPU if configured",
                 provider.device_id
