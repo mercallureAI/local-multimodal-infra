@@ -23,18 +23,27 @@ use std::{collections::HashMap, path::Path};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
     pub mainland: bool,
+    /// `ToneSandhi.modified_tone` (neutral tone, 不/一, third-tone sandhi).
+    /// Off, readings are citation tones (still with g2pW's neutral tones).
+    pub tone_sandhi: bool,
 }
 
 impl Options {
     /// Exactly PaddleSpeech's pipeline (parity reference).
     pub fn paddlespeech() -> Self {
-        Self { mainland: false }
+        Self {
+            mainland: false,
+            tone_sandhi: true,
+        }
     }
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { mainland: true }
+        Self {
+            mainland: true,
+            tone_sandhi: true,
+        }
     }
 }
 
@@ -200,7 +209,11 @@ impl ZhFrontend {
                 .zip(&word_chars)
                 .map(|(reading, c)| reading.clone().unwrap_or_else(|| c.to_string()))
                 .collect();
-            let finals = self.sandhi.modified_tone(&self.jieba, &word, &pos, finals);
+            let finals = if self.options.tone_sandhi {
+                self.sandhi.modified_tone(&self.jieba, &word, &pos, finals)
+            } else {
+                finals
+            };
             let finals = match self.overrides.get(&word) {
                 Some(fixed) => fixed.clone(),
                 None => finals,
