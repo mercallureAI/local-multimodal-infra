@@ -29,7 +29,7 @@ ends the bot's speech and its generation, and the server sends
 `response.cut` so the client drops the little audio it has buffered.
 
 The chat, ASR and TTS models are named by the `voice-cascade` model
-(`configs/models.d/voice-cascade.yaml`, whose artifact is the VAD model) and
+(`configs/providers/realtime/voice-cascade.yaml`, whose artifact is the VAD model) and
 must be enabled. With IndexTTS-2.5 the bot speaks with a fixed emotion,
 `tts_emotion` (default `calm`; `none` keeps the reference voice's own) at
 `tts_emotion_strength` (default 0.8); a session may choose its own
@@ -46,6 +46,31 @@ speaking (its last clauses included), nobody is in the middle of an
 utterance and the utterances heard so far are answered (at most 20 s later),
 even when the bot was stopped meanwhile; results that arrive together are
 told in one turn. Short-lived audio files go to `<data_dir>/voice-cascade`.
+
+## Audio mode
+
+With `"mode": "audio"` in `session.start.config` the server only listens and
+speaks; the client runs the conversation with a model of its own (a cloud
+LLM, say). There is no chat model (it need not be enabled), no `tool.call`,
+and `tool.result` / `note` are refused. Listening, joining utterances and being
+talked over work as above; the client gets:
+
+- `input.transcript` with an `id`, `replaces` (the id of the utterance this
+  one continues and replaces: a reply to that one is out of date) and
+  `respond` (false for talk the bot is not part of: in a group, others
+  talking while the bot speaks, which the client may keep as context; one to
+  one, a backchannel);
+- `state` (`speaking`, `listening`) whenever either changes, which tells the
+  client when the bot is idle (e.g. to tell a task's result);
+- `response.done` once a response is over: fully heard, or `cut` (someone
+  talked over the bot, or the client cancelled it), with `spoken`, the text
+  the listener actually heard (what the client should keep in its history).
+
+The client speaks by streaming `response.delta` (text, split into clauses
+and spoken as it comes) and `response.end` under a `response_id` of its
+choosing; responses play one after the other. `response.cancel` stops the
+bot (text still arriving for a cancelled id is dropped), and `say` speaks a
+text as it is.
 
 ## Connection
 
@@ -66,22 +91,26 @@ clients are not browsers.
 | type | fields | |
 | --- | --- | --- |
 | `session.start` | `config` | Must be first. |
-| `tool.result` | `call_id`, `output` | The answer to a `tool.call`; the bot tells it in its own words. |
-| `note` | `text` | Backend news; the bot tells it if it matters, else stays silent. |
-| `say` | `text` | Makes the bot speak first (e.g. why it placed a call). |
+| `tool.result` | `call_id`, `output` | Cascade: the answer to a `tool.call`; the bot tells it in its own words. |
+| `note` | `text` | Cascade: backend news; the bot tells it if it matters, else stays silent. |
+| `say` | `text` | Cascade: makes the bot speak first (e.g. why it placed a call). Audio: speaks `text` as it is. |
+| `response.delta` | `response_id`, `text` | Audio: text to speak, streamed. |
+| `response.end` | `response_id` | Audio: the response's text is complete. |
+| `response.cancel` | `response_id`? | Audio: stops the bot (that response, or whatever it says). |
 | `session.stop` | | Ends the conversation. |
 
 `session.start.config`:
 
 | field | default | |
 | --- | --- | --- |
+| `mode` | `cascade` | `audio`: the client runs the conversation (see above). |
 | `name` | (required) | The bot's name. |
 | `aliases` | `[]` | Other names (homophones) that address it. |
 | `group` | `false` | Several people talk with each other (a channel), rather than one person with the bot. |
-| `speaker` | | The person talking, one to one. |
-| `instructions` | | A persona appended to the bot's instructions. |
+| `speaker` | | Cascade: the person talking, one to one. |
+| `instructions` | | Cascade: a persona appended to the bot's instructions. |
 | `ref_audio` | model's `default_reference_audio` | The voice: a WAV file, base64. |
-| `tool_filler` | none | Said right away when a task is handed off. |
+| `tool_filler` | none | Cascade: said right away when a task is handed off. |
 | `chat_model`, `asr_model`, `tts_model` | the model's `metadata` | |
 | `tts_emotion`, `tts_emotion_strength` | the model's `metadata` (`calm`, 0.8) | IndexTTS-2.5 emotion: happy, angry, sad, afraid, disgusted, melancholic, surprised, calm, or none; strength 0 to 1. |
 | `vad_threshold` | 0.5 | |
@@ -94,10 +123,12 @@ clients are not browsers.
 | --- | --- | --- |
 | `session.started` | `input_rate`, `output_rate` | Models loaded; audio may flow. |
 | `input.speech_started` / `input.speech_stopped` | | VAD edges. |
-| `input.transcript` | `text`, `partial`? | An utterance (joined when the speaker only paused); `partial`: a piece of a long one still going on. |
-| `response.text` | `text` | A clause the bot is about to say. |
-| `response.cut` | | The bot was stopped: drop its buffered audio. |
-| `tool.call` | `call_id`, `name`, `arguments`, `heard` | A task for the client (`backend_task`: `arguments.task`); answer with `tool.result`. |
+| `input.transcript` | `text`, `partial`?, `id`?, `replaces`?, `respond`? | An utterance (joined when the speaker only paused); `partial`: a piece of a long one still going on. `id`, `replaces`, `respond`: audio mode. |
+| `state` | `speaking`, `listening` | Audio: sent when either changes. |
+| `response.text` | `text`, `response_id`? | A clause the bot is about to say. |
+| `response.cut` | `response_id`? | The bot was stopped: drop its buffered audio. |
+| `response.done` | `response_id`, `spoken`, `cut` | Audio: a response is over. |
+| `tool.call` | `call_id`, `name`, `arguments`, `heard` | Cascade: a task for the client (`backend_task`: `arguments.task`); answer with `tool.result`. |
 | `error` | `message` | A failure; after `session.start` failures the socket closes. |
 
 ## Checking it
@@ -105,8 +136,9 @@ clients are not browsers.
 `python -m scripts.local.realtime_e2e --audio-dir <wavs>` starts the release services, opens a session
 and plays spoken test utterances (WAV files, 16 kHz) at real-time pace,
 printing transcripts, tool calls, what the bot says and how long after the end
-of each utterance its audio starts; it answers tool calls itself. It needs the
-Python `websockets`, `numpy` and `librosa` packages.
+of each utterance its audio starts; it answers tool calls itself. With
+`--mode audio` it plays the client of an audio mode session, answering with
+canned text. It needs the Python `websockets`, `numpy` and `librosa` packages.
 
 On an RTX 4090 the answer starts 0.65–1.2 s after the end of the speaker's
 audio, of which 0.6 s is the VAD's end-of-speech silence.

@@ -6,7 +6,11 @@ bot did and how fast it started answering. The bot's audio is saved. Needs
 numpy, librosa and websockets >= 14 (``additional_headers``).
 
     python realtime_e2e.py --infra D:/AI_WorkSpace/local-multimodal-infra-chat \
-        --model-dir D:/AI_WorkSpace/local-multimodal-infra/workdir/models [--group]
+        --model-dir D:/AI_WorkSpace/local-multimodal-infra/workdir/models [--group] [--mode audio]
+
+``--mode audio`` checks the audio-only protocol: the script plays the client's
+part, answering each utterance that wants a reply with a canned text streamed
+in small deltas (as a cloud model would).
 """
 
 import argparse
@@ -39,6 +43,13 @@ GROUP_STEPS = [
 ]
 CHUNK = 320  # 20 ms at 16 kHz
 REF_AUDIO = Path("scripts/assets/tts-input-mon3tr.wav")
+# Audio mode: what the client answers (a long one to talk over).
+SHORT_REPLY = "好的，你刚才说的是：{text}"
+LONG_REPLY = (
+    "从前有一座山，山里有一座庙，庙里住着一个老和尚和一个小和尚。"
+    "有一天老和尚对小和尚说，我给你讲个故事吧，从前有一座山，山里有一座庙。"
+    "庙里住着一个老和尚和一个小和尚，老和尚又开始讲故事了，讲的还是同一个故事。"
+)
 
 
 def pcm16(samples: np.ndarray) -> bytes:
@@ -46,8 +57,11 @@ def pcm16(samples: np.ndarray) -> bytes:
 
 
 class Client:
-    def __init__(self, ws) -> None:
+    def __init__(self, ws, audio_mode: bool = False) -> None:
         self.ws = ws
+        self.audio_mode = audio_mode
+        self.long_reply = False
+        self.replies = 0
         self.events: list[tuple[float, dict]] = []
         self.audio = bytearray()
         self.audio_times: list[float] = []
@@ -79,6 +93,24 @@ class Client:
                 )
             elif kind in ("input.transcript", "response.text", "response.cut", "error"):
                 print(f"  [{kind}] {event.get('speaker', '')} {event.get('text', event.get('message', ''))}")
+                if self.audio_mode and kind == "input.transcript" and event.get("respond"):
+                    print(f"    id={event.get('id')} replaces={event.get('replaces')}")
+                    asyncio.ensure_future(self.reply(event["text"]))
+            elif kind in ("response.done", "state"):
+                print(f"  [{kind}] {json.dumps({k: v for k, v in event.items() if k != 'type'}, ensure_ascii=False)}")
+
+    async def reply(self, heard: str) -> None:
+        """Audio mode: streams an answer, a few characters every 30 ms."""
+        self.replies += 1
+        response_id = f"reply-{self.replies}"
+        text = LONG_REPLY if self.long_reply else SHORT_REPLY.format(text=heard)
+        await asyncio.sleep(0.3)  # the model's first token
+        for i in range(0, len(text), 4):
+            await self.ws.send(
+                json.dumps({"type": "response.delta", "response_id": response_id, "text": text[i : i + 4]})
+            )
+            await asyncio.sleep(0.03)
+        await self.ws.send(json.dumps({"type": "response.end", "response_id": response_id}))
 
     async def speak(self, samples: np.ndarray, tail_seconds: float) -> None:
         rng = np.random.default_rng(0)
@@ -95,12 +127,12 @@ class Client:
                 await asyncio.sleep(wait)
 
 
-async def session(url: str, token: str, group: bool, out_wav: Path) -> None:
+async def session(url: str, token: str, group: bool, out_wav: Path, audio_mode: bool = False) -> None:
     ref = REF_AUDIO.read_bytes()
     async with websockets.connect(
         url, additional_headers={"Authorization": f"Bearer {token}"}, max_size=None, ping_interval=None
     ) as ws:
-        client = Client(ws)
+        client = Client(ws, audio_mode)
         reader = asyncio.create_task(client.reader())
         t = time.perf_counter()
         await ws.send(
@@ -114,6 +146,7 @@ async def session(url: str, token: str, group: bool, out_wav: Path) -> None:
                         "speaker": "测试员",
                         "ref_audio": base64.b64encode(ref).decode(),
                         "tool_filler": "好的，我查一下。",
+                        "mode": "audio" if audio_mode else "cascade",
                     },
                 }
             )
@@ -135,11 +168,15 @@ async def session(url: str, token: str, group: bool, out_wav: Path) -> None:
         long_answer, _ = librosa.load(str(ROUTER_AUDIO / "r18.wav"), sr=16000, mono=True)
         print("-> barge-in: ask for a joke, then talk over it")
         client.mark = 0.0
+        client.long_reply = True
         await client.speak(samples.astype(np.float32), tail_seconds=2.5)
         cuts_before = sum(1 for _, e in client.events if e["type"] == "response.cut")
         await client.speak(long_answer.astype(np.float32), tail_seconds=4.0)
         cuts = sum(1 for _, e in client.events if e["type"] == "response.cut") - cuts_before
         print(f"  response.cut events after talking over: {cuts}")
+        if audio_mode:
+            dones = [e for _, e in client.events if e["type"] == "response.done"]
+            print(f"  response.done events: {len(dones)}, cut: {sum(1 for e in dones if e['cut'])}")
         await ws.send(json.dumps({"type": "session.stop"}))
         await asyncio.sleep(0.5)
         reader.cancel()
@@ -158,6 +195,7 @@ def main() -> None:
     ap.add_argument("--model-dir", default="./workdir/models")
     ap.add_argument("--ref", default=str(REF_AUDIO), help="the reference voice (WAV)")
     ap.add_argument("--group", action="store_true")
+    ap.add_argument("--mode", choices=["cascade", "audio"], default="cascade")
     ap.add_argument("--out", default="workdir/data/realtime_bot.wav")
     args = ap.parse_args()
     ROUTER_AUDIO, REF_AUDIO = Path(args.audio_dir), Path(args.ref)
@@ -206,7 +244,11 @@ def main() -> None:
         procs.append(worker)
         smoke.wait_health("worker", f"{smoke.WORKER_URL}/health", worker, 60, 15, data_dir)
         time.sleep(1.0)  # first heartbeat
-        asyncio.run(session("ws://127.0.0.1:17890/v1/realtime", smoke.INFER_TOKEN, args.group, Path(args.out)))
+        asyncio.run(
+            session(
+                "ws://127.0.0.1:17890/v1/realtime", smoke.INFER_TOKEN, args.group, Path(args.out), args.mode == "audio"
+            )
+        )
     finally:
         cleanup_processes(procs)
         wait_ports_closed(smoke.PORTS, 10)
