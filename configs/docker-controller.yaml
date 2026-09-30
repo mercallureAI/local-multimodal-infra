@@ -5,7 +5,7 @@ bind: 0.0.0.0:17890
 workdir: /app/workdir
 # Model spec YAML config directory, not downloaded model weights/artifacts.
 # Real artifacts are in /app/workdir/models via compose --model-dir.
-models_conf_dir: configs/models.d
+providers_conf_dir: configs/providers
 admin_token: null
 worker_registration_token: null
 public_base_url: null

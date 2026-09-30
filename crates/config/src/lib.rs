@@ -18,8 +18,9 @@ pub struct ControllerConfig {
     pub database_path: Option<PathBuf>,
     #[serde(default)]
     pub model_dir: Option<PathBuf>,
-    #[serde(default = "default_models_conf_dir")]
-    pub models_conf_dir: PathBuf,
+    /// Model specs, filed as `<dir>/<category>/<id>.yaml`.
+    #[serde(default = "default_providers_conf_dir", alias = "models_conf_dir")]
+    pub providers_conf_dir: PathBuf,
     #[serde(default)]
     pub admin_token: Option<String>,
     #[serde(default)]
@@ -42,7 +43,7 @@ impl Default for ControllerConfig {
             data_dir: None,
             database_path: None,
             model_dir: None,
-            models_conf_dir: default_models_conf_dir(),
+            providers_conf_dir: default_providers_conf_dir(),
             admin_token: None,
             mcp_infer_tokens: Vec::new(),
             worker_registration_token: None,
@@ -71,8 +72,9 @@ pub struct WorkerConfig {
     pub database_path: Option<PathBuf>,
     #[serde(default)]
     pub model_dir: Option<PathBuf>,
-    #[serde(default = "default_models_conf_dir")]
-    pub models_conf_dir: PathBuf,
+    /// Model specs, filed as `<dir>/<category>/<id>.yaml`.
+    #[serde(default = "default_providers_conf_dir", alias = "models_conf_dir")]
+    pub providers_conf_dir: PathBuf,
     #[serde(default = "default_heartbeat_secs")]
     pub heartbeat_interval_sec: u64,
     #[serde(default)]
@@ -92,7 +94,7 @@ impl Default for WorkerConfig {
             data_dir: None,
             database_path: None,
             model_dir: None,
-            models_conf_dir: default_models_conf_dir(),
+            providers_conf_dir: default_providers_conf_dir(),
             heartbeat_interval_sec: default_heartbeat_secs(),
             runtime: RuntimeManagerConfig::default(),
             registration_token: None,
@@ -143,7 +145,7 @@ impl ControllerConfig {
             self.data_dir.clone(),
             self.database_path.clone(),
             self.model_dir.clone(),
-            self.models_conf_dir.clone(),
+            self.providers_conf_dir.clone(),
         )
     }
 }
@@ -159,7 +161,7 @@ impl WorkerConfig {
             self.data_dir.clone(),
             self.database_path.clone(),
             self.model_dir.clone(),
-            self.models_conf_dir.clone(),
+            self.providers_conf_dir.clone(),
         )
     }
 }
@@ -176,8 +178,8 @@ fn default_worker_base_url() -> String {
 fn default_controller_url() -> String {
     "http://127.0.0.1:17890".to_string()
 }
-fn default_models_conf_dir() -> PathBuf {
-    PathBuf::from("configs/models.d")
+fn default_providers_conf_dir() -> PathBuf {
+    PathBuf::from("configs/providers")
 }
 fn default_workdir() -> PathBuf {
     PathBuf::from("workdir")

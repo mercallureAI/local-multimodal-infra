@@ -103,7 +103,8 @@ through `deploy.resources.reservations.devices`
 and uses a distinct `local-multimodal-infra:nvidia-cuda12` image; the controller
 continues to use the CPU image and receives no GPU.
 
-CPU and NVIDIA Compose share the sole `configs/models.d` catalog. YOLO, Qwen
+CPU and NVIDIA Compose share the sole `configs/providers` catalog (one
+directory per model category). YOLO, Qwen
 ASR, and FP32 IndexTTS express `[cuda, cpu]` intent. Before loading sessions,
 runtime availability resolution turns this into `[cpu]` when CUDA is not
 compiled or when a cached process-level tiny CUDA session probe cannot register
@@ -169,7 +170,8 @@ Common configuration entry points:
 
 - `configs/controller.yaml`
 - `configs/worker.yaml`
-- `configs/models.d`
+- `configs/providers/<category>/*.yaml` (categories: `asr`, `tts`, `chat`,
+  `embedding`, `rerank`, `detect`, `realtime`)
 
 ## Directory conventions
 

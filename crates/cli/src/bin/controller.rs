@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
         "qwen3-asr-0.6b-onnx",
     ])?;
     store.seed_models(local_registry::default_catalog(&layout.model_dir))?;
-    store.seed_models(local_registry::load_yaml_specs(&layout.models_conf_dir)?)?;
+    store.seed_models(local_registry::load_yaml_specs(&layout.providers_conf_dir)?)?;
     let registry = ModelRegistry::from_models(store.list_models()?);
     let state = ControllerState::with_store_options(
         registry,

@@ -25,6 +25,78 @@ pub enum AdapterKind {
     VoiceCascade,
 }
 
+impl AdapterKind {
+    pub const ALL: [AdapterKind; 8] = [
+        AdapterKind::Yolo,
+        AdapterKind::SenseVoiceAsr,
+        AdapterKind::IndexTts,
+        AdapterKind::IndexTts2,
+        AdapterKind::E5Embedding,
+        AdapterKind::MmarcoReranker,
+        AdapterKind::Qwen3Chat,
+        AdapterKind::VoiceCascade,
+    ];
+
+    /// The category the adapter's models are filed and built under.
+    pub fn category(self) -> ModelCategory {
+        match self {
+            AdapterKind::Yolo => ModelCategory::Detect,
+            AdapterKind::SenseVoiceAsr => ModelCategory::Asr,
+            AdapterKind::IndexTts | AdapterKind::IndexTts2 => ModelCategory::Tts,
+            AdapterKind::E5Embedding => ModelCategory::Embedding,
+            AdapterKind::MmarcoReranker => ModelCategory::Rerank,
+            AdapterKind::Qwen3Chat => ModelCategory::Chat,
+            AdapterKind::VoiceCascade => ModelCategory::Realtime,
+        }
+    }
+}
+
+/// What a model is for. Model specs live in `<providers dir>/<category>/`,
+/// and each category is a build feature of the worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCategory {
+    Asr,
+    Tts,
+    Chat,
+    Embedding,
+    Rerank,
+    Detect,
+    /// Realtime voice pipelines (their VAD included).
+    Realtime,
+}
+
+impl ModelCategory {
+    pub const ALL: [ModelCategory; 7] = [
+        ModelCategory::Asr,
+        ModelCategory::Tts,
+        ModelCategory::Chat,
+        ModelCategory::Embedding,
+        ModelCategory::Rerank,
+        ModelCategory::Detect,
+        ModelCategory::Realtime,
+    ];
+
+    /// The directory (and feature) name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModelCategory::Asr => "asr",
+            ModelCategory::Tts => "tts",
+            ModelCategory::Chat => "chat",
+            ModelCategory::Embedding => "embedding",
+            ModelCategory::Rerank => "rerank",
+            ModelCategory::Detect => "detect",
+            ModelCategory::Realtime => "realtime",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|category| category.as_str() == name)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TaskKind {
     #[serde(rename = "asr.transcribe")]
@@ -321,7 +393,8 @@ pub struct StorageLayout {
     pub data_dir: PathBuf,
     pub database_path: PathBuf,
     pub model_dir: PathBuf,
-    pub models_conf_dir: PathBuf,
+    #[serde(alias = "models_conf_dir")]
+    pub providers_conf_dir: PathBuf,
 }
 
 impl StorageLayout {
@@ -330,7 +403,7 @@ impl StorageLayout {
         data_dir: Option<PathBuf>,
         database_path: Option<PathBuf>,
         model_dir: Option<PathBuf>,
-        models_conf_dir: PathBuf,
+        providers_conf_dir: PathBuf,
     ) -> Self {
         let workdir = workdir.into();
         let data_dir = data_dir.unwrap_or_else(|| workdir.join("data"));
@@ -341,7 +414,7 @@ impl StorageLayout {
             data_dir,
             database_path,
             model_dir,
-            models_conf_dir,
+            providers_conf_dir,
         }
     }
 }
@@ -444,6 +517,12 @@ impl Default for LoadPolicy {
 
 fn default_true() -> bool {
     true
+}
+
+impl ModelSpec {
+    pub fn category(&self) -> ModelCategory {
+        self.adapter.category()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

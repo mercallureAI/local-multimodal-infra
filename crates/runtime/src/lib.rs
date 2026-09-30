@@ -1,9 +1,29 @@
+// A build without any model category loads nothing: its dispatch code is dead.
+#![cfg_attr(
+    not(any(
+        feature = "asr",
+        feature = "tts",
+        feature = "chat",
+        feature = "embedding",
+        feature = "rerank",
+        feature = "detect"
+    )),
+    allow(unused_imports, unused_variables, unreachable_code)
+)]
+
+#[cfg(feature = "embedding")]
 use local_adapter_e5_embedding::E5EmbeddingAdapter;
+#[cfg(feature = "tts")]
 use local_adapter_index_tts::IndexTtsAdapter;
+#[cfg(feature = "tts")]
 use local_adapter_index_tts2::IndexTts2Adapter;
+#[cfg(feature = "rerank")]
 use local_adapter_mmarco_reranker::MmarcoRerankerAdapter;
+#[cfg(feature = "chat")]
 use local_adapter_qwen3_chat::Qwen3ChatAdapter;
+#[cfg(feature = "asr")]
 use local_adapter_sensevoice_asr::SenseVoiceAsrAdapter;
+#[cfg(feature = "detect")]
 use local_adapter_yolo::YoloAdapter;
 use local_backend_ort::probe_runtime_execution_provider_availability;
 use local_core::{
@@ -23,6 +43,23 @@ use std::{
 use tokio::sync::{mpsc, Mutex, Semaphore};
 
 pub const DEFAULT_IDLE_UNLOAD_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Adapters this build can load: those of the model categories it was built
+/// with. Realtime pipelines are served by the worker, not loaded here.
+pub fn compiled_adapters() -> Vec<AdapterKind> {
+    AdapterKind::ALL
+        .into_iter()
+        .filter(|adapter| match adapter {
+            AdapterKind::Yolo => cfg!(feature = "detect"),
+            AdapterKind::SenseVoiceAsr => cfg!(feature = "asr"),
+            AdapterKind::IndexTts | AdapterKind::IndexTts2 => cfg!(feature = "tts"),
+            AdapterKind::E5Embedding => cfg!(feature = "embedding"),
+            AdapterKind::MmarcoReranker => cfg!(feature = "rerank"),
+            AdapterKind::Qwen3Chat => cfg!(feature = "chat"),
+            AdapterKind::VoiceCascade => false,
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RuntimeProviderAvailability {
@@ -471,16 +508,23 @@ impl LoadedEntry {
             "lazy loading model"
         );
         let model = match spec.adapter {
+            #[cfg(feature = "detect")]
             AdapterKind::Yolo => LoadedModel::Yolo(YoloAdapter::load(&spec)?),
+            #[cfg(feature = "asr")]
             AdapterKind::SenseVoiceAsr => {
                 LoadedModel::SenseVoiceAsr(SenseVoiceAsrAdapter::load(&spec)?)
             }
+            #[cfg(feature = "tts")]
             AdapterKind::IndexTts => LoadedModel::IndexTts(IndexTtsAdapter::load(&spec)?),
+            #[cfg(feature = "tts")]
             AdapterKind::IndexTts2 => LoadedModel::IndexTts2(IndexTts2Adapter::load(&spec)?),
+            #[cfg(feature = "embedding")]
             AdapterKind::E5Embedding => LoadedModel::E5Embedding(E5EmbeddingAdapter::load(&spec)?),
+            #[cfg(feature = "rerank")]
             AdapterKind::MmarcoReranker => {
                 LoadedModel::MmarcoReranker(MmarcoRerankerAdapter::load(&spec)?)
             }
+            #[cfg(feature = "chat")]
             AdapterKind::Qwen3Chat => {
                 LoadedModel::Qwen3Chat(Box::new(Qwen3ChatAdapter::load(&spec)?))
             }
@@ -490,8 +534,17 @@ impl LoadedEntry {
                     spec.id
                 )))
             }
+            #[allow(unreachable_patterns)]
+            other => {
+                return Err(InfraError::Unsupported(format!(
+                    "model `{}`: this worker was built without the `{}` models",
+                    spec.id,
+                    other.category().as_str()
+                )))
+            }
         };
         match &model {
+            #[cfg(feature = "embedding")]
             LoadedModel::E5Embedding(adapter) => {
                 let report = adapter.provider_report();
                 tracing::info!(
@@ -504,6 +557,7 @@ impl LoadedEntry {
                     "text model ORT session loaded"
                 );
             }
+            #[cfg(feature = "rerank")]
             LoadedModel::MmarcoReranker(adapter) => {
                 let report = adapter.provider_report();
                 tracing::info!(
@@ -514,6 +568,7 @@ impl LoadedEntry {
                     "text model ORT session loaded"
                 );
             }
+            #[allow(unreachable_patterns)]
             _ => {}
         }
         let now = Instant::now();
@@ -611,12 +666,19 @@ fn validated_runtime_providers_for_model(model_id: &str) -> Option<&'static [&'s
 
 #[derive(Debug)]
 enum LoadedModel {
+    #[cfg(feature = "detect")]
     Yolo(YoloAdapter),
+    #[cfg(feature = "asr")]
     SenseVoiceAsr(SenseVoiceAsrAdapter),
+    #[cfg(feature = "tts")]
     IndexTts(IndexTtsAdapter),
+    #[cfg(feature = "tts")]
     IndexTts2(IndexTts2Adapter),
+    #[cfg(feature = "embedding")]
     E5Embedding(E5EmbeddingAdapter),
+    #[cfg(feature = "rerank")]
     MmarcoReranker(MmarcoRerankerAdapter),
+    #[cfg(feature = "chat")]
     Qwen3Chat(Box<Qwen3ChatAdapter>),
     #[cfg(test)]
     Test {
@@ -626,6 +688,8 @@ enum LoadedModel {
 }
 
 impl LoadedModel {
+    // Only chat models stream (`sink`).
+    #[cfg_attr(not(feature = "chat"), allow(unused_variables))]
     fn infer(
         &mut self,
         task: &InferenceTask,
@@ -641,16 +705,19 @@ impl LoadedModel {
             });
         }
         match (&mut *self, task.kind, &task.input) {
+            #[cfg(feature = "detect")]
             (
                 LoadedModel::Yolo(adapter),
                 TaskKind::ObjectDetect,
                 InferenceInput::ObjectDetect { image },
             ) => adapter.object_detect(image),
+            #[cfg(feature = "asr")]
             (
                 LoadedModel::SenseVoiceAsr(adapter),
                 TaskKind::AsrTranscribe,
                 InferenceInput::AsrTranscribe { audio },
             ) => adapter.transcribe_with_params(audio, &task.params),
+            #[cfg(feature = "tts")]
             (
                 LoadedModel::IndexTts(adapter),
                 TaskKind::TtsSynthesize,
@@ -664,6 +731,7 @@ impl LoadedModel {
                 reference_audio.as_ref(),
                 &task.params,
             ),
+            #[cfg(feature = "tts")]
             (
                 LoadedModel::IndexTts2(adapter),
                 TaskKind::TtsSynthesize,
@@ -672,11 +740,13 @@ impl LoadedModel {
                     reference_audio,
                 },
             ) => adapter.synthesize(task.id, text, reference_audio.as_ref(), &task.params),
+            #[cfg(feature = "embedding")]
             (
                 LoadedModel::E5Embedding(adapter),
                 TaskKind::TextEmbed,
                 InferenceInput::TextEmbed { texts, input_type },
             ) => adapter.embed(texts, *input_type),
+            #[cfg(feature = "rerank")]
             (
                 LoadedModel::MmarcoReranker(adapter),
                 TaskKind::TextRerank,
@@ -686,6 +756,7 @@ impl LoadedModel {
                     top_n,
                 },
             ) => adapter.rerank(query, documents, *top_n),
+            #[cfg(feature = "chat")]
             (
                 LoadedModel::Qwen3Chat(adapter),
                 TaskKind::ChatComplete,
@@ -695,6 +766,7 @@ impl LoadedModel {
                     options,
                 },
             ) => adapter.complete(messages, tools, options, sink),
+            #[allow(unreachable_patterns)]
             (_, kind, _) => Err(InfraError::Unsupported(format!(
                 "loaded adapter does not support task {kind:?}"
             ))),
@@ -703,21 +775,16 @@ impl LoadedModel {
 
     fn release_idle_cache(&mut self, model_id: &str) {
         match self {
-            LoadedModel::Yolo(_)
-            | LoadedModel::SenseVoiceAsr(_)
-            | LoadedModel::IndexTts(_)
-            | LoadedModel::IndexTts2(_)
-            | LoadedModel::E5Embedding(_)
-            | LoadedModel::MmarcoReranker(_)
-            | LoadedModel::Qwen3Chat(_) => {
+            #[cfg(test)]
+            LoadedModel::Test { cache_releases, .. } => {
+                cache_releases.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            #[allow(unreachable_patterns)]
+            _ => {
                 tracing::debug!(
                     model_id,
                     "idle cache release hook reached; adapters currently keep no reusable per-request cache separate from the loaded model/session"
                 );
-            }
-            #[cfg(test)]
-            LoadedModel::Test { cache_releases, .. } => {
-                cache_releases.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
         }
     }
@@ -1080,6 +1147,7 @@ mod tests {
         assert!(runtime.loaded_models().await.is_empty());
     }
 
+    #[cfg(feature = "tts")]
     #[tokio::test]
     async fn enabled_indextts_reports_missing_local_artifacts_clearly() {
         let runtime = RuntimeManager::new(

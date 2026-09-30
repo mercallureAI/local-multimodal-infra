@@ -7,7 +7,7 @@ controller_url: http://controller:17890
 workdir: /app/workdir
 # Model spec YAML config directory, not downloaded model weights/artifacts.
 # Real artifacts are in /app/workdir/models via compose --model-dir.
-models_conf_dir: configs/models.d
+providers_conf_dir: configs/providers
 heartbeat_interval_sec: 5
 registration_token: null
 runtime:

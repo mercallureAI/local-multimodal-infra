@@ -5,7 +5,17 @@ version.workspace = true
 publish.workspace = true
 
 [features]
-default = []
+# Model categories the worker is built with (all by default). An audio-only
+# worker: `--no-default-features --features audio`.
+default = ["asr", "tts", "chat", "embedding", "rerank", "detect", "realtime"]
+audio = ["asr", "tts", "realtime"]
+asr = ["local-worker/asr"]
+tts = ["local-worker/tts"]
+chat = ["local-worker/chat"]
+embedding = ["local-worker/embedding"]
+rerank = ["local-worker/rerank"]
+detect = ["local-worker/detect"]
+realtime = ["local-worker/realtime"]
 cuda = ["local-runtime/cuda"]
 directml = ["local-runtime/directml"]
 tensorrt = ["local-runtime/tensorrt"]
@@ -17,9 +27,9 @@ local-controller = { path = "../controller" }
 local-error = { path = "../error" }
 local-model-store = { path = "../model-store" }
 local-registry = { path = "../registry" }
-local-runtime = { path = "../runtime" }
+local-runtime = { path = "../runtime", default-features = false }
 local-telemetry = { path = "../telemetry" }
-local-worker = { path = "../worker" }
+local-worker = { path = "../worker", default-features = false }
 tokio.workspace = true
 tracing.workspace = true
 

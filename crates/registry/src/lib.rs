@@ -1,5 +1,5 @@
 use local_core::{
-    AdapterKind, ArtifactKind, BackendKind, LoadPolicy, ModelArtifact, ModelSpec,
+    AdapterKind, ArtifactKind, BackendKind, LoadPolicy, ModelArtifact, ModelCategory, ModelSpec,
     ResourceRequirement, RuntimePolicy, TaskKind,
 };
 use local_error::{InfraError, Result};
@@ -76,36 +76,6 @@ impl ModelRegistry {
         Ok(())
     }
 
-    pub async fn reload_dir_legacy(&self, path: impl AsRef<Path>) -> Result<()> {
-        let path = path.as_ref();
-        let entries =
-            fs::read_dir(path).map_err(|e| InfraError::io(Some(path.to_path_buf()), e))?;
-        let mut models = BTreeMap::new();
-        for entry in entries {
-            let entry = entry.map_err(|e| InfraError::io(Some(path.to_path_buf()), e))?;
-            let file_path = entry.path();
-            let is_yaml = file_path
-                .extension()
-                .and_then(|v| v.to_str())
-                .map(|v| matches!(v, "yaml" | "yml"))
-                .unwrap_or(false);
-            if !is_yaml {
-                continue;
-            }
-            let bytes =
-                fs::read(&file_path).map_err(|e| InfraError::io(Some(file_path.clone()), e))?;
-            let spec: ModelSpec = serde_yaml::from_slice(&bytes)?;
-            if models.insert(spec.id.clone(), spec).is_some() {
-                return Err(InfraError::Registry(format!(
-                    "duplicate model id loaded from {}",
-                    file_path.display()
-                )));
-            }
-        }
-        *self.inner.write().await = models;
-        Ok(())
-    }
-
     pub async fn list(&self) -> Vec<ModelSpec> {
         self.inner.read().await.values().cloned().collect()
     }
@@ -134,27 +104,32 @@ impl ModelRegistry {
     }
 }
 
+/// Model specs from a providers directory: `<dir>/<category>/<id>.yaml`, a
+/// spec's category (its adapter's) matching its directory. YAML files right
+/// in `<dir>` (the former flat `models.d` layout) are read as well.
 pub fn load_yaml_specs(path: impl AsRef<Path>) -> Result<Vec<ModelSpec>> {
     let path = path.as_ref();
     if !path.exists() {
-        tracing::warn!(path = %path.display(), "models YAML directory does not exist; using only built-in/database models");
+        tracing::warn!(path = %path.display(), "providers YAML directory does not exist; using only built-in/database models");
         return Ok(Vec::new());
     }
-    let entries = fs::read_dir(path).map_err(|e| InfraError::io(Some(path.to_path_buf()), e))?;
     let mut models = BTreeMap::new();
-    for entry in entries {
-        let entry = entry.map_err(|e| InfraError::io(Some(path.to_path_buf()), e))?;
-        let file_path = entry.path();
-        let is_yaml = file_path
-            .extension()
-            .and_then(|v| v.to_str())
-            .map(|v| matches!(v, "yaml" | "yml"))
-            .unwrap_or(false);
-        if !is_yaml {
-            continue;
-        }
+    for (file_path, category) in spec_files(path)? {
         let bytes = fs::read(&file_path).map_err(|e| InfraError::io(Some(file_path.clone()), e))?;
-        let spec: ModelSpec = serde_yaml::from_slice(&bytes)?;
+        let spec: ModelSpec = serde_yaml::from_slice(&bytes).map_err(|e| {
+            InfraError::Registry(format!("invalid model spec {}: {e}", file_path.display()))
+        })?;
+        if let Some(category) = category {
+            if spec.category() != category {
+                return Err(InfraError::Registry(format!(
+                    "model `{}` ({}) is a {} model, filed under {}",
+                    spec.id,
+                    file_path.display(),
+                    spec.category().as_str(),
+                    category.as_str()
+                )));
+            }
+        }
         if models.insert(spec.id.clone(), spec).is_some() {
             return Err(InfraError::Registry(format!(
                 "duplicate model id loaded from {}",
@@ -163,6 +138,55 @@ pub fn load_yaml_specs(path: impl AsRef<Path>) -> Result<Vec<ModelSpec>> {
         }
     }
     Ok(models.into_values().collect())
+}
+
+/// The YAML files of a providers directory, each with the category its
+/// directory names (none for files right in `dir`), in a stable order.
+fn spec_files(dir: &Path) -> Result<Vec<(PathBuf, Option<ModelCategory>)>> {
+    let mut files = Vec::new();
+    for (path, is_dir) in sorted_entries(dir)? {
+        if is_dir {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            let category = ModelCategory::from_name(name).ok_or_else(|| {
+                InfraError::Registry(format!(
+                    "unknown model category directory {} (expected one of: {})",
+                    path.display(),
+                    ModelCategory::ALL.map(ModelCategory::as_str).join(", ")
+                ))
+            })?;
+            for (file, is_dir) in sorted_entries(&path)? {
+                if !is_dir && is_yaml(&file) {
+                    files.push((file, Some(category)));
+                }
+            }
+        } else if is_yaml(&path) {
+            files.push((path, None));
+        }
+    }
+    Ok(files)
+}
+
+fn sorted_entries(dir: &Path) -> Result<Vec<(PathBuf, bool)>> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| InfraError::io(Some(dir.to_path_buf()), e))? {
+        let entry = entry.map_err(|e| InfraError::io(Some(dir.to_path_buf()), e))?;
+        let is_dir = entry
+            .file_type()
+            .map_err(|e| InfraError::io(Some(entry.path()), e))?
+            .is_dir();
+        entries.push((entry.path(), is_dir));
+    }
+    entries.sort();
+    Ok(entries)
+}
+
+fn is_yaml(path: &Path) -> bool {
+    path.extension()
+        .and_then(|v| v.to_str())
+        .is_some_and(|v| matches!(v, "yaml" | "yml"))
 }
 
 pub fn default_catalog(model_dir: impl AsRef<Path>) -> Vec<ModelSpec> {
@@ -610,6 +634,63 @@ mod tests {
     }
 
     #[test]
+    fn category_directories_are_checked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(dir.path().join("detect")).expect("mkdir");
+        fs::write(
+            dir.path().join("detect").join("m.yaml"),
+            "id: m
+name: M
+task_kinds: [object.detect]
+adapter: yolo
+backend: ort
+",
+        )
+        .expect("write");
+        fs::write(
+            dir.path().join("flat.yaml"),
+            "id: flat
+name: Flat
+task_kinds: [asr.transcribe]
+adapter: sense_voice_asr
+backend: ort
+",
+        )
+        .expect("write");
+        let ids: Vec<String> = load_yaml_specs(dir.path())
+            .expect("load")
+            .into_iter()
+            .map(|spec| spec.id)
+            .collect();
+        assert_eq!(ids, ["flat", "m"]);
+
+        // A spec filed under another category is refused.
+        fs::create_dir(dir.path().join("tts")).expect("mkdir");
+        fs::write(
+            dir.path().join("tts").join("wrong.yaml"),
+            "id: wrong
+name: Wrong
+task_kinds: [object.detect]
+adapter: yolo
+backend: ort
+",
+        )
+        .expect("write");
+        let err = load_yaml_specs(dir.path()).expect_err("misfiled spec");
+        assert!(
+            err.to_string()
+                .contains("is a detect model, filed under tts"),
+            "{err}"
+        );
+
+        // So is a directory that names no category.
+        fs::remove_dir_all(dir.path().join("tts")).expect("rm");
+        fs::create_dir(dir.path().join("misc")).expect("mkdir");
+        let err = load_yaml_specs(dir.path()).expect_err("unknown category");
+        assert!(err.to_string().contains("unknown model category"), "{err}");
+    }
+
+    #[test]
     fn funasr_artifacts_keep_collision_free_subdirectories() {
         let dir = tempfile::tempdir().expect("tempdir");
         let spec = default_catalog(dir.path())
@@ -673,10 +754,15 @@ mod tests {
 
     #[test]
     fn checked_in_yaml_models_are_cuda_first_with_cpu_fallback() {
-        let models_conf_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs/models.d");
-        let specs = load_yaml_specs(&models_conf_dir).expect("load checked-in YAML specs");
+        let providers_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs/providers");
+        let specs = load_yaml_specs(&providers_dir).expect("load checked-in YAML specs");
 
         assert!(!specs.is_empty());
+        // Every checked-in spec is filed under its category.
+        assert!(spec_files(&providers_dir)
+            .expect("list specs")
+            .iter()
+            .all(|(_, category)| category.is_some()));
         for spec in &specs {
             assert_eq!(
                 spec.runtime

@@ -209,7 +209,7 @@ python -m scripts.local.smoke --tests mcp \
 | multilingual-e5-small | [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) | `614241f622f53c4eeff9890bdc4f31cfecc418b3` |
 | mMARCO MiniLM reranker | [cross-encoder/mmarco-mMiniLMv2-L12-H384-v1](https://huggingface.co/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1) | `1427fd652930e4ba29e8149678df786c240d8825` |
 
-实际下载文件、revision 与 SHA-256 以 [`configs/models.d`](configs/models.d) 中的配置为准。
+实际下载文件、revision 与 SHA-256 以 [`configs/providers`](configs/providers)（按分类分目录）中的配置为准。
 
 ### 参考代码仓库
 

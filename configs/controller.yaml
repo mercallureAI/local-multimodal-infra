@@ -1,7 +1,7 @@
 bind: 127.0.0.1:17890
 workdir: workdir
 # database_path defaults to workdir/data/local.db; model_dir defaults to workdir/models.
-models_conf_dir: configs/models.d
+providers_conf_dir: configs/providers
 # Required for admin JSON-RPC and MCP routes. It can also be set with
 # LOCAL_ADMIN_TOKEN or --admin-token.
 admin_token: null

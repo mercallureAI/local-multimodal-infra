@@ -34,7 +34,7 @@ services:
       - configs/docker-controller.yaml
       - --workdir
       - /app/workdir
-      # Real model files/artifacts; configs/models.d only contains model spec YAML.
+      # Real model files/artifacts; configs/providers only contains model spec YAML.
       - --model-dir
       - /app/workdir/models
     ports:
@@ -53,7 +53,7 @@ services:
       - configs/docker-worker.yaml
       - --workdir
       - /app/workdir
-      # Same artifact directory as the controller; specs are read from configs/models.d.
+      # Same artifact directory as the controller; specs are read from configs/providers.
       - --model-dir
       - /app/workdir/models
     ports:

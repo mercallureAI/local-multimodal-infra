@@ -4,7 +4,7 @@ base_url: http://127.0.0.1:17891
 controller_url: http://127.0.0.1:17890
 workdir: workdir
 # database_path defaults to workdir/data/local.db; model_dir defaults to workdir/models.
-models_conf_dir: configs/models.d
+providers_conf_dir: configs/providers
 heartbeat_interval_sec: 5
 # Set via config, env LOCAL_WORKER_REGISTRATION_TOKEN, or CLI --registration-token.
 registration_token: null

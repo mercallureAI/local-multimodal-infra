@@ -4,6 +4,18 @@ edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
+[features]
+# Model categories (see local-runtime); `realtime` serves /v1/realtime and
+# needs ASR and TTS models.
+default = ["asr", "tts", "chat", "embedding", "rerank", "detect", "realtime"]
+asr = ["local-runtime/asr"]
+tts = ["local-runtime/tts"]
+chat = ["local-runtime/chat"]
+embedding = ["local-runtime/embedding"]
+rerank = ["local-runtime/rerank"]
+detect = ["local-runtime/detect"]
+realtime = ["dep:local-voice-cascade", "asr", "tts"]
+
 [dependencies]
 axum.workspace = true
 futures-util.workspace = true
@@ -11,8 +23,8 @@ local-core = { path = "../core" }
 local-error = { path = "../error" }
 local-hardware = { path = "../hardware" }
 local-registry = { path = "../registry" }
-local-runtime = { path = "../runtime" }
-local-voice-cascade = { path = "../voice-cascade" }
+local-runtime = { path = "../runtime", default-features = false }
+local-voice-cascade = { path = "../voice-cascade", optional = true }
 serde.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true

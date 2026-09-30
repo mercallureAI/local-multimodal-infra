@@ -10,7 +10,7 @@ hound.workspace = true
 local-adapter-silero-vad = { path = "../adapter-silero-vad" }
 local-core = { path = "../core" }
 local-error = { path = "../error" }
-local-runtime = { path = "../runtime" }
+local-runtime = { path = "../runtime", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
