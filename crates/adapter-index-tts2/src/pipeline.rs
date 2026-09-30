@@ -16,6 +16,7 @@ use local_backend_ort::{
     DeviceBinding, DeviceTensor, OrtBackend, OrtSession, OrtTensorData, OrtTensorInput,
     OrtTensorOutput, ProviderSelection, SessionProviderReport, SharedInitializers,
 };
+use local_adapter_index_tts::MandarinFrontend;
 use local_core::{FileRef, InferenceOutput, ModelSpec};
 use local_error::{InfraError, Result};
 use serde_json::Value;
@@ -118,6 +119,8 @@ pub struct IndexTts2Adapter {
     kv_out: Vec<String>,
     kv_in: Vec<String>,
     cached_reference: Option<ReferenceState>,
+    /// WeText + g2pW polyphones, when `zh-tts-frontend` is installed.
+    mandarin: Option<MandarinFrontend>,
     output_dir: PathBuf,
     /// Device weights the prefill/decode sessions reference. Declared last so
     /// it is dropped after those sessions.
@@ -202,6 +205,7 @@ impl IndexTts2Adapter {
         let output_dir = env::var_os("LOCAL_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("workdir/data"));
+        let mandarin = MandarinFrontend::load_for(&artifacts.root);
         let adapter = Self {
             model_id: spec.id.clone(),
             runtime: manifest.runtime,
@@ -217,6 +221,7 @@ impl IndexTts2Adapter {
             kv_out,
             kv_in,
             cached_reference: None,
+            mandarin,
             output_dir,
             _shared_gpt: shared_gpt,
         };
@@ -270,6 +275,7 @@ impl IndexTts2Adapter {
             &language,
             max_segment_tokens,
             params.text_normalization,
+            self.mandarin.as_ref(),
         );
         if segments.iter().all(|segment| segment.text.trim().is_empty()) {
             return Err(InfraError::BadRequest(
@@ -691,17 +697,8 @@ mod real_model {
     };
     use serde_json::json;
 
-    #[test]
-    fn real_model_synthesis_if_env_set() {
-        let (Ok(model_dir), Ok(reference)) = (
-            env::var("LOCAL_INDEXTTS2_MODEL_DIR"),
-            env::var("LOCAL_INDEXTTS2_REFERENCE"),
-        ) else {
-            return;
-        };
-        let out_dir = tempfile::tempdir().expect("tempdir");
-        env::set_var("LOCAL_DATA_DIR", out_dir.path());
-        let spec = ModelSpec {
+    fn spec(model_dir: String) -> ModelSpec {
+        ModelSpec {
             id: "indextts-2.5-onnx".to_string(),
             name: "IndexTTS 2.5 test".to_string(),
             enabled: true,
@@ -728,9 +725,78 @@ mod real_model {
             resources: ResourceRequirement::default(),
             load_policy: LoadPolicy::default(),
             metadata: BTreeMap::new(),
+        }
+    }
+
+    /// Polyphones, neutral tones and numbers, each read with and without the
+    /// Mandarin frontend (same seed) into `LOCAL_INDEXTTS2_AB_DIR`
+    /// (`on_NN.wav`, `off_NN.wav`, `cases.tsv`) for ASR and listening.
+    #[test]
+    fn mandarin_frontend_ab_if_env_set() {
+        let (Ok(model_dir), Ok(reference), Ok(ab_dir)) = (
+            env::var("LOCAL_INDEXTTS2_MODEL_DIR"),
+            env::var("LOCAL_INDEXTTS2_REFERENCE"),
+            env::var("LOCAL_INDEXTTS2_AB_DIR"),
+        ) else {
+            return;
         };
+        let out_dir = tempfile::tempdir().expect("tempdir");
+        env::set_var("LOCAL_DATA_DIR", out_dir.path());
+        let mut adapter =
+            IndexTts2Adapter::load(&spec(model_dir)).expect("load IndexTTS-2.5 package");
+        assert!(
+            adapter.mandarin.is_some(),
+            "zh-tts-frontend next to the package or in LOCAL_ZH_TTS_FRONTEND_DIR"
+        );
+        // Swapped in for the "on" run, parked here for the "off" run.
+        let mut parked = None;
+        let reference = FileRef::local(PathBuf::from(reference));
+        let texts = [
+            "他在银行工作了三年，很了解这一行。",
+            "这个东西还给你，我还要睡一觉。",
+            "会议于2024年3月15日举行，长度为2.5米。",
+            "他长大后成了重庆一名重要的记者。",
+            "着急的时候他着了凉，结果一下就睡着了。",
+            "快递员把包裹给了我，他得赶紧走了。",
+            "音乐让人快乐，调皮的孩子在调音。",
+            "我们都觉得都市的空气没有乡下好。",
+        ];
+        let params: BTreeMap<String, Value> =
+            serde_json::from_value(json!({"seed": 9527})).unwrap();
+        let mut cases = String::new();
+        for (index, text) in texts.iter().enumerate() {
+            let annotated = frontend::prepare_text(text, "zh", true, adapter.mandarin.as_ref());
+            cases.push_str(&format!("{index:02}\t{text}\t{annotated}\n"));
+            eprintln!("{index:02} {text}\n   {annotated}");
+            for label in ["on", "off"] {
+                let output = adapter
+                    .synthesize(Uuid::new_v4(), text, Some(&reference), &params)
+                    .expect("synthesize");
+                let InferenceOutput::TtsAudio { audio } = output else {
+                    panic!("unexpected output");
+                };
+                let path = audio.path.expect("wav path");
+                fs::copy(&path, Path::new(&ab_dir).join(format!("{label}_{index:02}.wav")))
+                    .expect("keep wav");
+                std::mem::swap(&mut adapter.mandarin, &mut parked);
+            }
+        }
+        fs::write(Path::new(&ab_dir).join("cases.tsv"), cases).expect("write cases");
+    }
+
+    #[test]
+    fn real_model_synthesis_if_env_set() {
+        let (Ok(model_dir), Ok(reference)) = (
+            env::var("LOCAL_INDEXTTS2_MODEL_DIR"),
+            env::var("LOCAL_INDEXTTS2_REFERENCE"),
+        ) else {
+            return;
+        };
+        let out_dir = tempfile::tempdir().expect("tempdir");
+        env::set_var("LOCAL_DATA_DIR", out_dir.path());
         let load_started = Instant::now();
-        let mut adapter = IndexTts2Adapter::load(&spec).expect("load IndexTTS-2.5 package");
+        let mut adapter =
+            IndexTts2Adapter::load(&spec(model_dir)).expect("load IndexTTS-2.5 package");
         eprintln!("load {:?}; providers {:?}", load_started.elapsed(), adapter.provider_report());
         let reference = FileRef::local(PathBuf::from(reference));
         let cases = [

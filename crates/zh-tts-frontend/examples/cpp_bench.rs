@@ -5,7 +5,7 @@
 //! holds its reading. Scored like g2p-mix's benchmark: citation tones (no tone
 //! sandhi), `u:` and `v` treated as the same vowel.
 use local_backend_ort::{OrtBackend, ProviderSelection};
-use local_zh_tts_frontend::{Options, ZhFrontend};
+use local_zh_tts_frontend::{Options, Sandhi, ZhFrontend};
 use std::{io::Write, path::Path, time::Instant};
 
 fn main() {
@@ -19,7 +19,7 @@ fn main() {
             "mainland" => true,
             other => panic!("unknown mode {other}"),
         },
-        tone_sandhi: false,
+        sandhi: Sandhi::Off,
     };
     let backend = OrtBackend::new(ProviderSelection::from_strings(&["cpu".to_string()]));
     let mut frontend = ZhFrontend::load(Path::new(dir), &backend, options).expect("load frontend");

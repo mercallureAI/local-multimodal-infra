@@ -153,6 +153,20 @@ For official parity research without starting services, run `python -m scripts.l
 
 Optional IndexTTS ASR cross-validation lives in the Python harness, not in ad-hoc curl scripts. Run `python -m scripts.local.smoke --tests indextts_asr --indextts-frontend auto --workdir ./workdir --model-dir ./workdir/models` or add `--indextts-asr-check` to an existing smoke run. The flow enables IndexTTS, uses the Rust frontend by default (official Python only when explicitly requested), synthesizes a WAV through generic `create_task`/upload/`start_task`, transcribes that WAV with the Qwen ASR generic task path, and saves `workdir/data/smoke-indextts-asr-<timestamp>.json` containing the source text, frontend mode, token-id source, normalized expected text, WAV path/URL, ASR text, simple similarity/coverage, and missing/extra character summaries.
 
+## Mandarin text frontend (zh-tts-frontend)
+
+Three workspace crates replace the lightweight TN rules and add polyphone readings for IndexTTS 1.5 and 2.5:
+
+- `crates/wetext` (`local-wetext`): wetext-rs vendored (Apache-2.0) and fixed to match Python `wetext` 0.1.0 exactly (arc-sorted FSTs, exact tropical-weight shortest path, Unicode digits); `tests/parity_test.rs` checks 271 WeTextProcessing cases.
+- `crates/jieba` (`local-jieba`, lib `jieba_rs`): jieba-rs 0.11 vendored (MIT) with `Jieba::posseg_cut`, a literal port of Python `jieba.posseg` including its Viterbi (see its `NOTICE.md`).
+- `crates/zh-tts-frontend`: PaddleSpeech's g2pW Mandarin frontend in Rust (clause split, posseg, `pre_merge_for_modify`, whole-clause g2pW INT8 on CPU with the pypinyin fallback, `polyphonic.yaml`, `ToneSandhi`), plus a Mainland layer: g2pW's labels and single-reading table come from a Taiwan dictionary (星期 `qi2`, 垃圾 `le4 se4`, 危 `wei2`, 着急 `zhao1`), so in Mainland mode characters g2pW does not disambiguate take pypinyin's reading, its predictions are mapped onto the standard readings of 通用规范汉字字典/现代汉语词典 (`mainland/readings.tsv`), and g2p-mix's corrections and 738 phrase readings apply. Against a Python replay of PaddleSpeech (`scripts/local/zh_frontend_oracle.py`) it matches 19,969 of 19,969 characters (`tests/parity_test.rs`). On the clean CPP polyphone test (8,935 targets, `examples/cpp_bench.rs`) it scores 95.22% with the Mainland layer and 88.10% without (pypinyin alone: 89.38%; CPP only scores polyphones, so the Taiwan readings of everyday characters above do not show in it).
+
+Build the assets (about 170 MB) with `python scripts/local/zh_frontend_export.py --paddlespeech <checkout> --g2pw-model-dir <ModelScope pengzhendong/g2pw> --g2pw-package-dir <site-packages/g2pw> --g2p-mix <checkout> --out workdir/models/zh-tts-frontend` in an environment with jieba, pypinyin, pypinyin-dict, pyyaml and wetext. Both IndexTTS adapters load them from `LOCAL_ZH_TTS_FRONTEND_DIR`, else from `zh-tts-frontend` next to their artifact directory (`<model_dir>/zh-tts-frontend`); without them, or with `LOCAL_ZH_TTS_FRONTEND=off`, they keep the built-in rules.
+
+With the frontend, `normalize_text` runs WeText `zh`/`en` TN (IndexTTS `TextNormalizer` settings) in place of the lightweight pass, then writes each Chinese character whose reading in context differs from its dictionary reading as pinyin: inline for 1.5 (`银 HANG2`), `<行|HANG2>` for 2.5. Readings use citation tones except neutral-tone words (`东西` -> `XI5`); third-tone and 一/不 sandhi are left to the model. Deployments can fix word readings in `<frontend dir>/user_phrases.tsv` (`word<TAB>pin1 yin1` per line, `#` comments); these words are added to the segmenter and override every other stage.
+
+Opt-in checks: `LOCAL_ZH_TTS_FRONTEND_DIR=<dir> ORT_DYLIB_PATH=<onnxruntime> cargo test -p local-adapter-index-tts --test mandarin_frontend -- --nocapture`, and for audio `LOCAL_INDEXTTS2_AB_DIR=<out dir>` with the IndexTTS-2.5 real-model variables runs `mandarin_frontend_ab_if_env_set`, which writes the same sentences read with and without the frontend; `cargo run --release -p local-adapter-sensevoice-asr --example transcribe -- <sensevoice dir> <wav>...` transcribes them.
+
 
 
 ## Legacy JSON-RPC API

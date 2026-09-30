@@ -255,6 +255,20 @@ impl ToneSandhi {
         self.three_sandhi(jieba, word, finals)
     }
 
+    /// Only the neutral-tone rules of `modified_tone` (`_neural_sandhi`).
+    pub fn neutral_tone(
+        &self,
+        jieba: &Jieba,
+        word: &str,
+        pos: &str,
+        finals: Vec<String>,
+    ) -> Vec<String> {
+        if finals.len() != len(word) || finals.is_empty() {
+            return finals;
+        }
+        self.neural_sandhi(jieba, word, pos, finals)
+    }
+
     /// `pre_merge_for_modify`.
     pub fn pre_merge(&self, pinyin: &PinyinDict, seg: Vec<Seg>) -> Vec<Seg> {
         let seg = merge_bu(seg);

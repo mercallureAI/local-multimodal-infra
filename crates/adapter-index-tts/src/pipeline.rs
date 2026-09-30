@@ -28,6 +28,8 @@ pub struct IndexTtsAdapter {
     e: OrtSession,
     f: OrtSession,
     tokenizer: SentencePieceTokenizer,
+    /// WeText + g2pW polyphones, when `zh-tts-frontend` is installed.
+    mandarin: Option<MandarinFrontend>,
     config: IndexTtsModelConfig,
     output_dir: PathBuf,
     resident_kv_device_id: Option<u32>,
@@ -52,6 +54,7 @@ impl IndexTtsAdapter {
         let f = backend.load_session(&artifacts.f)?;
         validate_sessions([&a, &b, &c, &d, &e, &f])?;
         let tokenizer = SentencePieceTokenizer::load(&artifacts.bpe_model)?;
+        let mandarin = MandarinFrontend::load_for(&artifacts.root);
         let config = IndexTtsModelConfig::load(&artifacts, spec)?;
         let output_dir = env::var_os("LOCAL_DATA_DIR")
             .map(PathBuf::from)
@@ -92,6 +95,7 @@ impl IndexTtsAdapter {
             e,
             f,
             tokenizer,
+            mandarin,
             config,
             output_dir,
             resident_kv_device_id,
@@ -150,7 +154,7 @@ impl IndexTtsAdapter {
                 (chunks, kind)
             }
             None => {
-                let prepared = preprocess_text_for_index_tts(text);
+                let prepared = preprocess_text_for_index_tts_with(text, self.mandarin.as_ref());
                 let (ids, pieces) = self.tokenizer.encode_ids_and_pieces(&prepared)?;
                 let chunks = plan_token_chunks(
                     &ids,

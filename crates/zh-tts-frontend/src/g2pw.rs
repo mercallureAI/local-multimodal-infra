@@ -7,6 +7,7 @@
 //! query's candidate readings (`phoneme_mask`). Other characters take their
 //! monophonic reading or pypinyin's.
 
+use crate::mainland::MainlandReadings;
 use crate::pinyin::{read_tsv, PinyinDict};
 use ferrous_opencc::{config::BuiltinConfig, OpenCC};
 use local_backend_ort::{OrtBackend, OrtSession, OrtTensorData, OrtTensorInput};
@@ -111,8 +112,36 @@ impl G2pw {
         })
     }
 
+    /// The readings g2pW chooses among for `c`; empty if it does not
+    /// disambiguate `c`.
+    pub fn candidates(&self, c: char) -> Vec<&str> {
+        let translated = self.s2tw.convert(&c.to_string());
+        let Some(c) = single_char(&translated) else {
+            return Vec::new();
+        };
+        self.char_phonemes
+            .get(&c)
+            .map(|labels| {
+                labels
+                    .iter()
+                    .filter_map(|&label| self.label_pinyin[label].as_deref())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// One reading per character of `sentence` (`None` without one).
-    pub fn predict(&mut self, sentence: &str, pinyin: &PinyinDict) -> Result<Vec<Option<String>>> {
+    ///
+    /// g2pW's labels and single-reading table come from a Taiwan dictionary
+    /// (期 qi2, 危 wei2, 垃圾 le4 se4). With `mainland`, both are mapped onto
+    /// Mainland readings (`MainlandReadings::resolve`, after g2p-mix's
+    /// corrections).
+    pub fn predict(
+        &mut self,
+        sentence: &str,
+        pinyin: &PinyinDict,
+        mainland: Option<&MainlandReadings>,
+    ) -> Result<Vec<Option<String>>> {
         let translated = self.s2tw.convert(sentence);
         let translated: Vec<char> = if translated.chars().count() == sentence.chars().count() {
             translated.chars().collect()
@@ -126,13 +155,21 @@ impl G2pw {
             .map(|c| *self.t2s.get(c).unwrap_or(c))
             .collect();
         let fallback = pinyin.readings(&simplified);
+        let sentence_chars: Vec<char> = sentence.chars().collect();
         let mut result: Vec<Option<String>> = vec![None; translated.len()];
         let mut queries = Vec::new();
         for (index, c) in translated.iter().enumerate() {
             if self.query_chars.contains(c) {
                 queries.push(index);
             } else if let Some(reading) = self.monophonic.get(c) {
-                result[index] = Some(reading.clone());
+                result[index] = Some(match (mainland, sentence_chars.get(index)) {
+                    (Some(m), Some(&original)) => m.resolve(
+                        original,
+                        reading,
+                        fallback.get(index).cloned().flatten().as_deref(),
+                    ),
+                    _ => reading.clone(),
+                });
             } else {
                 result[index] = fallback.get(index).cloned().flatten();
             }
@@ -212,6 +249,16 @@ impl G2pw {
                 }
             }
             result[query] = self.label_pinyin.get(best).cloned().flatten();
+            if let (Some(m), Some(reading), Some(&c)) = (
+                mainland,
+                result[query].as_deref(),
+                sentence_chars.get(query),
+            ) {
+                // g2p-mix's corrections first: they know 缉 qi4 is ji1.
+                let reading = crate::mainland::normalize_g2pw(&sentence_chars, query, reading);
+                let fallback = fallback.get(query).cloned().flatten();
+                result[query] = Some(m.resolve(c, &reading, fallback.as_deref()));
+            }
         }
         Ok(result)
     }

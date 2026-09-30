@@ -1366,6 +1366,7 @@ dependencies = [
  "local-core",
  "local-error",
  "local-files",
+ "local-zh-tts-frontend",
  "pinyin",
  "sentencepiece-rs",
  "serde",

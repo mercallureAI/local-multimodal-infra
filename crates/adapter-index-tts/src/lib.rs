@@ -53,6 +53,7 @@ pub mod audio;
 mod audio_quality;
 mod config;
 mod frontend;
+mod mandarin;
 mod normalization_rules;
 mod onnx;
 mod pipeline;
@@ -61,11 +62,13 @@ mod tokenizer;
 pub use artifacts::{IndexTtsArtifacts, IndexTtsPrecision};
 pub use config::IndexTtsModelConfig;
 pub use frontend::{
-    correct_pinyin, de_tokenized_by_cjk_char, normalize_text, preprocess_text_for_index_tts,
+    correct_pinyin, de_tokenized_by_cjk_char, normalize_text, normalize_text_with,
+    preprocess_text_for_index_tts, preprocess_text_for_index_tts_with,
     preprocess_text_for_index_tts_with_mode, split_cjk_minimal, split_sentences,
     split_sentences_by_token, tokenize_by_cjk_char, IndexTtsTextFrontendMode,
     INDEXTTS_PUNCTUATION_MARK_TOKENS,
 };
+pub use mandarin::{MandarinFrontend, PinyinAnnotation, USER_PHRASES_FILE};
 pub use onnx::{apply_repetition_penalty, concatenate_hidden_states, sample_logits, SplitMix64};
 pub use pipeline::IndexTtsAdapter;
 pub use tokenizer::{

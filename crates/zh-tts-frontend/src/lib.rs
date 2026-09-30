@@ -17,7 +17,8 @@ mod pinyin;
 mod sandhi;
 mod sandhi_words;
 
-pub use frontend::{Options, ZhFrontend};
+pub use frontend::{Options, Sandhi, ZhFrontend};
+pub use mainland::MainlandReadings;
 pub use normalizer::TextNormalizer;
 pub use pinyin::{is_hans, PinyinDict};
 

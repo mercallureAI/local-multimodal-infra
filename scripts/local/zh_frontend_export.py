@@ -11,6 +11,8 @@ data-driven from this directory:
     pinyin/t2s.tsv                              PaddleSpeech traditional->simplified map
     paddlespeech/polyphonic.tsv                 PaddleSpeech polyphonic.yaml corrections
     mainland/phrases.tsv                        g2p-mix Mainland phrase readings
+    mainland/readings.tsv                       Mainland standard readings per character
+                                                (kTGHZ2013, else kXHC1983, via pypinyin-dict)
     manifest.json
 
 Readings are exported already converted by pypinyin itself (TONE3, neutral
@@ -191,7 +193,30 @@ def export_mainland(g2p_mix: Path, out: Path) -> dict:
                 continue
             handle.write(f"{word}\t{' '.join(readings)}\n")
             count += 1
-    return {"phrases": count, "revision": git_revision(g2p_mix)}
+    return {"phrases": count, "readings": export_mainland_readings(out), "revision": git_revision(g2p_mix)}
+
+
+def export_mainland_readings(out: Path) -> int:
+    """Mainland readings: 通用规范汉字字典 (kTGHZ2013) and 现代汉语词典
+    (kXHC1983) together; either alone misses readings (kTGHZ2013 has no 忒
+    te4 or 镐 hao4). g2pW's labels come from a Taiwan dictionary (期 qi2,
+    危 wei2, 垃圾 le4 se4); the Rust side maps them onto these."""
+    from pypinyin.contrib.tone_convert import to_tone3
+    from pypinyin_dict.pinyin_data import ktghz2013, kxhc1983
+
+    readings: dict[int, str] = {}
+    for table in (ktghz2013.pinyin_dict, kxhc1983.pinyin_dict):
+        for code, value in table.items():
+            readings[code] = f"{readings[code]},{value}" if code in readings else value
+    with (out / "mainland/readings.tsv").open("w", encoding="utf-8", newline="\n") as handle:
+        for code in sorted(readings):
+            values = []
+            for value in readings[code].split(","):
+                value = to_tone3(value.strip(), neutral_tone_with_five=True)
+                if value and value not in values:
+                    values.append(value)
+            handle.write(f"{chr(code)}\t{' '.join(values)}\n")
+    return len(readings)
 
 
 def export_wetext(out: Path, fst_dir: Path | None) -> dict:
@@ -255,7 +280,7 @@ def main() -> int:
             "g2pw": "Apache-2.0 (GitYCC/g2pW; INT8 graph from ModelScope pengzhendong/g2pw)",
             "pinyin": "MIT (pypinyin, pypinyin-dict / phrase-pinyin-data)",
             "paddlespeech": "Apache-2.0 (PaddlePaddle/PaddleSpeech)",
-            "mainland": "Apache-2.0 (pengzhendong/g2p-mix)",
+            "mainland": "Apache-2.0 (pengzhendong/g2p-mix); readings.tsv: MIT (pypinyin-dict, from Unihan kTGHZ2013/kXHC1983)",
         },
         "files": [{"path": p.relative_to(out).as_posix(), "size_bytes": p.stat().st_size, "sha256": sha256(p)} for p in files],
     }

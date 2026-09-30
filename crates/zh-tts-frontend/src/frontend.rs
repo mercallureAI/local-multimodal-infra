@@ -9,10 +9,14 @@
 //!
 //! Two optional layers go beyond PaddleSpeech, both off in `Options::paddlespeech`:
 //! - `mainland`: g2p-mix's Mainland corrections of g2pW's Taiwan-leaning
-//!   readings plus its phrase readings (applied last, over sandhi);
+//!   readings plus its phrase readings (applied last, over sandhi); pypinyin
+//!   instead of g2pW's Taiwan single-reading table for the characters g2pW
+//!   does not disambiguate, and its predictions mapped onto the Mainland
+//!   standard readings (`mainland/readings.tsv`: 星期 qi1, 垃圾 la1 ji1);
 //! - user phrases: caller-provided readings for words, applied last.
 
 use crate::g2pw::G2pw;
+use crate::mainland::MainlandReadings;
 use crate::pinyin::{read_tsv, PinyinDict};
 use crate::sandhi::{Seg, ToneSandhi};
 use jieba_rs::Jieba;
@@ -20,12 +24,22 @@ use local_backend_ort::OrtBackend;
 use local_error::{InfraError, Result};
 use std::{collections::HashMap, path::Path};
 
+/// Which of PaddleSpeech's `ToneSandhi.modified_tone` rules apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sandhi {
+    /// 不, 一, neutral tone and third-tone sandhi: the tones as spoken.
+    Full,
+    /// Only the neutral-tone words (东西, 事情, 们, 了…); 不/一 and third
+    /// tones keep their citation tones.
+    NeutralTone,
+    /// Citation tones (g2pW's own neutral tones stay).
+    Off,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
     pub mainland: bool,
-    /// `ToneSandhi.modified_tone` (neutral tone, 不/一, third-tone sandhi).
-    /// Off, readings are citation tones (still with g2pW's neutral tones).
-    pub tone_sandhi: bool,
+    pub sandhi: Sandhi,
 }
 
 impl Options {
@@ -33,7 +47,7 @@ impl Options {
     pub fn paddlespeech() -> Self {
         Self {
             mainland: false,
-            tone_sandhi: true,
+            sandhi: Sandhi::Full,
         }
     }
 }
@@ -42,7 +56,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             mainland: true,
-            tone_sandhi: true,
+            sandhi: Sandhi::Full,
         }
     }
 }
@@ -55,6 +69,8 @@ pub struct ZhFrontend {
     polyphonic: HashMap<String, Vec<String>>,
     /// Words whose readings are fixed after sandhi (Mainland + user phrases).
     overrides: HashMap<String, Vec<String>>,
+    /// Mainland standard readings (with `mainland`).
+    readings: Option<MainlandReadings>,
     options: Options,
 }
 
@@ -128,9 +144,16 @@ impl ZhFrontend {
             sandhi: ToneSandhi::default(),
             polyphonic,
             overrides: HashMap::new(),
+            readings: None,
             options,
         };
         if options.mainland {
+            let readings = dir.join("mainland/readings.tsv");
+            if readings.is_file() {
+                frontend.readings = Some(MainlandReadings::load(&readings)?);
+            } else {
+                tracing::warn!(path = %readings.display(), "Mainland readings missing; g2pW keeps its Taiwan readings");
+            }
             let phrases = read_tsv(&dir.join("mainland/phrases.tsv"))?
                 .into_iter()
                 .map(|(word, value)| (word, parse_readings(&value)))
@@ -151,6 +174,40 @@ impl ZhFrontend {
             self.jieba.add_word(&word, None, None);
             self.overrides.insert(word, readings);
         }
+    }
+
+    /// The dictionary (pypinyin) reading of `c` on its own: what a reader
+    /// without context would say.
+    pub fn dictionary_reading(&self, c: char) -> Option<&str> {
+        self.pinyin.char_reading(c)
+    }
+
+    /// PaddleSpeech's neutral-tone rules rewrite only the tone digit, by
+    /// word and tag: a verb 得 (dei3) or 着 (zhao2) mistagged as a particle
+    /// becomes dei5 / zhao5. A rewritten reading g2pW does not know for the
+    /// character keeps its tone.
+    fn keep_possible_readings(
+        &self,
+        chars: &[char],
+        before: Vec<String>,
+        after: Vec<String>,
+    ) -> Vec<String> {
+        before
+            .into_iter()
+            .zip(after)
+            .zip(chars)
+            .map(|((before, after), &c)| {
+                let candidates = self.g2pw.candidates(c);
+                if after != before
+                    && !candidates.is_empty()
+                    && !candidates.contains(&after.as_str())
+                {
+                    before
+                } else {
+                    after
+                }
+            })
+            .collect()
     }
 
     /// One reading (TONE3, neutral tone 5) per character of `text`; `None`
@@ -181,7 +238,9 @@ impl ZhFrontend {
             .map(|(word, tag)| (word.to_string(), tag.to_string()))
             .collect();
         let seg = self.sandhi.pre_merge(&self.pinyin, seg);
-        let mut predicted = self.g2pw.predict(clause, &self.pinyin)?;
+        let mut predicted = self
+            .g2pw
+            .predict(clause, &self.pinyin, self.readings.as_ref())?;
         let clause_chars: Vec<char> = clause.chars().collect();
         if self.options.mainland {
             for (index, reading) in predicted.iter_mut().enumerate() {
@@ -209,10 +268,15 @@ impl ZhFrontend {
                 .zip(&word_chars)
                 .map(|(reading, c)| reading.clone().unwrap_or_else(|| c.to_string()))
                 .collect();
-            let finals = if self.options.tone_sandhi {
-                self.sandhi.modified_tone(&self.jieba, &word, &pos, finals)
-            } else {
-                finals
+            let finals = match self.options.sandhi {
+                Sandhi::Full => self.sandhi.modified_tone(&self.jieba, &word, &pos, finals),
+                Sandhi::NeutralTone => {
+                    let toned = self
+                        .sandhi
+                        .neutral_tone(&self.jieba, &word, &pos, finals.clone());
+                    self.keep_possible_readings(&word_chars, finals, toned)
+                }
+                Sandhi::Off => finals,
             };
             let finals = match self.overrides.get(&word) {
                 Some(fixed) => fixed.clone(),

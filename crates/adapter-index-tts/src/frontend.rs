@@ -40,14 +40,31 @@ impl IndexTtsTextFrontendMode {
 }
 
 pub fn normalize_text(text: &str) -> String {
+    normalize_text_with(text, None)
+}
+
+/// `normalize_text`; with the Mandarin frontend, WeText replaces the
+/// lightweight normalization rules and Chinese text gets polyphone pinyin in
+/// the given style.
+pub fn normalize_text_with(
+    text: &str,
+    mandarin: Option<(&MandarinFrontend, PinyinAnnotation)>,
+) -> String {
     let text = text.replace('嗯', "恩").replace('呣', "母");
     let text = expand_english_contractions(&text);
     let (text, pinyin_tones) = save_pinyin_tones(&text);
     let (text, names) = save_names(&text);
     let use_chinese_rules = use_chinese_normalizer_rules(text.as_str());
-    let text = lightweight_tn_placeholder_pass(&text, use_chinese_rules);
+    let text = match mandarin {
+        Some((frontend, _)) => frontend.normalize(&text, use_chinese_rules),
+        None => lightweight_tn_placeholder_pass(&text, use_chinese_rules),
+    };
     let text = restore_names(&text, &names);
     let text = restore_pinyin_tones(&text, &pinyin_tones);
+    let text = match mandarin {
+        Some((frontend, style)) if use_chinese_rules => frontend.annotate(&text, style),
+        _ => text,
+    };
     let map = if use_chinese_rules {
         &ZH_CHAR_REP_MAP[..]
     } else {
@@ -61,6 +78,21 @@ pub fn normalize_text(text: &str) -> String {
 
 pub fn preprocess_text_for_index_tts(text: &str) -> String {
     preprocess_text_for_index_tts_with_mode(text, IndexTtsTextFrontendMode::from_env())
+}
+
+/// `preprocess_text_for_index_tts` with the Mandarin frontend (official-like
+/// mode only; `PinyinExplicit` keeps its own per-character pinyin).
+pub fn preprocess_text_for_index_tts_with(
+    text: &str,
+    mandarin: Option<&MandarinFrontend>,
+) -> String {
+    match (IndexTtsTextFrontendMode::from_env(), mandarin) {
+        (IndexTtsTextFrontendMode::OfficialLike, Some(frontend)) => tokenize_by_cjk_char(
+            &normalize_text_with(text, Some((frontend, PinyinAnnotation::Inline))),
+            true,
+        ),
+        (mode, _) => preprocess_text_for_index_tts_with_mode(text, mode),
+    }
 }
 
 pub fn preprocess_text_for_index_tts_with_mode(

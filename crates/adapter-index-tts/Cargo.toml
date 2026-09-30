@@ -16,6 +16,7 @@ local-backend-ort = { path = "../backend-ort" }
 local-core = { path = "../core" }
 local-error = { path = "../error" }
 local-files = { path = "../files" }
+local-zh-tts-frontend = { path = "../zh-tts-frontend" }
 pinyin = { version = "0.11.0", default-features = false, features = ["with_tone_num_end"] }
 sentencepiece-rs = "0.2.2"
 serde.workspace = true

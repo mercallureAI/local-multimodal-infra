@@ -1,6 +1,7 @@
-//! Times each frontend stage: `cargo run --release --example probe -- <asset dir> [text...]`.
+//! Times each frontend stage: `cargo run --release --example probe -- <asset dir> [text...]`
+//! (PaddleSpeech options; `ZH_PROBE_MAINLAND=1` for Mainland readings, citation tones).
 use local_backend_ort::{OrtBackend, ProviderSelection};
-use local_zh_tts_frontend::{Options, PinyinDict, ZhFrontend};
+use local_zh_tts_frontend::{Options, PinyinDict, Sandhi, ZhFrontend};
 use std::{path::Path, time::Instant};
 
 fn main() {
@@ -12,7 +13,15 @@ fn main() {
     eprintln!("pinyin dict {:?}: {:?}", dict, t.elapsed());
     let t = Instant::now();
     let backend = OrtBackend::new(ProviderSelection::from_strings(&["cpu".to_string()]));
-    let mut frontend = ZhFrontend::load(dir, &backend, Options::paddlespeech()).expect("frontend");
+    let options = if std::env::var_os("ZH_PROBE_MAINLAND").is_some() {
+        Options {
+            mainland: true,
+            sandhi: Sandhi::Off,
+        }
+    } else {
+        Options::paddlespeech()
+    };
+    let mut frontend = ZhFrontend::load(dir, &backend, options).expect("frontend");
     eprintln!("frontend load: {:?}", t.elapsed());
     let texts: Vec<String> = args.collect();
     let texts = if texts.is_empty() {
