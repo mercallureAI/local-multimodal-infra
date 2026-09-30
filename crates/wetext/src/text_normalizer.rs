@@ -148,7 +148,13 @@ fn best_path_olabels(fst: &VectorFst<TropicalWeight>) -> Result<Option<Vec<Label
                 best_final = Some(state);
             }
         }
-        for (position, tr) in fst.get_trs(state).map_err(op_error)?.trs().iter().enumerate() {
+        for (position, tr) in fst
+            .get_trs(state)
+            .map_err(op_error)?
+            .trs()
+            .iter()
+            .enumerate()
+        {
             let next = tr.nextstate as usize;
             let candidate = here + *tr.weight.value();
             if candidate < distance[next] {
