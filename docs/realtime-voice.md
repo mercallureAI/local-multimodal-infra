@@ -65,16 +65,18 @@ talked over work as above; the client gets:
 - `response.done` once a response is over: fully heard, or `cut` (someone
   talked over the bot, or the client cancelled it), with `spoken`, the
   clauses the listener heard at least the start of (what the client should
-  keep in its history). Every response gets exactly one, a response cancelled
-  before it started included (cut, nothing spoken).
+  keep in its history). Every response gets exactly one (the server remembers
+  the last 256 ids that are over), in the order the responses were started,
+  a response cancelled before it started included (cut, nothing spoken).
 
 The client speaks by streaming `response.delta` (text, split into clauses
 and spoken as it comes) and `response.end` under a `response_id` of its
 choosing, unique within the session; responses play one after the other (a
 later one waits until every earlier one has all its text). `response.cancel`
-with the id of a response still waiting its turn drops just that one; with
-the id of the one speaking, or with no id, it stops the bot (and everything
-waiting). Text still arriving for a response that is over is dropped. `say`
+with the id of a response still waiting its turn (none of its speech on its way yet) drops just that one;
+with the id of the one speaking, of one whose speech is already on its way,
+or with no id, it stops the bot (and everything waiting). A response must be
+ended or cancelled: until it is, the ones after it wait. Text still arriving for a response that is over is dropped. `say`
 speaks a text as it is.
 
 The server only knows the bot is busy once the client's first delta comes:

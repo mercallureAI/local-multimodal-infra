@@ -149,8 +149,8 @@ fn spec_files(dir: &Path) -> Result<Vec<(PathBuf, Option<ModelCategory>)>> {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        if is_dir && name.starts_with('.') {
-            continue; // hidden (an editor's, a backup)
+        if name.starts_with('.') {
+            continue; // hidden (an editor's lock or backup)
         }
         if is_dir {
             let category = ModelCategory::from_name(name).ok_or_else(|| {
@@ -178,10 +178,15 @@ fn sorted_entries(dir: &Path) -> Result<Vec<(PathBuf, bool)>> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(dir).map_err(|e| InfraError::io(Some(dir.to_path_buf()), e))? {
         let entry = entry.map_err(|e| InfraError::io(Some(dir.to_path_buf()), e))?;
-        // Followed through symlinks (a linked category directory).
-        let is_dir = fs::metadata(entry.path())
-            .map_err(|e| InfraError::io(Some(entry.path()), e))?
-            .is_dir();
+        // Followed through symlinks (a linked category directory); a
+        // dangling one is skipped.
+        let is_dir = match fs::metadata(entry.path()) {
+            Ok(metadata) => metadata.is_dir(),
+            Err(err) => {
+                tracing::warn!(path = %entry.path().display(), error = %err, "unreadable model spec entry skipped");
+                continue;
+            }
+        };
         entries.push((entry.path(), is_dir));
     }
     entries.sort();

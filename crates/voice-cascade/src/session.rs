@@ -737,6 +737,12 @@ fn heard(
         end = seconds(utterance.end),
         "voice cascade heard"
     );
+    // In audio mode the client replies: a joined utterance stops only what is
+    // actually going on.
+    if answer && (busy || (restarts && !shared.audio)) {
+        // Whatever was made of the utterance's first part goes too.
+        shared.cut();
+    }
     let id = shared.next_utterance.fetch_add(1, Ordering::SeqCst);
     shared.emit(ServerEvent::Transcript {
         text: text.clone(),
@@ -750,12 +756,6 @@ fn heard(
     if !answer && names.is_none() {
         // A backchannel while the bot speaks.
         return;
-    }
-    // In audio mode the client replies: a joined utterance stops only what is
-    // actually going on.
-    if answer && (busy || (restarts && !shared.audio)) {
-        // Whatever was made of the utterance's first part goes too.
-        shared.cut();
     }
     if shared.audio {
         // The client keeps the conversation: the utterance is its message.
@@ -1197,6 +1197,8 @@ impl Shared {
         }
         responses.open.remove(at);
         responses.close(id.clone());
+        // Those behind it may go now.
+        self.release(responses);
         vec![ServerEvent::ResponseDone {
             response_id: id,
             spoken: String::new(),
@@ -1289,8 +1291,11 @@ impl Shared {
             let mut responses = self.responses.lock().unwrap();
             let mut state = self.player.state.lock().unwrap();
             let heard = state.heard();
+            // In order: one finishes once those before it have.
+            let mut earlier_open = false;
             responses.open.retain_mut(|response| {
-                let finished = response.ended
+                let finished = !earlier_open
+                    && response.ended
                     && response.held.is_empty()
                     && response.pending == 0
                     && !state
@@ -1299,6 +1304,8 @@ impl Shared {
                         .any(|segment| segment.response == response.id && segment.end > heard);
                 if finished {
                     done.push((response.id.clone(), std::mem::take(&mut response.spoken)));
+                } else {
+                    earlier_open = true;
                 }
                 !finished
             });
@@ -2098,6 +2105,53 @@ mod tests {
         let told = events(&mut out);
         assert_eq!(told.len(), 1, "{told:?}");
         assert_eq!(told[0]["response_id"], "r1");
+    }
+
+    #[test]
+    fn cancelling_a_response_in_the_middle_lets_the_next_go() {
+        let (shared, mut out, mut clauses) = audio_shared();
+        shared.audio_event(delta("r1", "第一句。"));
+        shared.audio_event(end("r1"));
+        synthesize_next(&shared, &mut clauses, 10);
+        shared.audio_event(delta("r2", "半"));
+        shared.audio_event(delta("r3", "第三句。"));
+        shared.audio_event(end("r3"));
+        assert!(clauses.try_recv().is_err(), "r3 waits for r2");
+        shared.audio_event(ClientEvent::ResponseCancel {
+            response_id: Some("r2".into()),
+        });
+        assert_eq!(synthesize_next(&shared, &mut clauses, 10), "第三句。");
+        play(&shared, 20);
+        shared.check_done();
+        let done: Vec<String> = events(&mut out)
+            .into_iter()
+            .filter(|e| e["type"] == "response.done")
+            .map(|e| e["response_id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(done, ["r2", "r1", "r3"]);
+    }
+
+    #[test]
+    fn responses_finish_in_order() {
+        let (shared, mut out, mut clauses) = audio_shared();
+        shared.audio_event(delta("r1", "说得长一点。"));
+        shared.audio_event(end("r1"));
+        synthesize_next(&shared, &mut clauses, 10);
+        // r2 has nothing to say: still over only after r1.
+        shared.audio_event(delta("r2", "😀"));
+        shared.audio_event(end("r2"));
+        shared.check_done();
+        assert!(events(&mut out)
+            .iter()
+            .all(|e| e["type"] != "response.done"));
+        play(&shared, 10);
+        shared.check_done();
+        let done: Vec<String> = events(&mut out)
+            .into_iter()
+            .filter(|e| e["type"] == "response.done")
+            .map(|e| e["response_id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(done, ["r1", "r2"]);
     }
 
     #[test]
