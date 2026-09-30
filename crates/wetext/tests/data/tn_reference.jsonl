@@ -1,0 +1,272 @@
+{"wetext_version": "0.1.0"}
+{"lang": "zh", "text": "110", "expected": "幺幺零"}
+{"lang": "zh", "text": "2%", "expected": "百分之二"}
+{"lang": "zh", "text": "127.0.0.1", "expected": "一二七点零点零点一"}
+{"lang": "zh", "text": "010-64035547", "expected": "零一零六四零三五五四七"}
+{"lang": "zh", "text": "尾号1702", "expected": "尾号幺七零二"}
+{"lang": "zh", "text": "尾号是3385", "expected": "尾号是三三八五"}
+{"lang": "zh", "text": "尾号为2349", "expected": "尾号为二三四九"}
+{"lang": "zh", "text": "中", "expected": "中"}
+{"lang": "zh", "text": "A", "expected": "A"}
+{"lang": "zh", "text": "2008-08-08", "expected": "二零零八年八月八日"}
+{"lang": "zh", "text": "2008/08/08", "expected": "二零零八年八月八日"}
+{"lang": "zh", "text": "2008.08.08", "expected": "二零零八年八月八日"}
+{"lang": "zh", "text": "2008-8-8", "expected": "二零零八年八月八日"}
+{"lang": "zh", "text": "08-08-2008", "expected": "二零零八年八月八日"}
+{"lang": "zh", "text": "2008-08", "expected": "二零零八年八月"}
+{"lang": "zh", "text": "2008/08", "expected": "二零零八年八月"}
+{"lang": "zh", "text": "2008.08", "expected": "二零零八年八月"}
+{"lang": "zh", "text": "08-2008", "expected": "二零零八年八月"}
+{"lang": "zh", "text": "08/2008", "expected": "二零零八年八月"}
+{"lang": "zh", "text": "08.2008", "expected": "二零零八年八月"}
+{"lang": "zh", "text": "08-08", "expected": "八月八日"}
+{"lang": "zh", "text": "08/08", "expected": "八月八日"}
+{"lang": "zh", "text": "08.08", "expected": "八月八日"}
+{"lang": "zh", "text": "1/2", "expected": "二分之一"}
+{"lang": "zh", "text": "3/16", "expected": "十六分之三"}
+{"lang": "zh", "text": "1 / 2", "expected": "二分之一"}
+{"lang": "zh", "text": "1+2", "expected": "一加二"}
+{"lang": "zh", "text": "-1+2", "expected": "负一加二"}
+{"lang": "zh", "text": "1+2+3", "expected": "一加二加三"}
+{"lang": "zh", "text": "2 = 1 + 1", "expected": "二等于一加一"}
+{"lang": "zh", "text": "2 ≤ 4", "expected": "二小于等于四"}
+{"lang": "zh", "text": "2 ≥ 1", "expected": "二大于等于一"}
+{"lang": "zh", "text": "2<=4", "expected": "二小于等于四"}
+{"lang": "zh", "text": "2>=1", "expected": "二大于等于一"}
+{"lang": "zh", "text": "1年后", "expected": "一年后"}
+{"lang": "zh", "text": "2年后", "expected": "两年后"}
+{"lang": "zh", "text": "20年后", "expected": "二十年后"}
+{"lang": "zh", "text": "100余", "expected": "一百余"}
+{"lang": "zh", "text": "10几", "expected": "十几"}
+{"lang": "zh", "text": "2两", "expected": "二两"}
+{"lang": "zh", "text": "1kg", "expected": "一千克"}
+{"lang": "zh", "text": "1 kg", "expected": "一千克"}
+{"lang": "zh", "text": "10km/h", "expected": "每小时十公里"}
+{"lang": "zh", "text": "100兆", "expected": "一百兆"}
+{"lang": "zh", "text": "￥1.25", "expected": "一点二五元"}
+{"lang": "zh", "text": "CNY1.25", "expected": "一点二五人民币"}
+{"lang": "zh", "text": "CNY 1.25", "expected": "一点二五人民币"}
+{"lang": "zh", "text": "苹果宣布发布新ＩＰＨＯＮＥ", "expected": "苹果宣布发布新ＩＰＨＯＮＥ"}
+{"lang": "zh", "text": "他说：“我们已经吃过了！”。", "expected": "他说：“我们已经吃过了！”。"}
+{"lang": "zh", "text": "呃这个呃啊我不知道", "expected": "呃这个呃啊我不知道"}
+{"lang": "zh", "text": "共465篇，约315万字", "expected": "共四百六十五篇，约三百一十五万字"}
+{"lang": "zh", "text": "共计6.42万人", "expected": "共计六点四二万人"}
+{"lang": "zh", "text": "同比升高0.6个百分点", "expected": "同比升高零点六个百分点"}
+{"lang": "zh", "text": "总量的1/5以上", "expected": "总量的五分之一以上"}
+{"lang": "zh", "text": "相当于头发丝的1/16", "expected": "相当于头发丝的十六分之一"}
+{"lang": "zh", "text": "3/2是一个假分数", "expected": "二分之三是一个假分数"}
+{"lang": "zh", "text": "同比增长6.3%", "expected": "同比增长百分之六点三"}
+{"lang": "zh", "text": "增幅0.4%", "expected": "增幅百分之零点四"}
+{"lang": "zh", "text": "2002/01/28", "expected": "二零零二年一月二十八日"}
+{"lang": "zh", "text": "2002-01-28", "expected": "二零零二年一月二十八日"}
+{"lang": "zh", "text": "2002.01.28", "expected": "二零零二年一月二十八日"}
+{"lang": "zh", "text": "2002/01", "expected": "二零零二年一月"}
+{"lang": "zh", "text": "8月16号12:00之前", "expected": "八月十六号十二点之前"}
+{"lang": "zh", "text": "我是5:02开始的", "expected": "我是五点零二分开始的"}
+{"lang": "zh", "text": "于5:35:36发射", "expected": "于五点三十五分三十六秒发射"}
+{"lang": "zh", "text": "8:00 a.m.准时开会", "expected": "上午八点准时开会"}
+{"lang": "zh", "text": "比分定格在78:96", "expected": "比分定格在七十八比九十六"}
+{"lang": "zh", "text": "计算-2的绝对值是2", "expected": "计算负二的绝对值是二"}
+{"lang": "zh", "text": "±2的平方都是4", "expected": "正负二的平方都是四"}
+{"lang": "zh", "text": "价格是￥13.5", "expected": "价格是十三点五元"}
+{"lang": "zh", "text": "价格是$13.5", "expected": "价格是十三点五美元"}
+{"lang": "zh", "text": "价格是A$13.5", "expected": "价格是十三点五澳元"}
+{"lang": "zh", "text": "价格是HKD13.5", "expected": "价格是十三点五港元"}
+{"lang": "zh", "text": "重达25kg", "expected": "重达二十五千克"}
+{"lang": "zh", "text": "最高气温38°C", "expected": "最高气温三十八摄氏度"}
+{"lang": "zh", "text": "实际面积120m²", "expected": "实际面积一百二十平方米"}
+{"lang": "zh", "text": "渲染速度10ms一帧", "expected": "渲染速度十毫秒一帧"}
+{"lang": "zh", "text": "可以打我手机13501234567", "expected": "可以打我手机幺三五零幺二三四五六七"}
+{"lang": "zh", "text": "可以拨打12306来咨询", "expected": "可以拨打幺二三零六来咨询"}
+{"lang": "zh", "text": "这儿有只鸟儿", "expected": "这儿有只鸟儿"}
+{"lang": "zh", "text": "这事儿好办", "expected": "这事儿好办"}
+{"lang": "zh", "text": "我儿子喜欢这地儿", "expected": "我儿子喜欢这地儿"}
+{"lang": "zh", "text": "O2O", "expected": "O to O"}
+{"lang": "zh", "text": "B2B", "expected": "B to B"}
+{"lang": "zh", "text": "给12315打个电话", "expected": "给幺二三幺五打个电话"}
+{"lang": "zh", "text": "人均200以内", "expected": "人均两百以内"}
+{"lang": "zh", "text": "当场票数≥100万", "expected": "当场票数大于等于一百万"}
+{"lang": "zh", "text": "独得300w张", "expected": "独得三百万张"}
+{"lang": "zh", "text": "面积是10km²", "expected": "面积是十平方千米"}
+{"lang": "zh", "text": "仅仅是２０１５年", "expected": "仅仅是二零一五年"}
+{"lang": "zh", "text": "包含３０００余件", "expected": "包含三千余件"}
+{"lang": "zh", "text": "查处４５０余名", "expected": "查处四百五十余名"}
+{"lang": "zh", "text": "查处450余名", "expected": "查处四百五十余名"}
+{"lang": "zh", "text": "-1", "expected": "负一"}
+{"lang": "zh", "text": "0", "expected": "零"}
+{"lang": "zh", "text": "1", "expected": "一"}
+{"lang": "zh", "text": "2", "expected": "二"}
+{"lang": "zh", "text": "10", "expected": "十"}
+{"lang": "zh", "text": "11", "expected": "十一"}
+{"lang": "zh", "text": "20", "expected": "二十"}
+{"lang": "zh", "text": "100", "expected": "幺零零"}
+{"lang": "zh", "text": "101", "expected": "幺零幺"}
+{"lang": "zh", "text": "111", "expected": "幺幺幺"}
+{"lang": "zh", "text": "200", "expected": "二零零"}
+{"lang": "zh", "text": "1000", "expected": "一千"}
+{"lang": "zh", "text": "1001", "expected": "一千零一"}
+{"lang": "zh", "text": "1011", "expected": "一千零一十一"}
+{"lang": "zh", "text": "1111", "expected": "一千一百一十一"}
+{"lang": "zh", "text": "2000", "expected": "两千"}
+{"lang": "zh", "text": "10000", "expected": "幺零零零零"}
+{"lang": "zh", "text": "10001", "expected": "幺零零零幺"}
+{"lang": "zh", "text": "10011", "expected": "幺零零幺幺"}
+{"lang": "zh", "text": "10111", "expected": "幺零幺幺幺"}
+{"lang": "zh", "text": "11111", "expected": "幺幺幺幺幺"}
+{"lang": "zh", "text": "20000", "expected": "二零零零零"}
+{"lang": "zh", "text": "101111", "expected": "幺零幺幺幺幺"}
+{"lang": "zh", "text": "1001111", "expected": "一百万一千一百一十一"}
+{"lang": "zh", "text": "10001111", "expected": "幺零零零幺幺幺幺"}
+{"lang": "zh", "text": "1.01", "expected": "一点零一"}
+{"lang": "zh", "text": "1.11", "expected": "一点一一"}
+{"lang": "zh", "text": "中国1-2", "expected": "中国一比二"}
+{"lang": "zh", "text": "爆冷0:1", "expected": "爆冷零比一"}
+{"lang": "zh", "text": "拉齐奥 2/2", "expected": "拉齐奥二比二"}
+{"lang": "zh", "text": "2:02", "expected": "两点零二分"}
+{"lang": "zh", "text": "11:00", "expected": "十一点"}
+{"lang": "zh", "text": "22：58", "expected": "二十二点五十八分"}
+{"lang": "zh", "text": "13:10:36", "expected": "十三点十分三十六秒"}
+{"lang": "zh", "text": "1:02:36am", "expected": "上午一点零二分三十六秒"}
+{"lang": "zh", "text": "1:02:36 am", "expected": "上午一点零二分三十六秒"}
+{"lang": "zh", "text": "儿", "expected": "儿"}
+{"lang": "zh", "text": "婴儿", "expected": "婴儿"}
+{"lang": "zh", "text": "90后", "expected": "九零后"}
+{"lang": "zh", "text": "电话：135-4567-8900", "expected": "电话：一三五四五六七八九零零"}
+{"lang": "zh", "text": "客服热线400-820-8820，工作时间9:00-18:00", "expected": "客服热线四零零八二零八八二零，工作时间九点到十八点"}
+{"lang": "zh", "text": "现在是北京时间2025年01月11日 20:00", "expected": "现在是北京时间二零二五年零一月十一日 二十点"}
+{"lang": "zh", "text": "2002年的第一场雪，下在了2003年", "expected": "二零零二年的第一场雪，下在了二零零三年"}
+{"lang": "zh", "text": "速度是10km/h，温度-5℃到12℃", "expected": "速度是每小时十公里，温度负五摄氏度到十二摄氏度"}
+{"lang": "zh", "text": "这件衣服打8.5折，只要¥129.9", "expected": "这件衣服打八点五折，只要一百二十九点九元"}
+{"lang": "zh", "text": "增长了12.5%，达到3.2万亿元", "expected": "增长了百分之十二点五，达到三点二万亿元"}
+{"lang": "zh", "text": "他这条视频点赞3000+，评论1000+，收藏500+", "expected": "他这条视频点赞三千加，评论一千加，收藏五零零加"}
+{"lang": "zh", "text": "IndexTTS 2.5 发布了，版本号v1.0.3", "expected": "IndexTTS 二点五 发布了，版本号v一.零点三"}
+{"lang": "zh", "text": "第1名到第10名，共1/3的人", "expected": "第一名到第十名，共三分之一的人"}
+{"lang": "zh", "text": "2024-10-01开会，3:30pm结束", "expected": "二零二四年十月一日开会，下午三点三十分结束"}
+{"lang": "zh", "text": "我住在302室，房号1208", "expected": "我住在三零二室，房号一千两百零八"}
+{"lang": "zh", "text": "iPhone 15 Pro Max售价7999元", "expected": "iPhone 十五 Pro Max售价七千九百九十九元"}
+{"lang": "zh", "text": "1键3连", "expected": "一键三连"}
+{"lang": "zh", "text": "5G网络是4G网络的升级版", "expected": "五G网络是四G网络的升级版"}
+{"lang": "zh", "text": "苹果于2030/1/2发布新 iPhone 2X 系列手机，最低售价仅 ¥12999", "expected": "苹果于二零三零年一月二日发布新 iPhone 二X 系列手机，最低售价仅 一万两千九百九十九元"}
+{"lang": "zh", "text": "数到3就开始：1、2、3", "expected": "数到三就开始：一、二、三"}
+{"lang": "zh", "text": "明天最高气温28度，降水概率30%", "expected": "明天最高气温二十八度，降水概率百分之三十"}
+{"lang": "zh", "text": "他今年25岁，身高1.78米，体重65.5公斤", "expected": "他今年二十五岁，身高一点七八米，体重六十五点五公斤"}
+{"lang": "en", "text": "-23", "expected": "negative twenty three"}
+{"lang": "en", "text": "-1", "expected": "negative one"}
+{"lang": "en", "text": "0", "expected": "zero"}
+{"lang": "en", "text": "1", "expected": "one"}
+{"lang": "en", "text": "2", "expected": "two"}
+{"lang": "en", "text": "10", "expected": "ten"}
+{"lang": "en", "text": "11", "expected": "eleven"}
+{"lang": "en", "text": "20", "expected": "twenty"}
+{"lang": "en", "text": "100", "expected": "one hundred"}
+{"lang": "en", "text": "101", "expected": "one hundred and one"}
+{"lang": "en", "text": "111", "expected": "one hundred and eleven"}
+{"lang": "en", "text": "200", "expected": "two hundred"}
+{"lang": "en", "text": "1000", "expected": "one thousand"}
+{"lang": "en", "text": "1001", "expected": "one thousand one"}
+{"lang": "en", "text": "1011", "expected": "ten eleven"}
+{"lang": "en", "text": "1111", "expected": "eleven eleven"}
+{"lang": "en", "text": "2000", "expected": "two thousand"}
+{"lang": "en", "text": "10000", "expected": "ten thousand"}
+{"lang": "en", "text": "10001", "expected": "ten thousand and one"}
+{"lang": "en", "text": "10011", "expected": "ten thousand and eleven"}
+{"lang": "en", "text": "10111", "expected": "ten thousand one hundred and eleven"}
+{"lang": "en", "text": "11111", "expected": "eleven thousand one hundred and eleven"}
+{"lang": "en", "text": "20000", "expected": "twenty thousand"}
+{"lang": "en", "text": "101111", "expected": "one hundred one thousand one hundred and eleven"}
+{"lang": "en", "text": "1001111", "expected": "one million one thousand one hundred and eleven"}
+{"lang": "en", "text": "10001111", "expected": "ten million one thousand one hundred and eleven"}
+{"lang": "en", "text": "4567", "expected": "four thousand five hundred and sixty seven"}
+{"lang": "en", "text": "1219", "expected": "twelve nineteen"}
+{"lang": "en", "text": "2999", "expected": "twenty nine ninety nine"}
+{"lang": "en", "text": "'70s", "expected": "seventies"}
+{"lang": "en", "text": "2024 B.C", "expected": "twenty twenty four BC"}
+{"lang": "en", "text": "1H23", "expected": "the first half of twenty three"}
+{"lang": "en", "text": "3Q22", "expected": "the third quarter of twenty two"}
+{"lang": "en", "text": "jan. 5, 2012", "expected": "the fifth of january , twenty twelve"}
+{"lang": "en", "text": "jan. 5", "expected": "the fifth of january"}
+{"lang": "en", "text": "5 january 2012", "expected": "the fifth of january twenty twelve"}
+{"lang": "en", "text": "2012-01-05", "expected": "the fifth of january twenty twelve"}
+{"lang": "en", "text": "2012.01.05", "expected": "the fifth of january twenty twelve"}
+{"lang": "en", "text": "2012/01/05", "expected": "the fifth of january twenty twelve"}
+{"lang": "en", "text": "2012", "expected": "twenty twelve"}
+{"lang": "en", "text": "2024-05-06", "expected": "the sixth of may twenty twenty four"}
+{"lang": "en", "text": "-12.5006 billion", "expected": "minus twelve point five oh oh six billion"}
+{"lang": "en", "text": "1 billion", "expected": "one billion"}
+{"lang": "en", "text": "1.5 million", "expected": "one point five million"}
+{"lang": "en", "text": "cdf1@abc.edu", "expected": "cdf one at abc dot edu"}
+{"lang": "en", "text": "23 4/5", "expected": "twenty three and four fifths"}
+{"lang": "en", "text": "23 4/5th", "expected": "twenty three and four fifths"}
+{"lang": "en", "text": "1/3", "expected": "one third"}
+{"lang": "en", "text": "1/2", "expected": "one half"}
+{"lang": "en", "text": "1/4", "expected": "one quarter"}
+{"lang": "en", "text": "2/4", "expected": "two quarters"}
+{"lang": "en", "text": "23/44", "expected": "twenty three forty fourths"}
+{"lang": "en", "text": "-12kg", "expected": "negative twelve kilograms"}
+{"lang": "en", "text": "1kg", "expected": "one kilogram"}
+{"lang": "en", "text": ".5kg", "expected": "point five kilograms"}
+{"lang": "en", "text": "3.5 cm²", "expected": "three point five square centimeters"}
+{"lang": "en", "text": "2788 San Tomas Expy, Santa Clara, CA 95051", "expected": "twenty seven eighty eight San Tomas Expressway, Santa Clara, California nine five oh five one"}
+{"lang": "en", "text": "2-3 °C", "expected": "two to three degrees Celsius"}
+{"lang": "en", "text": "2 * 10 μm", "expected": "two times ten micrometers"}
+{"lang": "en", "text": "$12.05", "expected": "twelve point oh five dollars"}
+{"lang": "en", "text": "$12.0500", "expected": "twelve point oh five dollars"}
+{"lang": "en", "text": "$1", "expected": "one dollar"}
+{"lang": "en", "text": "$1.00", "expected": "one dollar"}
+{"lang": "en", "text": "$0.05", "expected": "zero point oh five dollars"}
+{"lang": "en", "text": "$1 million", "expected": "one million dollars"}
+{"lang": "en", "text": "$1.2 million", "expected": "one point two million dollars"}
+{"lang": "en", "text": "$1.2320", "expected": "one point two three two dollars"}
+{"lang": "en", "text": "this is 12th game, number 256, 2024-05-06, 2021-03-07 31.990 billion. ¾ people like chattts, let's eat at 03:43 p.m. run 10 km, give me $12.345 please, call 123-123-5678-1 Mt Hill \"HAHAHA\" billion 4 March", "expected": "this is twelfth game ,  number two hundred and fifty six ,  the sixth of may twenty twenty four ,  the seventh of march twenty twenty one thirty one point nine nine oh billion .  three quarters people like chattts ,  let ' s eat at three forty three PM run ten kilometers ,  give me twelve point three four five dollars please ,  call one two three, one two three, five six seven eight, one Mt Hill  \" HAHAHA \"  billion the fourth of march"}
+{"lang": "en", "text": "The National Map, accessed April 1, 2011\" Site Description of Koppers Co. From the quartet's recording\" Jefferson Friedman: Quartets,\"\" String Quartet no, Riots again broke out, Atassi resigned, and Syrian independence was deferred until after World War II. 1988 (1988) ( 1988) ( 1988). Starling, Arthur E.( 1988 ). this is 12th game, number 256, 2024-05-06, 2021-03-07 31.990 billion. 3/4 people like chattts Retrieved December 2011. Information on Album\" Thepodule.com\"\" Biography by Amy Hanson\".", "expected": "The National Map ,  accessed the first of april , twenty eleven \"  Site Description of Koppers company From the quartet ' s recording \"  Jefferson Friedman :  Quartets ,\"\"  String Quartet no ,  Riots again broke out ,  Atassi resigned ,  and Syrian independence was deferred until after World War two nineteen eighty eight  ( nineteen eighty eight )  (  nineteen eighty eight )  (  nineteen eighty eight ).  Starling ,  Arthur E .(  nineteen eighty eight  ).  this is twelfth game ,  number two fifty six ,  the sixth of may twenty twenty four ,  the seventh of march twenty twenty one thirty one point nine nine oh billion .  three quarters people like chattts Retrieved december twenty eleven. Information on Album \"  Thepodule dot com \"\"  Biography by Amy Hanson \"."}
+{"lang": "en", "text": ".345\" and \".456\" \"9.456\" or 6.7890\"", "expected": "point three four five \"  and  \". four hundred and fifty six \"  \" nine point four five six \"  or six point seven eight nine oh \""}
+{"lang": "en", "text": "The museum is open Mon.-Sun. children of 3-4 years 123 The plan will help you lose 3-4 pounds the first week, and 1-2 pounds the weeks thereafter.", "expected": "The museum is open Monday to Sunday children of three to four years one hundred and twenty three The plan will help you lose three to four pounds the first week ,  and one to two pounds the weeks thereafter ."}
+{"lang": "en", "text": "Try searching for 'Toyota' or 'Investment'", "expected": "Try searching for 'Toyota' or 'Investment'"}
+{"lang": "en", "text": "\"\"", "expected": "\"\""}
+{"lang": "en", "text": "The HTML tag <p> defines a paragraph.", "expected": "The HTML tag <p> defines a paragraph."}
+{"lang": "en", "text": "hello world", "expected": "hello world"}
+{"lang": "en", "text": "\"So, one hundred thousand merit shouldn't be a problem.\"", "expected": "\"So, one hundred thousand merit shouldn't be a problem.\""}
+{"lang": "en", "text": "\"hello\"", "expected": "\"hello\""}
+{"lang": "en", "text": "(hello)", "expected": "(hello)"}
+{"lang": "en", "text": "1st", "expected": "first"}
+{"lang": "en", "text": "2nd", "expected": "second"}
+{"lang": "en", "text": "3rd", "expected": "third"}
+{"lang": "en", "text": "5th", "expected": "fifth"}
+{"lang": "en", "text": "11th", "expected": "eleventh"}
+{"lang": "en", "text": "13th", "expected": "thirteenth"}
+{"lang": "en", "text": "20th", "expected": "twentieth"}
+{"lang": "en", "text": "21st", "expected": "twenty first"}
+{"lang": "en", "text": "30th", "expected": "thirtieth"}
+{"lang": "en", "text": "100th", "expected": "one hundredth"}
+{"lang": "en", "text": "1000th", "expected": "one thousandth"}
+{"lang": "en", "text": "2-3", "expected": "two to three"}
+{"lang": "en", "text": "IV", "expected": "IV"}
+{"lang": "en", "text": "+1 123-123-5678-1", "expected": "plus one, one two three, one two three, five six seven eight, one"}
+{"lang": "en", "text": "1-800-GO-U-HAUL", "expected": "one, eight hundred, GO U HAUL"}
+{"lang": "en", "text": "12:30 a.m. est", "expected": "twelve thirty AM EST"}
+{"lang": "en", "text": "2.30 a.m.", "expected": "two thirty AM"}
+{"lang": "en", "text": "02.30 a.m.", "expected": "two thirty AM"}
+{"lang": "en", "text": "2.00 a.m.", "expected": "two AM"}
+{"lang": "en", "text": "2 a.m.", "expected": "two AM"}
+{"lang": "en", "text": "02:00", "expected": "two o'clock"}
+{"lang": "en", "text": "02:30", "expected": "two thirty"}
+{"lang": "en", "text": "2:00", "expected": "two o'clock"}
+{"lang": "en", "text": "10:00:05 a.m.", "expected": "ten hours zero minutes and five seconds AM"}
+{"lang": "en", "text": "Ph.D.", "expected": "Ph.D."}
+{"lang": "en", "text": "Hon.", "expected": "Hon."}
+{"lang": "en", "text": "Mt.", "expected": "Mt."}
+{"lang": "en", "text": "Maj.", "expected": "Maj."}
+{"lang": "en", "text": "Rev.", "expected": "Rev."}
+{"lang": "en", "text": "Stroudsburg, PA", "expected": "Stroudsburg, PA"}
+{"lang": "en", "text": "smile", "expected": "smile"}
+{"lang": "en", "text": "中国", "expected": "中国"}
+{"lang": "en", "text": "中", "expected": "中"}
+{"lang": "en", "text": "国", "expected": "国"}
+{"lang": "en", "text": "A", "expected": "A"}
+{"lang": "en", "text": "a", "expected": "a"}
+{"lang": "en", "text": "See you at 8:00 AM", "expected": "See you at eight AM"}
+{"lang": "en", "text": "This sales for 2.5% off, only $12.5.", "expected": "This sales for two point five percent off ,  only twelve point five dollars ."}
+{"lang": "en", "text": "Counting down 3, 2, 1, go!", "expected": "Counting down three ,  two ,  one ,  go !"}
+{"lang": "en", "text": "Call me at 555-0123 on May 5th, 2024.", "expected": "Call me at five hundred and fifty five negative oh one hundred and twenty three on May fifth ,  twenty twenty four ."}
+{"lang": "en", "text": "It costs $1,299.99 and weighs 2.5kg.", "expected": "It costs one thousand two hundred and ninety nine point nine nine dollars and weighs two point five kilograms ."}
+{"lang": "en", "text": "The meeting is on 10/01/2024 at 3:30pm.", "expected": "The meeting is on the first of october twenty twenty four at three thirty PM ."}
