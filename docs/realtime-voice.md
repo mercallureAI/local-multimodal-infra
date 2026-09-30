@@ -19,8 +19,11 @@ server does the rest:
    silent (`silence` tool) or hand a task to the client (`backend_task`
    tool). Every turn offers the same tools, so the server reuses the cached
    prompt prefix; turns that must speak are steered with logit biases.
-4. **IndexTTS** speaks the answer clause by clause while it is still being
+4. **IndexTTS** speaks the answer chunk by chunk while it is still being
    generated; the server sends the audio at real-time pace (0.3 s ahead).
+   Chunks are whole sentences (only the first may end at a comma, so speech
+   starts early), merged until each is about twice as long as the one before
+   it, up to 60 characters; only a sentence longer than 120 is cut at a comma.
 
 Talking over the bot stops it: one to one after `barge_in_ms` of speech (or
 an utterance that is more than a backchannel; an utterance that stopped the

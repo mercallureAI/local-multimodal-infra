@@ -68,14 +68,25 @@ const BACKCHANNELS: &[&str] = &[
 ];
 /// One character left after backchannels that still takes the floor.
 const FLOOR_WORDS: &[char] = &['停', '不', '别', '等', '喂'];
-/// A clause ends at these, whatever its length.
-const CLAUSE_END: &[char] = &['。', '！', '？', '!', '?', '；', ';', '…', '\n'];
-/// A clause may end at these once it is long enough.
-const CLAUSE_PAUSE: &[char] = &['，', ',', '、', '：', ':'];
-/// The first clause is spoken as soon as it is this long (at a pause), later
-/// ones once they are this long: speech starts early and then flows.
-const FIRST_CLAUSE_CHARS: usize = 2;
-const CLAUSE_CHARS: usize = 12;
+/// A sentence ends at these (`.` only before whitespace, see `period_ends`).
+const SENTENCE_END: &[char] = &['。', '！', '？', '!', '?', '；', ';', '…', '\n'];
+/// Closing marks that stay with the sentence before them ("好吗？”").
+const CLOSERS: &[char] = &['”', '’', '"', '\'', '）', ')', '】', ']', '」', '』', '》'];
+/// Pauses inside a sentence: the first chunk may end at one, a later one only
+/// when its sentence outgrows `MAX_CHUNK_UNITS`.
+const PAUSES: &[char] = &['，', ',', '、', '：', ':'];
+/// The first chunk is spoken as soon as it is this long at a pause, so
+/// speech starts early ("好的，").
+const FIRST_CHUNK_UNITS: usize = 2;
+/// Later chunks are whole sentences, merged until twice as long as the chunk
+/// before (it plays while the next is synthesized) and at most this long.
+const MERGE_UNITS: usize = 60;
+/// A sentence longer than this is cut at its last pause (or word) before.
+const MAX_CHUNK_UNITS: usize = 120;
+/// Words before a `.` that do not end a sentence ("Mr. Smith").
+const ABBREVIATIONS: &[&str] = &[
+    "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "e.g", "i.e", "no", "fig", "approx",
+];
 /// Spoken text is cut to this (at a sentence end).
 const MAX_SPOKEN_CHARS: usize = 400;
 
@@ -144,11 +155,57 @@ fn is_emoji(c: char) -> bool {
         0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0x2B00..=0x2BFF | 0xFE0F | 0x200D)
 }
 
-/// Cuts streamed text into clauses to speak as soon as each is whole.
+/// Spoken length of `text`: one unit per CJK (or other non-ASCII) letter and
+/// per ASCII word or number; punctuation and spaces count nothing.
+fn units(text: &str) -> usize {
+    let mut count = 0;
+    let mut in_word = false;
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() {
+            count += usize::from(!in_word);
+            in_word = true;
+        } else {
+            in_word = false;
+            count += usize::from(c.is_alphanumeric());
+        }
+    }
+    count
+}
+
+/// Whether the `.` at byte `index` ends a sentence, given the character
+/// after it: it must be followed by whitespace and not close a number
+/// ("3. ", a list item) or an abbreviation ("Mr. ", "J. ").
+fn period_ends(text: &str, index: usize, next: char) -> bool {
+    if !next.is_whitespace() {
+        return false;
+    }
+    let before = &text[..index];
+    if before.ends_with(|c: char| c.is_ascii_digit()) {
+        return false;
+    }
+    let word = before
+        .rsplit(|c: char| c.is_whitespace())
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase();
+    let single_letter = word.chars().count() == 1 && word.chars().all(|c| c.is_ascii_alphabetic());
+    !single_letter && !ABBREVIATIONS.contains(&word.as_str())
+}
+
+/// Cuts streamed text into chunks to speak as soon as each is whole.
+///
+/// The TTS reads each chunk on its own, so a chunk is whole sentences:
+/// cutting at commas breaks the prosody and pauses mid-sentence. Only the
+/// first chunk may end at a pause, to start speaking early; then each chunk
+/// merges sentences until it is twice as long as the one before, which is
+/// playing while it is synthesized. A sentence end counts once the next
+/// character shows it is one (`？”`, `……`, `3.5`, `Mr. Smith`).
 #[derive(Debug, Default)]
 pub struct ClauseSplitter {
     text: String,
-    spoken_any: bool,
+    /// Units of the last chunk handed out; 0 before the first.
+    last_units: usize,
 }
 
 impl ClauseSplitter {
@@ -158,7 +215,7 @@ impl ClauseSplitter {
         while let Some(cut) = self.cut() {
             let rest = self.text.split_off(cut);
             let clause = std::mem::replace(&mut self.text, rest);
-            self.spoken_any = true;
+            self.last_units = units(&clause).max(1);
             if !clause.trim().is_empty() {
                 clauses.push(clause.trim().to_string());
             }
@@ -173,21 +230,88 @@ impl ClauseSplitter {
     }
 
     fn cut(&self) -> Option<usize> {
-        let minimum = if self.spoken_any {
-            CLAUSE_CHARS
+        let first = self.last_units == 0;
+        let target = if first {
+            0
         } else {
-            FIRST_CLAUSE_CHARS
+            (2 * self.last_units).min(MERGE_UNITS)
         };
-        for (index, c) in self.text.char_indices() {
+        let chars: Vec<(usize, char)> = self.text.char_indices().collect();
+        let mut last_end = None;
+        let mut i = 0;
+        while i < chars.len() {
+            let (index, c) = chars[i];
             let end = index + c.len_utf8();
-            if CLAUSE_END.contains(&c) {
+            if first && PAUSES.contains(&c) && units(&self.text[..end]) >= FIRST_CHUNK_UNITS {
                 return Some(end);
             }
-            if CLAUSE_PAUSE.contains(&c) && self.text[..end].trim().chars().count() >= minimum {
+            let ends = SENTENCE_END.contains(&c)
+                || (c == '.'
+                    && chars
+                        .get(i + 1)
+                        .is_some_and(|&(_, next)| period_ends(&self.text, index, next)));
+            if !ends {
+                i += 1;
+                continue;
+            }
+            // The sentence takes the end marks and closers after it; it is
+            // over once something else follows.
+            let mut j = i + 1;
+            while j < chars.len()
+                && (SENTENCE_END.contains(&chars[j].1)
+                    || CLOSERS.contains(&chars[j].1)
+                    || chars[j].1 == '.')
+            {
+                j += 1;
+            }
+            if j == chars.len() {
+                break;
+            }
+            let end = chars[j].0;
+            let length = units(&self.text[..end]);
+            if length > MAX_CHUNK_UNITS && last_end.is_some() {
+                return last_end;
+            }
+            if length >= target {
                 return Some(end);
             }
+            last_end = Some(end);
+            i = j;
+        }
+        if units(&self.text) > MAX_CHUNK_UNITS {
+            return last_end.or_else(|| self.cut_long_sentence());
         }
         None
+    }
+
+    /// Where to cut a sentence over `MAX_CHUNK_UNITS`: after its last pause
+    /// within the limit, else after the last whole word.
+    fn cut_long_sentence(&self) -> Option<usize> {
+        let (mut pause, mut word, mut count, mut in_word) = (None, None, 0, false);
+        for (index, c) in self.text.char_indices() {
+            if c.is_ascii_alphanumeric() {
+                if !in_word {
+                    if count == MAX_CHUNK_UNITS {
+                        break;
+                    }
+                    word = Some(index);
+                    count += 1;
+                }
+                in_word = true;
+                continue;
+            }
+            in_word = false;
+            if c.is_alphanumeric() {
+                if count == MAX_CHUNK_UNITS {
+                    break;
+                }
+                word = Some(index);
+                count += 1;
+            } else if PAUSES.contains(&c) {
+                pause = Some(index + c.len_utf8());
+            }
+        }
+        pause.or(word).filter(|&cut| cut > 0)
     }
 }
 
@@ -221,29 +345,110 @@ mod tests {
         );
     }
 
-    #[test]
-    fn clauses_start_short_then_flow() {
+    fn split(deltas: &[&str]) -> Vec<String> {
         let mut splitter = ClauseSplitter::default();
         let mut clauses = Vec::new();
-        for delta in [
-            "好的，",
-            "我给你讲个笑话：",
-            "为什么熊不喜欢上网",
-            "？因为",
-            "会被熊到。",
-            "哈哈",
-        ] {
+        for delta in deltas {
             clauses.extend(splitter.feed(delta));
         }
         clauses.extend(splitter.flush());
+        clauses
+    }
+
+    #[test]
+    fn clauses_start_short_then_flow() {
         assert_eq!(
-            clauses,
+            split(&[
+                "好的，",
+                "我给你讲个笑话：",
+                "为什么熊不喜欢上网",
+                "？因为",
+                "会被熊到。",
+                "哈哈"
+            ]),
             [
                 "好的，",
                 "我给你讲个笑话：为什么熊不喜欢上网？",
-                "因为会被熊到。",
-                "哈哈"
+                "因为会被熊到。哈哈"
             ]
         );
+    }
+
+    #[test]
+    fn later_chunks_end_only_at_sentence_ends() {
+        assert_eq!(
+            split(&["好的。今天天气不错，我们去公园散步吧，顺便买点水果。回来再说。"]),
+            [
+                "好的。",
+                "今天天气不错，我们去公园散步吧，顺便买点水果。",
+                "回来再说。"
+            ]
+        );
+    }
+
+    #[test]
+    fn short_sentences_merge_as_chunks_grow() {
+        assert_eq!(
+            split(&["嗯。", "对。", "你说得对。", "我们明天见。", "再见。"]),
+            ["嗯。", "对。你说得对。", "我们明天见。再见。"]
+        );
+    }
+
+    #[test]
+    fn a_sentence_end_waits_for_the_next_character() {
+        let mut splitter = ClauseSplitter::default();
+        assert!(splitter.feed("真的吗？").is_empty());
+        assert!(splitter.feed("”").is_empty());
+        assert_eq!(splitter.feed("他笑了"), ["真的吗？”"]);
+        assert!(splitter.feed("……").is_empty());
+        assert_eq!(splitter.flush().as_deref(), Some("他笑了……"));
+    }
+
+    #[test]
+    fn periods_end_english_sentences_but_not_numbers_or_abbreviations() {
+        assert_eq!(
+            split(&["Sure. Mr. Smith paid 3.5 dollars. ", "Then he left. Bye"]),
+            ["Sure.", "Mr. Smith paid 3.5 dollars.", "Then he left. Bye"]
+        );
+        assert_eq!(
+            split(&["1. 先洗手，2. 再吃饭。"]),
+            ["1. 先洗手，", "2. 再吃饭。"]
+        );
+    }
+
+    #[test]
+    fn long_sentences_are_cut_at_their_last_pause() {
+        let long = format!(
+            "{}，{}，{}。",
+            "很".repeat(70),
+            "长".repeat(40),
+            "句".repeat(30)
+        );
+        let clauses = split(&["好。", &long]);
+        let expected_head = format!("{}，{}，", "很".repeat(70), "长".repeat(40));
+        assert_eq!(
+            clauses,
+            [
+                "好。".to_string(),
+                expected_head,
+                format!("{}。", "句".repeat(30))
+            ]
+        );
+    }
+
+    #[test]
+    fn streaming_splits_like_the_whole_text() {
+        let text =
+            "好的，我来说说。首先，Rust 很快。其次，它很安全！最后……就这些。Mr. Lee said so. 谢谢";
+        let whole = split(&[text]);
+        let pieces: Vec<String> = text.chars().map(String::from).collect();
+        let pieces: Vec<&str> = pieces.iter().map(String::as_str).collect();
+        assert_eq!(split(&pieces), whole);
+        assert_eq!(whole.concat().replace(' ', ""), text.replace(' ', ""));
+    }
+
+    #[test]
+    fn units_count_cjk_letters_and_ascii_words() {
+        assert_eq!(units("你好，Rust 2024 world！"), 5);
     }
 }
