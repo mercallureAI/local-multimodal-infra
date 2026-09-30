@@ -76,8 +76,9 @@ const START_TIMEOUT: Duration = Duration::from_secs(30);
 const WARMUP_TIMEOUT: Duration = Duration::from_secs(300);
 /// Audio: how often `state` and finished responses are checked.
 const STATE_TICK: Duration = Duration::from_millis(50);
-/// Audio: cancelled response ids remembered (their late deltas are dropped).
-const CANCELLED_KEPT: usize = 64;
+/// Audio: ids of responses that are over, remembered (their late text is
+/// dropped).
+const OVER_KEPT: usize = 256;
 
 pub enum Inbound {
     Event(ClientEvent),
@@ -750,7 +751,9 @@ fn heard(
         // A backchannel while the bot speaks.
         return;
     }
-    if answer && (busy || restarts) {
+    // In audio mode the client replies: a joined utterance stops only what is
+    // actually going on.
+    if answer && (busy || (restarts && !shared.audio)) {
         // Whatever was made of the utterance's first part goes too.
         shared.cut();
     }
@@ -1058,6 +1061,16 @@ impl Shared {
     /// audio mode, every response being spoken, each told as done).
     fn cut(&self) {
         let mut responses = self.responses.lock().unwrap();
+        let events = self.cut_locked(&mut responses);
+        drop(responses);
+        for event in events {
+            self.emit(event);
+        }
+    }
+
+    /// `cut` with the responses already locked; returns the events to send
+    /// once the lock is released.
+    fn cut_locked(&self, responses: &mut Responses) -> Vec<ServerEvent> {
         let mut spoken = Vec::new();
         self.player.clear_with(|state| {
             self.epoch.fetch_add(1, Ordering::SeqCst);
@@ -1072,22 +1085,25 @@ impl Shared {
                 spoken.push((response.id.clone(), text));
             }
         });
-        let current = responses.open.last().map(|response| response.id.clone());
+        // The one speaking (the others wait behind it).
+        let current = responses.open.first().map(|response| response.id.clone());
         let cut: Vec<String> = responses.open.drain(..).map(|r| r.id).collect();
         for id in cut {
-            responses.cancel(id);
+            responses.close(id);
         }
-        drop(responses);
-        self.emit(ServerEvent::ResponseCut {
+        let mut events = vec![ServerEvent::ResponseCut {
             response_id: current,
-        });
-        for (response_id, spoken) in spoken {
-            self.emit(ServerEvent::ResponseDone {
-                response_id,
-                spoken,
-                cut: true,
-            });
-        }
+        }];
+        events.extend(
+            spoken
+                .into_iter()
+                .map(|(response_id, spoken)| ServerEvent::ResponseDone {
+                    response_id,
+                    spoken,
+                    cut: true,
+                }),
+        );
+        events
     }
 
     /// Ends the conversation: replies and relays stop, speech is dropped.
@@ -1135,20 +1151,15 @@ impl Shared {
                 self.response_text(&response_id, "", true);
             }
             ClientEvent::ResponseCancel { response_id } => {
-                let open = {
-                    let mut responses = self.responses.lock().unwrap();
-                    let open = match &response_id {
-                        None => !responses.open.is_empty(),
-                        Some(id) => responses.open.iter().any(|response| &response.id == id),
-                    };
-                    if let (false, Some(id)) = (open, response_id) {
-                        // Not started yet: its text is dropped when it comes.
-                        responses.cancel(id);
-                    }
-                    open
+                let mut responses = self.responses.lock().unwrap();
+                let events = match response_id {
+                    None if responses.open.is_empty() => Vec::new(),
+                    None => self.cut_locked(&mut responses),
+                    Some(id) => self.cancel_locked(&mut responses, id),
                 };
-                if open {
-                    self.cut();
+                drop(responses);
+                for event in events {
+                    self.emit(event);
                 }
             }
             ClientEvent::Say { text } => {
@@ -1165,17 +1176,46 @@ impl Shared {
         }
     }
 
+    /// Audio: stops the response `id`. The one speaking (or one whose
+    /// speech is on its way) stops the bot, with what waits behind it;
+    /// one still waiting its turn just goes; one not started yet never
+    /// starts. Returns the events to send.
+    fn cancel_locked(&self, responses: &mut Responses, id: String) -> Vec<ServerEvent> {
+        if responses.is_over(&id) {
+            return Vec::new();
+        }
+        let Some(at) = responses.open.iter().position(|r| r.id == id) else {
+            responses.close(id.clone());
+            return vec![ServerEvent::ResponseDone {
+                response_id: id,
+                spoken: String::new(),
+                cut: true,
+            }];
+        };
+        if at == 0 || responses.open[at].pending > 0 || !responses.open[at].spoken.is_empty() {
+            return self.cut_locked(responses);
+        }
+        responses.open.remove(at);
+        responses.close(id.clone());
+        vec![ServerEvent::ResponseDone {
+            response_id: id,
+            spoken: String::new(),
+            cut: true,
+        }]
+    }
+
     /// Audio: more text of `response_id` (its end, when `end`).
     fn response_text(&self, response_id: &str, text: &str, end: bool) {
         {
             let mut responses = self.responses.lock().unwrap();
-            if responses.cancelled.iter().any(|id| id == response_id) {
+            if responses.is_over(response_id) {
                 return;
             }
             let at = match responses.open.iter().position(|r| r.id == response_id) {
                 Some(at) => at,
                 None if end => {
                     // Nothing to say: it is over at once.
+                    responses.close(response_id.to_string());
                     drop(responses);
                     self.emit(ServerEvent::ResponseDone {
                         response_id: response_id.to_string(),
@@ -1189,24 +1229,37 @@ impl Shared {
                     responses.open.len() - 1
                 }
             };
-            let epoch = self.current_epoch();
             let response = &mut responses.open[at];
             if response.ended {
                 return;
             }
-            let mut clauses = response.splitter.feed(text);
+            let clauses = response.splitter.feed(text);
+            response.held.extend(clauses);
             if end {
-                clauses.extend(response.splitter.flush());
+                response.held.extend(response.splitter.flush());
                 response.ended = true;
             }
-            for clause in clauses {
-                if self.speak(epoch, &clause, Some(response_id)) {
-                    response.pending += 1;
-                }
-            }
+            self.release(&mut responses);
         }
         if end {
             self.check_done();
+        }
+    }
+
+    /// Audio: gives TTS the clauses whose turn it is: a response speaks once
+    /// every earlier one has all its text (so responses play one after the
+    /// other, not interleaved).
+    fn release(&self, responses: &mut Responses) {
+        let epoch = self.current_epoch();
+        for response in responses.open.iter_mut() {
+            for clause in std::mem::take(&mut response.held) {
+                if self.speak(epoch, &clause, Some(&response.id)) {
+                    response.pending += 1;
+                }
+            }
+            if !response.ended {
+                break;
+            }
         }
     }
 
@@ -1238,6 +1291,7 @@ impl Shared {
             let heard = state.heard();
             responses.open.retain_mut(|response| {
                 let finished = response.ended
+                    && response.held.is_empty()
                     && response.pending == 0
                     && !state
                         .segments
@@ -1251,6 +1305,9 @@ impl Shared {
             state
                 .segments
                 .retain(|segment| !done.iter().any(|(id, _)| *id == segment.response));
+            for (id, _) in &done {
+                responses.close(id.clone());
+            }
         }
         for (response_id, spoken) in done {
             self.emit(ServerEvent::ResponseDone {
@@ -1404,7 +1461,14 @@ async fn synthesize_clauses(shared: Arc<Shared>, mut clauses: mpsc::UnboundedRec
                         segment,
                     );
                 }
-                Err(err) => tracing::warn!(error = %err, text, "voice cascade TTS failed"),
+                Err(err) => {
+                    tracing::warn!(error = %err, text, "voice cascade TTS failed");
+                    if response.is_some() {
+                        shared.emit(ServerEvent::Error {
+                            message: format!("speech synthesis failed: {err}"),
+                        });
+                    }
+                }
             }
         }
         shared.clauses.fetch_sub(1, Ordering::SeqCst);
@@ -1435,20 +1499,25 @@ async fn report_state(shared: Arc<Shared>) {
     }
 }
 
-/// Audio: the responses being spoken (oldest first) and those cut.
+/// Audio: the responses being spoken (oldest first) and those over.
 #[derive(Default)]
 struct Responses {
     open: Vec<OpenResponse>,
-    /// Stopped responses: text still coming for them is dropped.
-    cancelled: VecDeque<String>,
+    /// Responses that are over (done, cut or cancelled): text or an end still
+    /// coming for them is dropped.
+    over: VecDeque<String>,
 }
 
 impl Responses {
-    fn cancel(&mut self, id: String) {
-        self.cancelled.push_back(id);
-        while self.cancelled.len() > CANCELLED_KEPT {
-            self.cancelled.pop_front();
+    fn close(&mut self, id: String) {
+        self.over.push_back(id);
+        while self.over.len() > OVER_KEPT {
+            self.over.pop_front();
         }
+    }
+
+    fn is_over(&self, id: &str) -> bool {
+        self.over.iter().any(|over| over == id)
     }
 }
 
@@ -1457,6 +1526,8 @@ struct OpenResponse {
     splitter: ClauseSplitter,
     /// Its text is complete.
     ended: bool,
+    /// Clauses waiting for the responses before it to be given to TTS.
+    held: Vec<String>,
     /// Clauses given to TTS and not yet queued to play (or dropped).
     pending: usize,
     /// The text of its clauses queued to play.
@@ -1469,6 +1540,7 @@ impl OpenResponse {
             id: id.to_string(),
             splitter: ClauseSplitter::default(),
             ended: false,
+            held: Vec::new(),
             pending: 0,
             spoken: String::new(),
         }
@@ -1628,6 +1700,10 @@ async fn play(shared: Arc<Shared>) {
         if let Some(send_at) = until.checked_sub(PLAY_LEAD) {
             tokio::time::sleep_until(send_at.into()).await;
         }
+        let bytes: Vec<u8> = frame
+            .iter()
+            .flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())
+            .collect();
         {
             let mut state = player.state.lock().unwrap();
             if state.generation != generation {
@@ -1635,6 +1711,8 @@ async fn play(shared: Arc<Shared>) {
             }
             state.until += Duration::from_secs_f64(frame.len() as f64 / OUTPUT_RATE as f64);
             state.sent += frame.len() as u64;
+            // Sent under the lock: a cut (which clears under it) comes after.
+            let _ = shared.out.send(Outbound::Audio(bytes));
         }
         if let Some(ended) = shared.speech_ended_at.lock().unwrap().take() {
             tracing::info!(
@@ -1642,11 +1720,6 @@ async fn play(shared: Arc<Shared>) {
                 "voice cascade answer starts playing"
             );
         }
-        let bytes = frame
-            .iter()
-            .flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())
-            .collect();
-        let _ = shared.out.send(Outbound::Audio(bytes));
     }
 }
 
@@ -1972,7 +2045,76 @@ mod tests {
         shared.audio_event(delta("r2", "不该说出来的话。"));
         shared.audio_event(end("r2"));
         assert!(clauses.try_recv().is_err());
+        // It is over at once, and only once.
+        let told = events(&mut out);
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0]["type"], "response.done");
+        assert_eq!(told[0]["response_id"], "r2");
+        assert_eq!(told[0]["cut"], true);
+    }
+
+    #[test]
+    fn responses_are_spoken_one_after_the_other() {
+        let (shared, mut out, mut clauses) = audio_shared();
+        shared.audio_event(delta("r1", "第一句。"));
+        shared.audio_event(delta("r2", "插进来的话。"));
+        shared.audio_event(end("r2"));
+        // r2 waits until r1 has all its text.
+        assert_eq!(synthesize_next(&shared, &mut clauses, 10), "第一句。");
+        assert!(clauses.try_recv().is_err());
+        shared.audio_event(delta("r1", "第二句。"));
+        shared.audio_event(end("r1"));
+        assert_eq!(synthesize_next(&shared, &mut clauses, 10), "第二句。");
+        assert_eq!(synthesize_next(&shared, &mut clauses, 10), "插进来的话。");
+        play(&shared, 30);
+        shared.check_done();
+        let done: Vec<String> = events(&mut out)
+            .into_iter()
+            .filter(|e| e["type"] == "response.done")
+            .map(|e| e["response_id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(done, ["r1", "r2"]);
+    }
+
+    #[test]
+    fn cancelling_a_waiting_response_leaves_the_one_speaking() {
+        let (shared, mut out, mut clauses) = audio_shared();
+        shared.audio_event(delta("r1", "正在说的话。"));
+        synthesize_next(&shared, &mut clauses, 10);
+        shared.audio_event(delta("r2", "排在后面的话。"));
+        shared.audio_event(ClientEvent::ResponseCancel {
+            response_id: Some("r2".into()),
+        });
+        let told = events(&mut out);
+        assert!(told.iter().all(|e| e["type"] != "response.cut"), "{told:?}");
+        let done = told.iter().find(|e| e["type"] == "response.done").unwrap();
+        assert_eq!(done["response_id"], "r2");
+        assert!(shared.player.speaking());
+        shared.audio_event(end("r1"));
+        shared.audio_event(end("r2"));
+        assert!(clauses.try_recv().is_err());
+        play(&shared, 10);
+        shared.check_done();
+        let told = events(&mut out);
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0]["response_id"], "r1");
+    }
+
+    #[test]
+    fn a_finished_response_stays_finished() {
+        let (shared, mut out, mut clauses) = audio_shared();
+        shared.audio_event(delta("r1", "说完了。"));
+        shared.audio_event(end("r1"));
+        synthesize_next(&shared, &mut clauses, 10);
+        play(&shared, 10);
+        shared.check_done();
+        events(&mut out);
+        // A late end or text of it changes nothing.
+        shared.audio_event(end("r1"));
+        shared.audio_event(delta("r1", "迟到的话。"));
         assert!(events(&mut out).is_empty());
+        assert!(clauses.try_recv().is_err());
+        assert!(!shared.responding());
     }
 
     #[test]

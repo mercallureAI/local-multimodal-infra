@@ -696,6 +696,7 @@ impl LoadedModel {
         sink: &mut dyn FnMut(InferenceEvent) -> bool,
     ) -> Result<InferenceOutput> {
         #[cfg(test)]
+        #[allow(irrefutable_let_patterns)] // a build without model categories
         if let LoadedModel::Test { panic_on_infer, .. } = self {
             if panic_on_infer.swap(false, Ordering::SeqCst) {
                 panic!("intentional test executor panic");

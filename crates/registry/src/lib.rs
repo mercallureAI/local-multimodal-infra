@@ -145,11 +145,14 @@ pub fn load_yaml_specs(path: impl AsRef<Path>) -> Result<Vec<ModelSpec>> {
 fn spec_files(dir: &Path) -> Result<Vec<(PathBuf, Option<ModelCategory>)>> {
     let mut files = Vec::new();
     for (path, is_dir) in sorted_entries(dir)? {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if is_dir && name.starts_with('.') {
+            continue; // hidden (an editor's, a backup)
+        }
         if is_dir {
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
             let category = ModelCategory::from_name(name).ok_or_else(|| {
                 InfraError::Registry(format!(
                     "unknown model category directory {} (expected one of: {})",
@@ -160,6 +163,8 @@ fn spec_files(dir: &Path) -> Result<Vec<(PathBuf, Option<ModelCategory>)>> {
             for (file, is_dir) in sorted_entries(&path)? {
                 if !is_dir && is_yaml(&file) {
                     files.push((file, Some(category)));
+                } else if is_dir {
+                    tracing::warn!(path = %file.display(), "model specs are read one level below a category directory only; ignored");
                 }
             }
         } else if is_yaml(&path) {
@@ -173,8 +178,8 @@ fn sorted_entries(dir: &Path) -> Result<Vec<(PathBuf, bool)>> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(dir).map_err(|e| InfraError::io(Some(dir.to_path_buf()), e))? {
         let entry = entry.map_err(|e| InfraError::io(Some(dir.to_path_buf()), e))?;
-        let is_dir = entry
-            .file_type()
+        // Followed through symlinks (a linked category directory).
+        let is_dir = fs::metadata(entry.path())
             .map_err(|e| InfraError::io(Some(entry.path()), e))?
             .is_dir();
         entries.push((entry.path(), is_dir));

@@ -63,14 +63,28 @@ talked over work as above; the client gets:
 - `state` (`speaking`, `listening`) whenever either changes, which tells the
   client when the bot is idle (e.g. to tell a task's result);
 - `response.done` once a response is over: fully heard, or `cut` (someone
-  talked over the bot, or the client cancelled it), with `spoken`, the text
-  the listener actually heard (what the client should keep in its history).
+  talked over the bot, or the client cancelled it), with `spoken`, the
+  clauses the listener heard at least the start of (what the client should
+  keep in its history). Every response gets exactly one, a response cancelled
+  before it started included (cut, nothing spoken).
 
 The client speaks by streaming `response.delta` (text, split into clauses
 and spoken as it comes) and `response.end` under a `response_id` of its
-choosing; responses play one after the other. `response.cancel` stops the
-bot (text still arriving for a cancelled id is dropped), and `say` speaks a
-text as it is.
+choosing, unique within the session; responses play one after the other (a
+later one waits until every earlier one has all its text). `response.cancel`
+with the id of a response still waiting its turn drops just that one; with
+the id of the one speaking, or with no id, it stops the bot (and everything
+waiting). Text still arriving for a response that is over is dropped. `say`
+speaks a text as it is.
+
+The server only knows the bot is busy once the client's first delta comes:
+an utterance while the client's model is still thinking gets `respond: true`
+and cuts nothing, so the client should stop its own pending reply (the
+`replaces` id tells it when the speaker only paused).
+
+A worker built without the `chat` category (`--features audio`) serves only
+audio mode sessions: do not register it beside workers that cascade mode
+clients reach.
 
 ## Connection
 

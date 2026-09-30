@@ -62,6 +62,8 @@ class Client:
         self.audio_mode = audio_mode
         self.long_reply = False
         self.replies = 0
+        # Audio mode: the reply task and response id of each utterance id.
+        self.reply_tasks: dict = {}
         self.events: list[tuple[float, dict]] = []
         self.audio = bytearray()
         self.audio_times: list[float] = []
@@ -95,14 +97,21 @@ class Client:
                 print(f"  [{kind}] {event.get('speaker', '')} {event.get('text', event.get('message', ''))}")
                 if self.audio_mode and kind == "input.transcript" and event.get("respond"):
                     print(f"    id={event.get('id')} replaces={event.get('replaces')}")
-                    asyncio.ensure_future(self.reply(event["text"]))
+                    # An utterance that continues an earlier one replaces it:
+                    # the earlier reply goes.
+                    old = self.reply_tasks.pop(event.get("replaces"), None)
+                    if old is not None:
+                        old[0].cancel()
+                        await self.ws.send(json.dumps({"type": "response.cancel", "response_id": old[1]}))
+                    self.replies += 1
+                    response_id = f"reply-{self.replies}"
+                    task = asyncio.ensure_future(self.reply(event["text"], response_id))
+                    self.reply_tasks[event.get("id")] = (task, response_id)
             elif kind in ("response.done", "state"):
                 print(f"  [{kind}] {json.dumps({k: v for k, v in event.items() if k != 'type'}, ensure_ascii=False)}")
 
-    async def reply(self, heard: str) -> None:
+    async def reply(self, heard: str, response_id: str) -> None:
         """Audio mode: streams an answer, a few characters every 30 ms."""
-        self.replies += 1
-        response_id = f"reply-{self.replies}"
         text = LONG_REPLY if self.long_reply else SHORT_REPLY.format(text=heard)
         await asyncio.sleep(0.3)  # the model's first token
         for i in range(0, len(text), 4):
@@ -177,6 +186,8 @@ async def session(url: str, token: str, group: bool, out_wav: Path, audio_mode: 
         if audio_mode:
             dones = [e for _, e in client.events if e["type"] == "response.done"]
             print(f"  response.done events: {len(dones)}, cut: {sum(1 for e in dones if e['cut'])}")
+        for task, _ in client.reply_tasks.values():
+            task.cancel()
         await ws.send(json.dumps({"type": "session.stop"}))
         await asyncio.sleep(0.5)
         reader.cancel()
