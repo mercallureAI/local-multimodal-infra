@@ -2012,7 +2012,9 @@ mod tests {
     #[test]
     fn a_cut_tells_what_was_heard_and_drops_the_rest() {
         let (shared, mut out, mut clauses) = audio_shared();
-        shared.audio_event(delta("r1", "第一句话说完了。第二句话还没说。"));
+        // Chunks: "好的，" (the first may end at a pause), then whole
+        // sentences once the next one begins.
+        shared.audio_event(delta("r1", "好的，第一句话说完了。第二句话还没说。"));
         let first = synthesize_next(&shared, &mut clauses, 100);
         synthesize_next(&shared, &mut clauses, 100);
         play(&shared, 60);
@@ -2063,11 +2065,11 @@ mod tests {
     #[test]
     fn responses_are_spoken_one_after_the_other() {
         let (shared, mut out, mut clauses) = audio_shared();
-        shared.audio_event(delta("r1", "第一句。"));
+        shared.audio_event(delta("r1", "第一句，"));
         shared.audio_event(delta("r2", "插进来的话。"));
         shared.audio_event(end("r2"));
         // r2 waits until r1 has all its text.
-        assert_eq!(synthesize_next(&shared, &mut clauses, 10), "第一句。");
+        assert_eq!(synthesize_next(&shared, &mut clauses, 10), "第一句，");
         assert!(clauses.try_recv().is_err());
         shared.audio_event(delta("r1", "第二句。"));
         shared.audio_event(end("r1"));
@@ -2086,7 +2088,7 @@ mod tests {
     #[test]
     fn cancelling_a_waiting_response_leaves_the_one_speaking() {
         let (shared, mut out, mut clauses) = audio_shared();
-        shared.audio_event(delta("r1", "正在说的话。"));
+        shared.audio_event(delta("r1", "正在说的话，"));
         synthesize_next(&shared, &mut clauses, 10);
         shared.audio_event(delta("r2", "排在后面的话。"));
         shared.audio_event(ClientEvent::ResponseCancel {
