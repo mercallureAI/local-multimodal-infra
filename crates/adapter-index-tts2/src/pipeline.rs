@@ -730,7 +730,8 @@ mod real_model {
 
     /// Polyphones, neutral tones and numbers, each read with and without the
     /// Mandarin frontend (same seed) into `LOCAL_INDEXTTS2_AB_DIR`
-    /// (`on_NN.wav`, `off_NN.wav`, `cases.tsv`) for ASR and listening.
+    /// (`on_NN.wav`, `off_NN.wav`, `cases.tsv`) for ASR and listening;
+    /// `LOCAL_INDEXTTS2_AB_TEXT` names a file of other sentences, one a line.
     #[test]
     fn mandarin_frontend_ab_if_env_set() {
         let (Ok(model_dir), Ok(reference), Ok(ab_dir)) = (
@@ -761,6 +762,13 @@ mod real_model {
             "音乐让人快乐，调皮的孩子在调音。",
             "我们都觉得都市的空气没有乡下好。",
         ];
+        // `LOCAL_INDEXTTS2_AB_TEXT`: a file whose non-empty lines replace them.
+        let custom = env::var("LOCAL_INDEXTTS2_AB_TEXT")
+            .map(|path| fs::read_to_string(path).expect("read LOCAL_INDEXTTS2_AB_TEXT"));
+        let texts: Vec<&str> = match &custom {
+            Ok(text) => text.lines().filter(|line| !line.trim().is_empty()).collect(),
+            Err(_) => texts.to_vec(),
+        };
         let params: BTreeMap<String, Value> =
             serde_json::from_value(json!({"seed": 9527})).unwrap();
         let mut cases = String::new();
