@@ -19,8 +19,10 @@ server does the rest:
    silent (`silence` tool) or hand a task to the client (`backend_task`
    tool). Every turn offers the same tools, so the server reuses the cached
    prompt prefix; turns that must speak are steered with logit biases.
-4. **IndexTTS** speaks the answer chunk by chunk while it is still being
-   generated; the server sends the audio at real-time pace (0.3 s ahead).
+4. **Qwen3-TTS** (or IndexTTS) speaks the answer clause by clause while it is
+   still being generated; Qwen3-TTS streams each clause too, so a clause
+   starts playing about 50 ms after it is asked for (see `docs/qwen3-tts.md`).
+   The server sends the audio at real-time pace (0.3 s ahead).
    Chunks are whole sentences (only the first may end at a comma, so speech
    starts early), merged until each is about twice as long as the one before
    it, up to 60 characters; only a sentence longer than 120 is cut at a comma.
@@ -33,7 +35,8 @@ ends the bot's speech and its generation, and the server sends
 
 The chat, ASR and TTS models are named by the `voice-cascade` model
 (`configs/providers/realtime/voice-cascade.yaml`, whose artifact is the VAD model) and
-must be enabled. With IndexTTS-2.5 the bot speaks with a fixed emotion,
+must be enabled (`tts_model` defaults to `qwen3-tts-0.6b-onnx`, a local
+export). With IndexTTS-2.5 the bot speaks with a fixed emotion,
 `tts_emotion` (default `calm`; `none` keeps the reference voice's own) at
 `tts_emotion_strength` (default 0.8); a session may choose its own
 (`session.start` config). A session loads them all before
@@ -129,6 +132,8 @@ clients are not browsers.
 | `speaker` | | Cascade: the person talking, one to one. |
 | `instructions` | | Cascade: a persona appended to the bot's instructions. |
 | `ref_audio` | model's `default_reference_audio` | The voice: a WAV file, base64. |
+| `ref_text` | model's `default_reference_text` (with its audio) | What `ref_audio` says: Qwen3-TTS clones the voice in context (closer) instead of from its x-vector alone. |
+| `tts_language` | model's `tts_language` | Qwen3-TTS: chinese, english, japanese, korean, german, french, russian, portuguese, spanish, italian (unset: the model decides). |
 | `tool_filler` | none | Cascade: said right away when a task is handed off. |
 | `chat_model`, `asr_model`, `tts_model` | the model's `metadata` | |
 | `tts_emotion`, `tts_emotion_strength` | the model's `metadata` (`calm`, 0.8) | IndexTTS-2.5 emotion: happy, angry, sad, afraid, disgusted, melancholic, surprised, calm, or none; strength 0 to 1. |

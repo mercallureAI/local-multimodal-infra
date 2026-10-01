@@ -66,6 +66,7 @@ Repo-specific instructions for future OpenCode agents. Higher-priority user inst
 - Unlimited-OCR package: `python -m scripts.local.unlimited_ocr_export export --source <baidu/Unlimited-OCR checkout> --out workdir/models/unlimited-ocr-onnx` (from the PyTorch checkpoint; Python 3.11 with the upstream pins `torch==2.10.0`, `torchvision==0.25.0`, `transformers==4.57.1`, plus `onnx onnxruntime-gpu==1.30.0 einops addict easydict safetensors pillow matplotlib`). `parity` compares a package with the PyTorch model token by token.
 - Standard MCP validation client: `python -m scripts.local.mcp_standard_client --admin-token <token> --full` (requires the official Python `mcp` SDK in that interpreter).
 - IndexTTS export top-level entrypoint `scripts/indextts_export.py` delegates to `scripts.local.indextts_export`; do not use old `tools/indextts` paths.
+- Qwen3-TTS: `python -m scripts.local.qwen3_tts_export --help` (export; needs torch + qwen-tts, and an onnxruntime-genai interpreter via `--builder-python`), `python -m scripts.local.qwen3_tts_onnx_run --help` (Python reference pipeline); design, numbers and checks in `docs/qwen3-tts.md`.
 
 Release smoke examples:
 
