@@ -92,7 +92,8 @@ In-context cloning puts the text under the reference codes, so it starts only
 once the text covers them (about 70 tokens for a 7 s reference): no gain there.
 
 The cascade speaks a reply's first clause while the chat model writes it
-(`tts_stream_text`, on by default); later clauses are ready before the first
+(`tts_stream_text`, on by default; only with a TTS model that takes
+streamed text, `RuntimeManager::streams_text`); later clauses are ready before the first
 has played. The first audio chunk needs about 4 text tokens (plus 2 held
 back), so the gain is for first clauses longer than that: on the 4090
 (Qwen3-4B INT4 writes ~8 ms per token) a 9-token first clause starts speaking

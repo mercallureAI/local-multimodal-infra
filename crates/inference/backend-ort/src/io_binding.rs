@@ -79,6 +79,8 @@ pub struct ResidentCudaTensor {
     value: DynValue,
     shape: [usize; 4],
     device_id: u32,
+    /// Last: held while the fields above are released (see `Drop`).
+    drop_gate: crate::gpu_gate::DropGate,
 }
 
 impl ResidentCudaTensor {
@@ -642,12 +644,15 @@ impl OrtSession {
         }
 
         let result = (|| {
-            let _gate = crate::gpu_shared();
-            let outputs = self
-                .real
-                .session
-                .run_binding(&binding.binding)
-                .map_err(map_ort_err)?;
+            let outputs = {
+                // The run only: the tensors made below take the gate again
+                // when they drop.
+                let _gate = crate::gpu_shared();
+                self.real
+                    .session
+                    .run_binding(&binding.binding)
+                    .map_err(map_ort_err)?
+            };
             let expected_names = binding
                 .cuda_outputs
                 .iter()
@@ -718,6 +723,7 @@ fn validate_resident_cuda_tensor(
         expected_device_id,
     )?;
     Ok(ResidentCudaTensor {
+        drop_gate: Default::default(),
         value: value.into_dyn(),
         shape,
         device_id: expected_device_id,
@@ -890,6 +896,37 @@ fn extract_cpu_output(name: &str, value: DynValue) -> Result<OrtTensorOutput> {
     )))
 }
 
+impl Drop for ResidentCudaTensor {
+    fn drop(&mut self) {
+        // Its device buffer is freed as the fields drop: not during a capture.
+        self.drop_gate.hold();
+    }
+}
+
+impl Drop for PinnedCudaIoBinding {
+    fn drop(&mut self) {
+        // Its device buffers (and possibly the session) are freed as the
+        // fields drop: not while a CUDA graph is being captured.
+        self.drop_gate.hold();
+    }
+}
+
+impl Drop for PinnedCudaF32IoBinding {
+    fn drop(&mut self) {
+        // Its device buffers (and possibly the session) are freed as the
+        // fields drop: not while a CUDA graph is being captured.
+        self.drop_gate.hold();
+    }
+}
+
+impl Drop for ResidentIoBinding {
+    fn drop(&mut self) {
+        // Its device buffers (and possibly the session) are freed as the
+        // fields drop: not while a CUDA graph is being captured.
+        self.drop_gate.hold();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -971,29 +1008,5 @@ mod tests {
             0,
         )
         .is_err());
-    }
-}
-
-impl Drop for PinnedCudaIoBinding {
-    fn drop(&mut self) {
-        // Its device buffers (and possibly the session) are freed as the
-        // fields drop: not while a CUDA graph is being captured.
-        self.drop_gate.hold();
-    }
-}
-
-impl Drop for PinnedCudaF32IoBinding {
-    fn drop(&mut self) {
-        // Its device buffers (and possibly the session) are freed as the
-        // fields drop: not while a CUDA graph is being captured.
-        self.drop_gate.hold();
-    }
-}
-
-impl Drop for ResidentIoBinding {
-    fn drop(&mut self) {
-        // Its device buffers (and possibly the session) are freed as the
-        // fields drop: not while a CUDA graph is being captured.
-        self.drop_gate.hold();
     }
 }

@@ -155,6 +155,14 @@ impl RuntimeManager {
         self.infer_with_events(task, Some(events), None).await
     }
 
+    /// Whether `model_id` speaks text as it is written
+    /// ([`Self::infer_streaming_text`]) rather than once it has ended.
+    pub fn streams_text(&self, model_id: &str) -> bool {
+        self.specs
+            .get(model_id)
+            .is_some_and(|spec| spec.adapter == AdapterKind::Qwen3Tts)
+    }
+
     /// Like [`Self::infer_streaming`] for a TTS task whose text is still
     /// being written: `text` brings it piece by piece (the task's own text is
     /// ignored). A model that streams text (Qwen3-TTS) speaks it as it comes;

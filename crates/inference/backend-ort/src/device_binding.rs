@@ -22,6 +22,8 @@ pub struct DeviceTensor {
     value: DynValue,
     shape: Vec<usize>,
     element: TensorElement,
+    /// Last: held while the fields above are released (see `Drop`).
+    drop_gate: crate::gpu_gate::DropGate,
 }
 
 impl DeviceTensor {
@@ -198,12 +200,15 @@ impl OrtSession {
         }
 
         let result = (|| {
-            let _gate = crate::gpu_shared();
-            let outputs = self
-                .real
-                .session
-                .run_binding(&binding.binding)
-                .map_err(map_ort_err)?;
+            let outputs = {
+                // The run only: the tensors made below take the gate again
+                // when they drop.
+                let _gate = crate::gpu_shared();
+                self.real
+                    .session
+                    .run_binding(&binding.binding)
+                    .map_err(map_ort_err)?
+            };
             let mut collected = DeviceBindingOutputs::default();
             for (name, value) in outputs {
                 if binding
@@ -238,6 +243,7 @@ fn device_tensor(name: &str, value: DynValue) -> Result<DeviceTensor> {
     let element = tensor_element(*tensor.data_type());
     let shape = shape_to_usize(name, tensor.shape())?;
     Ok(DeviceTensor {
+        drop_gate: Default::default(),
         value: tensor.into_dyn(),
         shape,
         element,
@@ -312,6 +318,21 @@ fn validate_binding_output_names<'a>(
     Ok(())
 }
 
+impl Drop for DeviceTensor {
+    fn drop(&mut self) {
+        // Its device buffer is freed as the fields drop: not during a capture.
+        self.drop_gate.hold();
+    }
+}
+
+impl Drop for DeviceBinding {
+    fn drop(&mut self) {
+        // Its device buffers (and possibly the session) are freed as the
+        // fields drop: not while a CUDA graph is being captured.
+        self.drop_gate.hold();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,13 +344,5 @@ mod tests {
         assert!(validate_binding_output_names(available, ["a"], ["b"]).is_err());
         assert!(validate_binding_output_names(available, ["a", "a"], ["b", "c"]).is_err());
         assert!(validate_binding_output_names(available, ["a"], ["b", "d"]).is_err());
-    }
-}
-
-impl Drop for DeviceBinding {
-    fn drop(&mut self) {
-        // Its device buffers (and possibly the session) are freed as the
-        // fields drop: not while a CUDA graph is being captured.
-        self.drop_gate.hold();
     }
 }

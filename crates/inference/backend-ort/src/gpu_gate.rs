@@ -25,6 +25,12 @@ pub(crate) fn gpu_exclusive() -> RwLockWriteGuard<'static, ()> {
 #[derive(Default)]
 pub(crate) struct DropGate(Option<RwLockReadGuard<'static, ()>>);
 
+impl Clone for DropGate {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
 impl DropGate {
     pub(crate) fn hold(&mut self) {
         self.0 = Some(gpu_shared());

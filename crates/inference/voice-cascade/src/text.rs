@@ -116,7 +116,6 @@ pub fn takes_floor(text: &str, names: Option<&[String]>) -> bool {
     false
 }
 
-/// Plain spoken text: no Markdown, links or emoji.
 /// The part of a clause still being written that is sure to stay in it: a
 /// first clause with neither pause nor sentence end is cut near its
 /// `MAX_CHUNK_UNITS`th unit (`cut_long_sentence`), and text past that goes to
@@ -142,6 +141,7 @@ pub fn live_prefix(text: &str) -> &str {
     text
 }
 
+/// Plain spoken text: no Markdown, links or emoji.
 pub fn speakable(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut in_code = false;
@@ -316,8 +316,11 @@ impl ClauseSplitter {
     }
 
     /// Where to cut a sentence over `MAX_CHUNK_UNITS`: after its last pause
-    /// within the limit, else after the last whole word.
+    /// within the limit, else after the last whole word. A first chunk is cut
+    /// at the word: its pauses are all too early to have cut it (`cut`), and
+    /// it may already be speaking up to near the limit (`live_prefix`).
     fn cut_long_sentence(&self) -> Option<usize> {
+        let first = self.last_units == 0;
         let (mut pause, mut word, mut count, mut in_word) = (None, None, 0, false);
         for (index, c) in self.text.char_indices() {
             if c.is_ascii_alphanumeric() {
@@ -338,7 +341,7 @@ impl ClauseSplitter {
                 }
                 word = Some(index);
                 count += 1;
-            } else if PAUSES.contains(&c) {
+            } else if !first && PAUSES.contains(&c) {
                 pause = Some(index + c.len_utf8());
             }
         }
@@ -352,16 +355,20 @@ mod tests {
 
     #[test]
     fn a_live_prefix_stops_before_an_overlong_clause_is_cut() {
-        let long: String = "很".repeat(MAX_CHUNK_UNITS + 10);
-        let mut splitter = ClauseSplitter::default();
-        let clause = splitter.feed(&long).remove(0);
-        let prefix = live_prefix(&long);
-        assert!(
-            clause.starts_with(prefix),
-            "{} vs {}",
-            prefix.len(),
-            clause.len()
-        );
+        let long = "很".repeat(MAX_CHUNK_UNITS + 10);
+        let early_pause = format!("好，{long}");
+        let words = format!("OK, {}", "very ".repeat(MAX_CHUNK_UNITS + 10));
+        for text in [&long, &early_pause, &words] {
+            let mut splitter = ClauseSplitter::default();
+            let clause = splitter.feed(text).remove(0);
+            let prefix = live_prefix(text).trim_end();
+            assert!(
+                clause.starts_with(prefix),
+                "{} vs {}",
+                prefix.len(),
+                clause.len()
+            );
+        }
         assert_eq!(live_prefix("好的，see you"), "好的，see you");
     }
 

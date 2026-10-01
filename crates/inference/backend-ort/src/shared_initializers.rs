@@ -37,6 +37,8 @@ pub struct SharedInitializers {
     _owners: Arc<Vec<DynValue>>,
     cuda_device: Option<u32>,
     bytes: u64,
+    /// Last: held while the fields above are released (see `Drop`).
+    drop_gate: crate::gpu_gate::DropGate,
 }
 
 impl SharedInitializers {
@@ -127,6 +129,7 @@ impl OrtBackend {
         uploaded.sort_by_key(|(index, _)| *index);
         values.extend(uploaded.into_iter().map(|(_, value)| value));
         Ok(SharedInitializers {
+            drop_gate: Default::default(),
             values: Arc::new(values),
             _owners: Arc::new(owners),
             cuda_device,
@@ -247,6 +250,13 @@ pub(crate) fn device_view(
         .ok_or_else(|| InfraError::Backend(format!("wrap `{what}` returned null")))?;
     // SAFETY: `out` is a fresh OrtValue owned by the returned Value.
     Ok(unsafe { DynValue::from_ptr(out, None) })
+}
+
+impl Drop for SharedInitializers {
+    fn drop(&mut self) {
+        // The last clone frees the device buffers: not during a capture.
+        self.drop_gate.hold();
+    }
 }
 
 #[cfg(test)]

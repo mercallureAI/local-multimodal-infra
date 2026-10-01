@@ -126,8 +126,9 @@ pub struct CascadeModels {
     /// when unset).
     pub tts_language: Option<String>,
     /// Speak the first clause of a reply while the chat model is still
-    /// writing it (`tts_stream_text`, on unless false; for TTS models that
-    /// take streamed text, Qwen3-TTS).
+    /// writing it (`tts_stream_text`, on unless false; only with a TTS model
+    /// that takes streamed text, Qwen3-TTS: any other would wait for the
+    /// clause's end anyway, and say nothing should the reply be cut).
     pub tts_stream_text: bool,
     /// The spec's emotion settings (`tts_emotion`, `tts_emotion_strength`).
     pub tts_emotion: BTreeMap<String, Value>,
@@ -371,6 +372,8 @@ async fn converse(
     let vad = blocking(move || SileroVad::load(&vad_path)).await?;
     let (speech_tx, speech_rx) = mpsc::unbounded_channel();
     let audio = config.mode == SessionMode::Audio;
+    let tts_model = config.tts_model.clone().unwrap_or(models.tts_model);
+    let tts_stream_text = models.tts_stream_text && runtime.streams_text(&tts_model);
     let shared = Arc::new(Shared {
         audio,
         responses: Mutex::new(Responses::default()),
@@ -379,9 +382,9 @@ async fn converse(
         system: prompt::system(&config),
         chat_model: config.chat_model.clone().unwrap_or(models.chat_model),
         asr_model: config.asr_model.clone().unwrap_or(models.asr_model),
-        tts_model: config.tts_model.clone().unwrap_or(models.tts_model),
+        tts_model,
         tts_params,
-        tts_stream_text: models.tts_stream_text,
+        tts_stream_text,
         ref_audio,
         temp_dir: models.temp_dir,
         tool_filler: config.tool_filler.clone().unwrap_or_default(),
