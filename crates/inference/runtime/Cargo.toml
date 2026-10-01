@@ -55,3 +55,9 @@ local-core.workspace = true
 local-error.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+hound.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+tracing-subscriber.workspace = true

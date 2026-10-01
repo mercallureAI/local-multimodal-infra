@@ -17,3 +17,4 @@ local-core.workspace = true
 local-error.workspace = true
 local-files.workspace = true
 serde_yaml.workspace = true
+tracing.workspace = true

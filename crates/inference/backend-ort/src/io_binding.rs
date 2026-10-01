@@ -48,6 +48,10 @@ impl PinnedCudaF32IoBinding {
         self.input_shape == input_shape && self.output_shape == output_shape
     }
 
+    pub fn matches_input_shape(&self, input_shape: &[usize]) -> bool {
+        self.input_shape == input_shape
+    }
+
     pub fn device_id(&self) -> u32 {
         self.device_id
     }

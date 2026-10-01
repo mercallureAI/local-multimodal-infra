@@ -11,7 +11,8 @@
 
 use image::{imageops, Rgb, RgbImage};
 use local_backend_ort::{
-    OrtBackend, OrtInput, OrtOutput, OrtSession, ProviderSelection, SessionProviderReport,
+    OrtBackend, OrtOutput, OrtSession, OrtTensorData, OrtTensorInput, OrtTensorOutput,
+    PinnedCudaF32IoBinding, ProviderKind, ProviderSelection, SessionProviderReport,
 };
 use local_core::{BoundingBox, DetectedObject, FileRef, InferenceOutput, ModelSpec};
 use local_error::{InfraError, Result};
@@ -45,6 +46,10 @@ pub struct YoloAdapter {
     model_id: String,
     config: YoloConfig,
     session: OrtSession,
+    /// Reused pinned host buffers for the fixed-shape CUDA input and output;
+    /// `None` on CPU, before the first CUDA request, or after it failed.
+    pinned: Option<PinnedCudaF32IoBinding>,
+    pinned_disabled: bool,
 }
 
 impl YoloAdapter {
@@ -70,12 +75,14 @@ impl YoloAdapter {
             model_id: spec.id.clone(),
             config,
             session,
+            pinned: None,
+            pinned_disabled: false,
         })
     }
 
     pub fn object_detect(&mut self, image: &FileRef) -> Result<InferenceOutput> {
         let image_path = local_files::local_path(image)?;
-        let preprocessed = preprocess_image(
+        let mut preprocessed = preprocess_image(
             &image_path,
             self.config.input_width,
             self.config.input_height,
@@ -87,7 +94,7 @@ impl YoloAdapter {
             .map(|input| input.name.clone())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "images".to_string());
-        let input = OrtInput {
+        let input = OrtTensorInput {
             name: input_name,
             shape: vec![
                 1,
@@ -95,9 +102,14 @@ impl YoloAdapter {
                 self.config.input_height as usize,
                 self.config.input_width as usize,
             ],
-            data: preprocessed.tensor.clone(),
+            // Decoding needs only the letterbox geometry, not the pixels.
+            data: OrtTensorData::F32(std::mem::take(&mut preprocessed.tensor)),
         };
-        let outputs = self.session.run_f32(&[input])?;
+        let outputs = self
+            .run(&input)?
+            .into_iter()
+            .map(OrtOutput::try_from)
+            .collect::<Result<Vec<_>>>()?;
         let objects = decode_yolo_outputs(&outputs, &preprocessed, &self.config)?;
         Ok(InferenceOutput::ObjectDetections { objects })
     }
@@ -108,6 +120,66 @@ impl YoloAdapter {
 
     pub fn provider_report(&self) -> SessionProviderReport {
         self.session.provider_report()
+    }
+
+    /// Whether requests go through the pinned CUDA I/O binding.
+    pub fn pinned_cuda_io_enabled(&self) -> bool {
+        self.pinned.is_some()
+    }
+
+    /// Runs the graph. On CUDA the fixed-size image tensor (4.9 MB) and
+    /// output (2.8 MB) go through one reused pinned binding instead of two
+    /// host copies plus pageable transfers per request.
+    fn run(&mut self, input: &OrtTensorInput) -> Result<Vec<OrtTensorOutput>> {
+        if self.pinned.is_none() && !self.pinned_disabled {
+            match self.create_pinned(&input.shape) {
+                Ok(Some(binding)) => self.pinned = Some(binding),
+                Ok(None) => self.pinned_disabled = true,
+                Err(err) => {
+                    tracing::warn!(model_id = self.model_id, error = %err, "YOLO pinned CUDA I/O binding unavailable; using pageable I/O");
+                    self.pinned_disabled = true;
+                }
+            }
+        }
+        match self.pinned.as_mut() {
+            Some(binding) if binding.matches_input_shape(&input.shape) => {
+                self.session.run_pinned_cuda_f32_binding(binding, input)
+            }
+            _ => self.session.run_tensors(std::slice::from_ref(input)),
+        }
+    }
+
+    fn create_pinned(&self, input_shape: &[usize]) -> Result<Option<PinnedCudaF32IoBinding>> {
+        if self.session.provider() != ProviderKind::Cuda {
+            return Ok(None);
+        }
+        let output_shape = self
+            .session
+            .outputs()
+            .first()
+            .map(|output| output.shape.clone())
+            .unwrap_or_default();
+        // The output must be static to size the binding (yolo11n: [1, 84, 8400]).
+        let output_shape = output_shape
+            .iter()
+            .map(|dim| usize::try_from(*dim).ok().filter(|dim| *dim > 0))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                InfraError::Adapter(format!("YOLO output shape {output_shape:?} is not static"))
+            })?;
+        let binding = self.session.create_pinned_cuda_f32_binding(
+            self.session.device_id().unwrap_or(0),
+            input_shape,
+            &output_shape,
+        )?;
+        tracing::info!(
+            model_id = self.model_id,
+            input_shape = ?input_shape,
+            output_shape = ?output_shape,
+            device_id = binding.device_id(),
+            "YOLO CUDA pinned I/O binding created"
+        );
+        Ok(Some(binding))
     }
 }
 
@@ -838,6 +910,54 @@ names:
             }
             Ok(other) => panic!("unexpected output: {other:?}"),
             Err(err) => eprintln!("YOLO smoke stopped after load/run boundary: {err}"),
+        }
+    }
+
+    /// `LOCAL_YOLO_MODEL_DIR=<dir> ORT_DYLIB_PATH=<onnxruntime with CUDA>
+    /// cargo test -p local-adapter-yolo --features cuda cuda_pinned`
+    #[test]
+    fn cuda_pinned_detections_match_cpu_if_env_set() {
+        let Ok(model_dir) = std::env::var("LOCAL_YOLO_MODEL_DIR") else {
+            return;
+        };
+        let image = FileRef::local(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../scripts/assets/yolo-input.jpg"),
+        );
+        let model_dir = PathBuf::from(model_dir);
+        let mut cuda = YoloAdapter::load(&model_spec(
+            model_dir.clone(),
+            vec!["cuda".to_string(), "cpu".to_string()],
+        ))
+        .expect("load CUDA YOLO");
+        if cuda.provider_report().provider != ProviderKind::Cuda {
+            eprintln!("CUDA provider unavailable; skipping");
+            return;
+        }
+        let mut cpu = YoloAdapter::load(&model_spec(model_dir, vec!["cpu".to_string()]))
+            .expect("load CPU YOLO");
+        let detect = |adapter: &mut YoloAdapter| match adapter.object_detect(&image) {
+            Ok(InferenceOutput::ObjectDetections { objects }) => objects,
+            other => panic!("unexpected output: {other:?}"),
+        };
+        let expected = detect(&mut cpu);
+        assert!(!expected.is_empty());
+        // The second request reuses the binding the first one created.
+        for _ in 0..2 {
+            let actual = detect(&mut cuda);
+            assert!(cuda.pinned_cuda_io_enabled());
+            assert_eq!(actual.len(), expected.len());
+            for (a, e) in actual.iter().zip(&expected) {
+                assert_eq!(a.label, e.label);
+                assert!((a.confidence - e.confidence).abs() < 1e-2, "{a:?} vs {e:?}");
+                for (x, y) in [
+                    (a.bbox.x, e.bbox.x),
+                    (a.bbox.y, e.bbox.y),
+                    (a.bbox.width, e.bbox.width),
+                    (a.bbox.height, e.bbox.height),
+                ] {
+                    assert!((x - y).abs() < 1.0, "{a:?} vs {e:?}");
+                }
+            }
         }
     }
 

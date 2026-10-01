@@ -1462,6 +1462,7 @@ dependencies = [
  "local-error",
  "local-files",
  "serde_yaml",
+ "tracing",
 ]
 
 [[package]]
@@ -1663,6 +1664,7 @@ dependencies = [
 name = "local-runtime"
 version = "0.1.0"
 dependencies = [
+ "hound",
  "local-adapter-e5-embedding",
  "local-adapter-index-tts",
  "local-adapter-index-tts2",
@@ -1673,8 +1675,11 @@ dependencies = [
  "local-backend-ort",
  "local-core",
  "local-error",
+ "serde_json",
  "tokio",
  "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
