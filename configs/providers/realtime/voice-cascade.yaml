@@ -29,7 +29,7 @@ metadata:
   task: realtime-voice
   chat_model: qwen3-4b-instruct-2507-int4-onnx
   asr_model: sensevoice-small-onnx
-  # Qwen3-TTS streams: a clause starts playing ~0.1 s after it is asked
+  # Qwen3-TTS streams: a clause starts playing ~50 ms after it is asked
   # for. IndexTTS (indextts-1.5-onnx, indextts-2.5-onnx) speaks clause by
   # clause.
   tts_model: qwen3-tts-0.6b-onnx

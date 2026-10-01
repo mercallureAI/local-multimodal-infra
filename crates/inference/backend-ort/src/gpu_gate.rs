@@ -3,8 +3,10 @@
 //! ORT captures CUDA graphs in global capture mode: while one thread captures,
 //! a synchronizing CUDA call on any other thread (a stream sync, an
 //! allocation) fails with "operation not permitted when stream is capturing"
-//! and invalidates the capture. Every device-touching call in this crate holds
-//! the gate shared; the runs that may capture hold it exclusively. Captures
+//! and invalidates the capture. Calls in this crate that allocate, copy, free
+//! or run on the device hold the gate shared (binding tensors already on the
+//! session's device and releasing to ORT's arena make no CUDA call and do
+//! not); the runs that may capture hold it exclusively. Captures
 //! happen once per graph, so the gate is uncontended afterwards.
 
 use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
