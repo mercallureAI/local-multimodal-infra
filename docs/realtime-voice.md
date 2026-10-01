@@ -79,7 +79,9 @@ talked over work as above; the client gets:
   a response cancelled before it started included (cut, nothing spoken).
 
 The client speaks by streaming `response.delta` (text, split into clauses
-and spoken as it comes) and `response.end` under a `response_id` of its
+and spoken as it comes; with `tts_stream_text` a response's first clause is
+spoken while it is still coming, as in cascade mode, so stream the text as
+the model writes it) and `response.end` under a `response_id` of its
 choosing, unique within the session; responses play one after the other (a
 later one waits until every earlier one has all its text). `response.cancel`
 with the id of a response still waiting its turn (none of its speech on its way yet) drops just that one;
@@ -137,6 +139,7 @@ clients are not browsers.
 | `ref_audio` | model's `default_reference_audio` | The voice: a WAV file, base64. |
 | `ref_text` | model's `default_reference_text` (with its audio) | Qwen3-TTS: what `ref_audio` says, so it clones the voice in context (closer) instead of from its x-vector alone. |
 | `tts_language` | model's `tts_language` | Qwen3-TTS: chinese, english, japanese, korean, german, french, russian, portuguese, spanish, italian (unset: the model decides). |
+| `tts_stream_text` | model's `tts_stream_text` (true) | Speak a reply's (audio: a response's) first clause while its text is still coming; only with a TTS model that takes streamed text (Qwen3-TTS). With `ref_text` it gains little: in-context cloning starts once the text covers the reference (see `docs/qwen3-tts.md`). |
 | `tool_filler` | none | Cascade: said right away when a task is handed off. |
 | `chat_model`, `asr_model`, `tts_model` | the model's `metadata` | |
 | `tts_emotion`, `tts_emotion_strength` | the model's `metadata` (`calm`, 0.8) | IndexTTS-2.5 emotion: happy, angry, sad, afraid, disgusted, melancholic, surprised, calm, or none; strength 0 to 1. |

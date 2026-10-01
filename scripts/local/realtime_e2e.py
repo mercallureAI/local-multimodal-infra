@@ -45,6 +45,7 @@ CHUNK = 320  # 20 ms at 16 kHz
 REF_AUDIO = Path("scripts/assets/tts-input-mon3tr.wav")
 # What REF_AUDIO says (Qwen3-TTS in-context cloning), set by --ref-text.
 REF_TEXT = ""
+STREAM_TEXT = True
 # Audio mode: what the client answers (a long one to talk over).
 SHORT_REPLY = "好的，你刚才说的是：{text}"
 LONG_REPLY = (
@@ -157,6 +158,7 @@ async def session(url: str, token: str, group: bool, out_wav: Path, audio_mode: 
                         "speaker": "测试员",
                         "ref_audio": base64.b64encode(ref).decode(),
                         **({"ref_text": REF_TEXT} if REF_TEXT else {}),
+                        **({} if STREAM_TEXT else {"tts_stream_text": False}),
                         "tool_filler": "好的，我查一下。",
                         "mode": "audio" if audio_mode else "cascade",
                     },
@@ -203,7 +205,7 @@ async def session(url: str, token: str, group: bool, out_wav: Path, audio_mode: 
 
 
 def main() -> None:
-    global ROUTER_AUDIO, REF_AUDIO, REF_TEXT
+    global ROUTER_AUDIO, REF_AUDIO, REF_TEXT, STREAM_TEXT, SHORT_REPLY
     ap = argparse.ArgumentParser()
     ap.add_argument("--audio-dir", required=True, help="the spoken test utterances (r00.wav ...)")
     ap.add_argument("--model-dir", default="./workdir/models")
@@ -211,9 +213,14 @@ def main() -> None:
     ap.add_argument("--ref-text", default="", help="what --ref says (Qwen3-TTS in-context cloning)")
     ap.add_argument("--group", action="store_true")
     ap.add_argument("--mode", choices=["cascade", "audio"], default="cascade")
+    ap.add_argument("--reply", default=SHORT_REPLY, help="audio mode: the canned answer ({text}: what was heard)")
+    ap.add_argument(
+        "--no-stream-text", action="store_true", help="speak first clauses only once complete (tts_stream_text off)"
+    )
     ap.add_argument("--out", default="workdir/data/realtime_bot.wav")
     args = ap.parse_args()
     ROUTER_AUDIO, REF_AUDIO, REF_TEXT = Path(args.audio_dir), Path(args.ref), args.ref_text
+    STREAM_TEXT, SHORT_REPLY = not args.no_stream_text, args.reply
     infra = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(infra))
     from scripts.local import smoke

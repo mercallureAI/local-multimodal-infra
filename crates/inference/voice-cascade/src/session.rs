@@ -377,7 +377,8 @@ async fn converse(
     let vad = blocking(move || SileroVad::load(&vad_path)).await?;
     let (speech_tx, speech_rx) = mpsc::unbounded_channel();
     let audio = config.mode == SessionMode::Audio;
-    let tts_stream_text = models.tts_stream_text && runtime.streams_text(&tts_model);
+    let tts_stream_text = config.tts_stream_text.unwrap_or(models.tts_stream_text)
+        && runtime.streams_text(&tts_model);
     let shared = Arc::new(Shared {
         audio,
         responses: Mutex::new(Responses::default()),
@@ -948,7 +949,7 @@ async fn reply(shared: Arc<Shared>, steer: Steer, utterance: Option<(u64, String
         if let InferenceEvent::ChatDelta { content } = event {
             for clause in splitter.feed(&content) {
                 let said = match live.take() {
-                    Some(live) => shared.finish_live(epoch, live, &clause),
+                    Some(live) => shared.finish_live(epoch, live, &clause, None),
                     None => shared.speak(epoch, &clause, None).then_some(clause),
                 };
                 if let Some(said) = said {
@@ -957,7 +958,7 @@ async fn reply(shared: Arc<Shared>, steer: Steer, utterance: Option<(u64, String
                 first = false;
             }
             if first && live.is_none() && !speakable(splitter.partial()).is_empty() {
-                live = shared.speak_live(epoch);
+                live = shared.speak_live(epoch, None);
             }
             if let Some(live) = &mut live {
                 live.write(live_prefix(splitter.partial()), false);
@@ -994,7 +995,7 @@ async fn reply(shared: Arc<Shared>, steer: Steer, utterance: Option<(u64, String
     if completion.is_some() {
         if let Some(rest) = splitter.flush() {
             let said = match live.take() {
-                Some(live) => shared.finish_live(epoch, live, &rest),
+                Some(live) => shared.finish_live(epoch, live, &rest, None),
                 None => shared.speak(epoch, &rest, None).then_some(rest),
             };
             if let Some(said) = said {
@@ -1184,30 +1185,39 @@ impl Shared {
         }
     }
 
-    /// Starts speaking a clause that is still being written (cascade): TTS
-    /// gets its text through the returned [`LiveClause`].
-    fn speak_live(&self, epoch: u64) -> Option<LiveClause> {
+    /// Starts speaking a clause that is still being written (as part of
+    /// `response`, in audio mode): TTS gets its text through the returned
+    /// [`LiveClause`].
+    fn speak_live(&self, epoch: u64, response: Option<&str>) -> Option<LiveClause> {
         if epoch != self.current_epoch() {
             return None;
         }
         let (tx, rx) = std::sync::mpsc::channel();
+        let said = Arc::new(Mutex::new(String::new()));
         self.clauses.fetch_add(1, Ordering::SeqCst);
         let _ = self.speech.send(Clause {
             epoch,
             text: String::new(),
-            response: None,
-            stream: Some(rx),
+            response: response.map(str::to_string),
+            stream: Some((rx, said.clone())),
         });
         Some(LiveClause {
             text: tx,
             sent: String::new(),
+            said,
         })
     }
 
     /// Ends a live clause with its whole text: what TTS was given to say,
     /// none when nothing (or the reply was cut meanwhile: dropping `live`
     /// without an end stops TTS).
-    fn finish_live(&self, epoch: u64, mut live: LiveClause, clause: &str) -> Option<String> {
+    fn finish_live(
+        &self,
+        epoch: u64,
+        mut live: LiveClause,
+        clause: &str,
+        response: Option<&str>,
+    ) -> Option<String> {
         if epoch != self.current_epoch() {
             return None;
         }
@@ -1227,7 +1237,7 @@ impl Shared {
         }
         self.emit(ServerEvent::ResponseText {
             text: live.sent.clone(),
-            response_id: None,
+            response_id: response.map(str::to_string),
         });
         Some(live.sent)
     }
@@ -1367,18 +1377,44 @@ impl Shared {
 
     /// Audio: gives TTS the clauses whose turn it is: a response speaks once
     /// every earlier one has all its text (so responses play one after the
-    /// other, not interleaved).
+    /// other, not interleaved). A response's first clause is spoken as it is
+    /// written (`tts_stream_text`).
     fn release(&self, responses: &mut Responses) {
         let epoch = self.current_epoch();
         for response in responses.open.iter_mut() {
             for clause in std::mem::take(&mut response.held) {
-                if self.speak(epoch, &clause, Some(&response.id)) {
+                match response.live.take() {
+                    // Its speech was counted when it started.
+                    Some(live) => {
+                        self.finish_live(epoch, live, &clause, Some(&response.id));
+                    }
+                    None => {
+                        if self.speak(epoch, &clause, Some(&response.id)) {
+                            response.pending += 1;
+                        }
+                    }
+                }
+                response.started = true;
+            }
+            if response.ended {
+                // Nothing came to end it: TTS stops.
+                response.live = None;
+                continue;
+            }
+            if self.tts_stream_text
+                && !response.started
+                && !speakable(response.splitter.partial()).is_empty()
+            {
+                response.live = self.speak_live(epoch, Some(&response.id));
+                if response.live.is_some() {
                     response.pending += 1;
+                    response.started = true;
                 }
             }
-            if !response.ended {
-                break;
+            if let Some(live) = &mut response.live {
+                live.write(live_prefix(response.splitter.partial()), false);
             }
+            break;
         }
     }
 
@@ -1606,16 +1642,20 @@ struct Clause {
     text: String,
     /// Audio: the response it belongs to.
     response: Option<String>,
-    /// The clause's text as the chat model writes it (see [`LiveClause`]).
-    stream: Option<std::sync::mpsc::Receiver<TextPiece>>,
+    /// The clause's text as it is written (see [`LiveClause`]), and what of
+    /// it TTS has been given so far.
+    stream: Option<(std::sync::mpsc::Receiver<TextPiece>, Arc<Mutex<String>>)>,
 }
 
-/// A clause spoken while it is still being written: the first of a reply,
-/// so speech starts after its first words rather than after the clause.
+/// A clause spoken while it is still being written: the first of a reply
+/// (of a response, in audio mode), so speech starts after its first words
+/// rather than after the clause.
 struct LiveClause {
     text: std::sync::mpsc::Sender<TextPiece>,
     /// What TTS has been given (speakable text).
     sent: String,
+    /// `sent`, for the clause's speech (what a cut response has said).
+    said: Arc<Mutex<String>>,
 }
 
 impl LiveClause {
@@ -1636,6 +1676,7 @@ impl LiveClause {
             let _ = self
                 .text
                 .send(TextPiece::Text(speakable[self.sent.len()..].to_string()));
+            self.said.lock().unwrap().clone_from(&speakable);
             self.sent = speakable;
         }
     }
@@ -1650,19 +1691,29 @@ async fn synthesize_clauses(shared: Arc<Shared>, mut clauses: mpsc::UnboundedRec
     }) = clauses.recv().await
     {
         let mut queued = false;
+        let (stream, said) = stream.unzip();
+        // What the clause says: a live one's text so far.
+        let words = || match &said {
+            Some(said) => said.lock().unwrap().clone(),
+            None => text.clone(),
+        };
         if epoch == shared.current_epoch() {
             // Each chunk plays as soon as it is synthesized; the clause's
             // segment grows with them.
-            let segment = response.clone().map(|response| (response, text.clone()));
             let result = shared
                 .synthesize_text(&text, stream, |samples| {
                     let current = || epoch == shared.current_epoch();
+                    let segment = response
+                        .as_ref()
+                        .map(|response| (response.clone(), words()));
                     let pushed = if queued {
-                        shared
-                            .player
-                            .push_more_if(&samples, current, segment.is_some())
+                        shared.player.push_more_if(
+                            &samples,
+                            current,
+                            segment.map(|(_, words)| words),
+                        )
                     } else {
-                        shared.player.push_if(&samples, current, segment.clone())
+                        shared.player.push_if(&samples, current, segment)
                     };
                     queued |= pushed;
                     pushed
@@ -1682,7 +1733,7 @@ async fn synthesize_clauses(shared: Arc<Shared>, mut clauses: mpsc::UnboundedRec
         }
         shared.clauses.fetch_sub(1, Ordering::SeqCst);
         if let Some(response) = response {
-            shared.clause_done(&response, queued.then_some(text.as_str()));
+            shared.clause_done(&response, queued.then(words).as_deref());
         }
     }
 }
@@ -1741,6 +1792,10 @@ struct OpenResponse {
     pending: usize,
     /// The text of its clauses queued to play.
     spoken: String,
+    /// A clause has been given to TTS (only the first is spoken live).
+    started: bool,
+    /// Its first clause, spoken as it is written.
+    live: Option<LiveClause>,
 }
 
 impl OpenResponse {
@@ -1752,6 +1807,8 @@ impl OpenResponse {
             held: Vec::new(),
             pending: 0,
             spoken: String::new(),
+            started: false,
+            live: None,
         }
     }
 }
@@ -1846,8 +1903,14 @@ impl Player {
     }
 
     /// Queues more of the clause [`Self::push_if`] started (extending its
-    /// segment when it has one), if `current()` holds.
-    fn push_more_if(&self, samples: &[f32], current: impl FnOnce() -> bool, segment: bool) -> bool {
+    /// segment, which now says `segment`, when it has one), if `current()`
+    /// holds.
+    fn push_more_if(
+        &self,
+        samples: &[f32],
+        current: impl FnOnce() -> bool,
+        segment: Option<String>,
+    ) -> bool {
         if self.is_closed() {
             return false;
         }
@@ -1858,10 +1921,11 @@ impl Player {
             }
             state.queue.extend(samples);
             state.pushed += samples.len() as u64;
-            if segment {
+            if let Some(text) = segment {
                 let pushed = state.pushed;
                 if let Some(last) = state.segments.back_mut() {
                     last.end = pushed;
+                    last.text = text;
                 }
             }
         }
@@ -2041,6 +2105,7 @@ mod tests {
         let mut live = LiveClause {
             text: tx,
             sent: String::new(),
+            said: Arc::default(),
         };
         live.write("好的，see https://exa", false);
         live.write("好的，see https://example.com and", false);
@@ -2156,6 +2221,18 @@ mod tests {
         mpsc::UnboundedReceiver<Outbound>,
         mpsc::UnboundedReceiver<Clause>,
     ) {
+        audio_shared_with(false)
+    }
+
+    /// [`audio_shared`], speaking first clauses as they are written when
+    /// `stream_text`.
+    fn audio_shared_with(
+        stream_text: bool,
+    ) -> (
+        Arc<Shared>,
+        mpsc::UnboundedReceiver<Outbound>,
+        mpsc::UnboundedReceiver<Clause>,
+    ) {
         let (out, out_rx) = mpsc::unbounded_channel();
         let (speech, speech_rx) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
@@ -2168,7 +2245,7 @@ mod tests {
             asr_model: String::new(),
             tts_model: String::new(),
             tts_params: BTreeMap::new(),
-            tts_stream_text: false,
+            tts_stream_text: stream_text,
             ref_audio: PathBuf::new(),
             temp_dir: PathBuf::new(),
             tool_filler: String::new(),
@@ -2458,6 +2535,114 @@ mod tests {
             .unwrap();
         assert_eq!(done["spoken"], spoken);
         assert!(done["response_id"].as_str().unwrap().starts_with("say-"));
+    }
+
+    /// Takes what TTS has been given of a live clause so far: its text, and
+    /// whether it has ended (false: open; None: dropped, TTS stops).
+    fn live_text(stream: &std::sync::mpsc::Receiver<TextPiece>) -> (String, Option<bool>) {
+        let mut text = String::new();
+        loop {
+            match stream.try_recv() {
+                Ok(TextPiece::Text(piece)) => text.push_str(&piece),
+                Ok(TextPiece::End) => return (text, Some(true)),
+                Err(std::sync::mpsc::TryRecvError::Empty) => return (text, Some(false)),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return (text, None),
+            }
+        }
+    }
+
+    #[test]
+    fn a_response_speaks_its_first_clause_as_it_is_written() {
+        let (shared, mut out, mut clauses) = audio_shared_with(true);
+        shared.audio_event(delta("r1", "你好"));
+        let live = clauses.try_recv().expect("the first clause starts at once");
+        assert_eq!(live.response.as_deref(), Some("r1"));
+        let (stream, said) = live.stream.expect("a live clause");
+        assert_eq!(live_text(&stream), ("你好".to_string(), Some(false)));
+        // Its first audio plays while the clause is still being written.
+        assert!(shared.player.push_if(
+            &[0.0; 10],
+            || live.epoch == shared.current_epoch(),
+            Some(("r1".into(), said.lock().unwrap().clone())),
+        ));
+        assert!(shared.responding());
+        shared.audio_event(delta("r1", "呀，今天天气不错。"));
+        assert_eq!(live_text(&stream), ("呀，".to_string(), Some(true)));
+        assert_eq!(*said.lock().unwrap(), "你好呀，");
+        shared
+            .player
+            .push_more_if(&[0.0; 10], || true, Some(said.lock().unwrap().clone()));
+        shared.clauses.fetch_sub(1, Ordering::SeqCst);
+        shared.clause_done("r1", Some(said.lock().unwrap().as_str()));
+        // The rest is spoken clause by clause.
+        assert!(
+            clauses.try_recv().is_err(),
+            "the sentence is not complete yet"
+        );
+        shared.audio_event(delta("r1", "走吧"));
+        shared.audio_event(end("r1"));
+        assert_eq!(synthesize_next(&shared, &mut clauses, 10), "今天天气不错。");
+        assert_eq!(synthesize_next(&shared, &mut clauses, 10), "走吧");
+        assert!(clauses.try_recv().is_err());
+        play(&shared, 40);
+        shared.check_done();
+        let told = events(&mut out);
+        let texts: Vec<&str> = told
+            .iter()
+            .filter(|e| e["type"] == "response.text")
+            .map(|e| {
+                assert_eq!(e["response_id"], "r1");
+                e["text"].as_str().unwrap()
+            })
+            .collect();
+        assert_eq!(texts, ["你好呀，", "今天天气不错。", "走吧"]);
+        let done = told.iter().find(|e| e["type"] == "response.done").unwrap();
+        assert_eq!(done["cut"], false);
+        assert_eq!(done["spoken"], "你好呀，今天天气不错。走吧");
+    }
+
+    #[test]
+    fn a_cut_stops_a_clause_still_being_written() {
+        let (shared, mut out, mut clauses) = audio_shared_with(true);
+        shared.audio_event(delta("r1", "我想想"));
+        let live = clauses.try_recv().unwrap();
+        let (stream, said) = live.stream.unwrap();
+        assert!(shared.player.push_if(
+            &[0.0; 10],
+            || true,
+            Some(("r1".into(), said.lock().unwrap().clone())),
+        ));
+        play(&shared, 5);
+        shared.cut();
+        // TTS is told to stop (no end), and what was heard is told.
+        assert_eq!(live_text(&stream), ("我想想".to_string(), None));
+        let told = events(&mut out);
+        let done = told.iter().find(|e| e["type"] == "response.done").unwrap();
+        assert_eq!(done["cut"], true);
+        assert_eq!(done["spoken"], "我想想");
+        assert!(!shared.responding());
+        shared.audio_event(delta("r1", "，算了。"));
+        assert!(clauses.try_recv().is_err());
+    }
+
+    #[test]
+    fn only_the_first_clause_of_a_response_is_live() {
+        let (shared, _out, mut clauses) = audio_shared_with(true);
+        // Whole clauses at once: nothing to stream.
+        shared.audio_event(delta("r1", "第一句，第二句"));
+        assert_eq!(synthesize_next(&shared, &mut clauses, 10), "第一句，");
+        assert!(clauses.try_recv().is_err(), "the second clause is not live");
+        // A waiting response streams its first clause once its turn comes.
+        shared.audio_event(delta("r2", "等一下"));
+        assert!(clauses.try_recv().is_err(), "r2 waits for r1");
+        shared.audio_event(end("r1"));
+        assert_eq!(synthesize_next(&shared, &mut clauses, 10), "第二句");
+        let live = clauses.try_recv().expect("r2 starts");
+        assert_eq!(live.response.as_deref(), Some("r2"));
+        let (stream, _) = live.stream.expect("r2's first clause is live");
+        assert_eq!(live_text(&stream), ("等一下".to_string(), Some(false)));
+        shared.audio_event(end("r2"));
+        assert_eq!(live_text(&stream), (String::new(), Some(true)));
     }
 
     #[test]

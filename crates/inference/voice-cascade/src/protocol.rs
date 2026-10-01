@@ -90,6 +90,11 @@ pub struct SessionConfig {
     /// Without it, the model's `tts_language`.
     #[serde(default)]
     pub tts_language: Option<String>,
+    /// Speak a reply's (a response's) first clause while its text is still
+    /// coming, with a TTS model that takes streamed text (Qwen3-TTS).
+    /// Without it, the model's `tts_stream_text`.
+    #[serde(default)]
+    pub tts_stream_text: Option<bool>,
     /// Said right away when a task is handed off (empty: nothing; cascade).
     #[serde(default)]
     pub tool_filler: Option<String>,
