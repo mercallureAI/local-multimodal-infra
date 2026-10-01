@@ -81,7 +81,8 @@ talked over work as above; the client gets:
 The client speaks by streaming `response.delta` (text, split into clauses
 and spoken as it comes; with `tts_stream_text` a response's first clause is
 spoken while it is still coming, as in cascade mode, so stream the text as
-the model writes it) and `response.end` under a `response_id` of its
+the model writes it; should its text stop coming for 1.5 s, it ends there
+and its rest is spoken once complete) and `response.end` under a `response_id` of its
 choosing, unique within the session; responses play one after the other (a
 later one waits until every earlier one has all its text). `response.cancel`
 with the id of a response still waiting its turn (none of its speech on its way yet) drops just that one;

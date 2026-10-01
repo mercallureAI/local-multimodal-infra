@@ -76,6 +76,10 @@ const START_TIMEOUT: Duration = Duration::from_secs(30);
 const WARMUP_TIMEOUT: Duration = Duration::from_secs(300);
 /// Audio: how often `state` and finished responses are checked.
 const STATE_TICK: Duration = Duration::from_millis(50);
+/// Audio: a response's first clause spoken as it is written ends with what
+/// it has once its text stops coming this long (TTS runs one request at a
+/// time: a client that stalls must not hold it).
+const LIVE_IDLE: Duration = Duration::from_millis(1500);
 /// Audio: ids of responses that are over, remembered (their late text is
 /// dropped).
 const OVER_KEPT: usize = 256;
@@ -1205,6 +1209,7 @@ impl Shared {
             text: tx,
             sent: String::new(),
             said,
+            written: Instant::now(),
         })
     }
 
@@ -1389,6 +1394,11 @@ impl Shared {
                         self.finish_live(epoch, live, &clause, Some(&response.id));
                     }
                     None => {
+                        // The rest of a first clause ended early.
+                        let clause = match response.said_early.take() {
+                            Some(said) => rest_after(&clause, &said),
+                            None => clause,
+                        };
                         if self.speak(epoch, &clause, Some(&response.id)) {
                             response.pending += 1;
                         }
@@ -1415,6 +1425,35 @@ impl Shared {
                 live.write(live_prefix(response.splitter.partial()), false);
             }
             break;
+        }
+    }
+
+    /// Audio: ends the first clauses spoken as they are written whose text
+    /// stopped coming (see [`LIVE_IDLE`]) with what they have; the rest of
+    /// such a clause is spoken once it is complete.
+    fn expire_live(&self) {
+        let mut responses = self.responses.lock().unwrap();
+        for response in responses.open.iter_mut() {
+            if response
+                .live
+                .as_ref()
+                .is_none_or(|live| live.written.elapsed() < LIVE_IDLE)
+            {
+                continue;
+            }
+            let Some(live) = response.live.take() else {
+                continue;
+            };
+            // Nothing given to TTS yet: dropping it stops TTS quietly, and
+            // the clause is spoken whole.
+            if !live.sent.is_empty() {
+                let _ = live.text.send(TextPiece::End);
+                self.emit(ServerEvent::ResponseText {
+                    text: live.sent.clone(),
+                    response_id: Some(response.id.clone()),
+                });
+                response.said_early = Some(live.sent);
+            }
         }
     }
 
@@ -1656,12 +1695,15 @@ struct LiveClause {
     sent: String,
     /// `sent`, for the clause's speech (what a cut response has said).
     said: Arc<Mutex<String>>,
+    /// When text last came for it.
+    written: Instant,
 }
 
 impl LiveClause {
     /// Gives TTS what `partial` (the clause so far, or all of it when
     /// `whole`) adds.
     fn write(&mut self, partial: &str, whole: bool) {
+        self.written = Instant::now();
         // A word still being written is held back while it may turn out to
         // be one `speakable` drops (a URL): only ASCII words can.
         let partial = if whole {
@@ -1678,6 +1720,23 @@ impl LiveClause {
                 .send(TextPiece::Text(speakable[self.sent.len()..].to_string()));
             self.said.lock().unwrap().clone_from(&speakable);
             self.sent = speakable;
+        }
+    }
+}
+
+/// What `clause` says after `said` (the start of it already spoken), or all
+/// of it should it not start so.
+fn rest_after(clause: &str, said: &str) -> String {
+    let text = speakable(clause);
+    match text.strip_prefix(said) {
+        Some(rest) => rest.to_string(),
+        None => {
+            tracing::warn!(
+                clause,
+                said,
+                "voice cascade: a clause read differently once complete; it is spoken whole"
+            );
+            text
         }
     }
 }
@@ -1742,6 +1801,7 @@ async fn synthesize_clauses(shared: Arc<Shared>, mut clauses: mpsc::UnboundedRec
 async fn report_state(shared: Arc<Shared>) {
     let mut last = None;
     while !shared.player.is_closed() {
+        shared.expire_live();
         shared.check_done();
         let input_stopped = shared.audio_at.lock().unwrap().elapsed() > INPUT_STALE;
         let state = (
@@ -1796,6 +1856,9 @@ struct OpenResponse {
     started: bool,
     /// Its first clause, spoken as it is written.
     live: Option<LiveClause>,
+    /// What that clause said when its text stopped coming (it ended
+    /// there): its rest is spoken once complete.
+    said_early: Option<String>,
 }
 
 impl OpenResponse {
@@ -1809,6 +1872,7 @@ impl OpenResponse {
             spoken: String::new(),
             started: false,
             live: None,
+            said_early: None,
         }
     }
 }
@@ -2106,6 +2170,7 @@ mod tests {
             text: tx,
             sent: String::new(),
             said: Arc::default(),
+            written: Instant::now(),
         };
         live.write("好的，see https://exa", false);
         live.write("好的，see https://example.com and", false);
@@ -2643,6 +2708,41 @@ mod tests {
         assert_eq!(live_text(&stream), ("等一下".to_string(), Some(false)));
         shared.audio_event(end("r2"));
         assert_eq!(live_text(&stream), (String::new(), Some(true)));
+    }
+
+    #[test]
+    fn a_first_clause_whose_text_stops_ends_and_its_rest_follows() {
+        let (shared, mut out, mut clauses) = audio_shared_with(true);
+        shared.audio_event(delta("r1", "我想一想这个"));
+        let live = clauses.try_recv().unwrap();
+        let (stream, _) = live.stream.unwrap();
+        shared.expire_live();
+        assert_eq!(
+            live_text(&stream),
+            ("我想一想这个".to_string(), Some(false))
+        );
+        // The client stalls: TTS is not held.
+        shared.responses.lock().unwrap().open[0]
+            .live
+            .as_mut()
+            .unwrap()
+            .written -= LIVE_IDLE;
+        shared.expire_live();
+        assert_eq!(live_text(&stream), (String::new(), Some(true)));
+        shared.clauses.fetch_sub(1, Ordering::SeqCst);
+        shared.clause_done("r1", None);
+        // Its rest is spoken once complete, the rest as usual.
+        shared.audio_event(delta("r1", "问题吧。好的"));
+        shared.audio_event(end("r1"));
+        assert_eq!(synthesize_next(&shared, &mut clauses, 10), "问题吧。");
+        assert_eq!(synthesize_next(&shared, &mut clauses, 10), "好的");
+        assert!(clauses.try_recv().is_err());
+        let texts: Vec<String> = events(&mut out)
+            .into_iter()
+            .filter(|e| e["type"] == "response.text")
+            .map(|e| e["text"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(texts, ["我想一想这个", "问题吧。", "好的"]);
     }
 
     #[test]
