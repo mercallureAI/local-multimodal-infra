@@ -43,6 +43,8 @@ pub struct DeviceBinding {
     cuda_device: Option<i32>,
     device_outputs: Vec<String>,
     host_outputs: Vec<String>,
+    /// Last: held while the fields above are released (see `Drop`).
+    drop_gate: crate::gpu_gate::DropGate,
 }
 
 #[derive(Debug, Default)]
@@ -101,6 +103,7 @@ impl OrtSession {
         };
         let binding = self.real.session.create_binding().map_err(map_ort_err)?;
         Ok(DeviceBinding {
+            drop_gate: Default::default(),
             binding,
             session: self.real.session.inner(),
             cuda_device,
@@ -320,5 +323,13 @@ mod tests {
         assert!(validate_binding_output_names(available, ["a"], ["b"]).is_err());
         assert!(validate_binding_output_names(available, ["a", "a"], ["b", "c"]).is_err());
         assert!(validate_binding_output_names(available, ["a"], ["b", "d"]).is_err());
+    }
+}
+
+impl Drop for DeviceBinding {
+    fn drop(&mut self) {
+        // Its device buffers (and possibly the session) are freed as the
+        // fields drop: not while a CUDA graph is being captured.
+        self.drop_gate.hold();
     }
 }

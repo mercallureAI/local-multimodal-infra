@@ -766,8 +766,8 @@ pub struct ChatTimings {
 }
 
 /// Text handed to a TTS model while it is still being written (a chat
-/// model's reply, say): pieces in order, then `End`. A dropped sender ends
-/// the text too.
+/// model's reply, say): pieces in order, then `End`. A sender dropped before
+/// `End` abandons the text: nothing more of it is spoken.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextPiece {
     Text(String),

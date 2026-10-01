@@ -114,7 +114,8 @@ codes.
 Request `params`: `reference_text` (ICL; else x-vector only), `language`
 (`chinese`, `english`, … or `auto`), `do_sample`, `temperature`,
 `subtalker_temperature`, `repetition_penalty`, `max_frames`,
-`max_reference_seconds` (10), `seed`. Spec `metadata`: `max_context` (2048
+`max_reference_seconds` (15: in-context cloning takes a reference of at most
+that long, as its transcript covers all of it; longer ones fail), `seed`. Spec `metadata`: `max_context` (2048
 talker positions), `vocoder_chunk_frames` (4), `cuda_graph` (true).
 Streaming: `InferenceEvent::AudioChunk` per vocoder chunk
 (`RuntimeManager::infer_streaming`); the WAV file is written as well.

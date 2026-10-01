@@ -24,6 +24,8 @@ pub struct PinnedCudaIoBinding {
     // Rust drops struct fields in declaration order.
     _input_allocator: Allocator,
     _output_allocator: Allocator,
+    /// Last: held while the fields above are released (see `Drop`).
+    drop_gate: crate::gpu_gate::DropGate,
 }
 
 /// Reusable pinned-host buffers for a CUDA session with one FP32 input and one
@@ -41,6 +43,8 @@ pub struct PinnedCudaF32IoBinding {
     output_shape: Vec<usize>,
     _input_allocator: Allocator,
     _output_allocator: Allocator,
+    /// Last: held while the fields above are released (see `Drop`).
+    drop_gate: crate::gpu_gate::DropGate,
 }
 
 impl PinnedCudaF32IoBinding {
@@ -112,6 +116,8 @@ pub struct ResidentIoBinding {
     cpu_memory: MemoryInfo,
     cuda_outputs: Vec<String>,
     cpu_outputs: Vec<String>,
+    /// Last: held while the fields above are released (see `Drop`).
+    drop_gate: crate::gpu_gate::DropGate,
 }
 
 #[derive(Debug)]
@@ -214,6 +220,7 @@ impl OrtSession {
             .bind_output_to_device(output_name.clone(), &output_memory)
             .map_err(map_ort_err)?;
         Ok(PinnedCudaF32IoBinding {
+            drop_gate: Default::default(),
             binding,
             session: self.real.session.inner(),
             device_id,
@@ -398,6 +405,7 @@ impl OrtSession {
             .bind_output_to_device(output_name, &output_memory)
             .map_err(map_ort_err)?;
         Ok(PinnedCudaIoBinding {
+            drop_gate: Default::default(),
             binding,
             session: self.real.session.inner(),
             device_id,
@@ -552,6 +560,7 @@ impl OrtSession {
                 .map_err(map_ort_err)?;
         }
         Ok(ResidentIoBinding {
+            drop_gate: Default::default(),
             binding,
             session: self.real.session.inner(),
             device_id,
@@ -962,5 +971,29 @@ mod tests {
             0,
         )
         .is_err());
+    }
+}
+
+impl Drop for PinnedCudaIoBinding {
+    fn drop(&mut self) {
+        // Its device buffers (and possibly the session) are freed as the
+        // fields drop: not while a CUDA graph is being captured.
+        self.drop_gate.hold();
+    }
+}
+
+impl Drop for PinnedCudaF32IoBinding {
+    fn drop(&mut self) {
+        // Its device buffers (and possibly the session) are freed as the
+        // fields drop: not while a CUDA graph is being captured.
+        self.drop_gate.hold();
+    }
+}
+
+impl Drop for ResidentIoBinding {
+    fn drop(&mut self) {
+        // Its device buffers (and possibly the session) are freed as the
+        // fields drop: not while a CUDA graph is being captured.
+        self.drop_gate.hold();
     }
 }

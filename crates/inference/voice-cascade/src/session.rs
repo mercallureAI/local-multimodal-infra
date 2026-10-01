@@ -15,7 +15,7 @@ use crate::{
     history::History,
     prompt,
     protocol::{ClientEvent, ServerEvent, SessionConfig, SessionMode, INPUT_RATE, OUTPUT_RATE},
-    text::{speakable, takes_floor, ClauseSplitter},
+    text::{live_prefix, speakable, takes_floor, ClauseSplitter},
 };
 use base64::Engine;
 use local_adapter_silero_vad::{SileroVad, VadEvent, VadIterator, WINDOW};
@@ -953,7 +953,7 @@ async fn reply(shared: Arc<Shared>, steer: Steer, utterance: Option<(u64, String
                 live = shared.speak_live(epoch);
             }
             if let Some(live) = &mut live {
-                live.write(splitter.partial(), false);
+                live.write(live_prefix(splitter.partial()), false);
             }
         }
     }
@@ -1197,8 +1197,6 @@ impl Shared {
         })
     }
 
-    /// Ends a live clause with its whole text; false when nothing of it is
-    /// to be said.
     /// Ends a live clause with its whole text: what TTS was given to say,
     /// none when nothing (or the reply was cut meanwhile: dropping `live`
     /// without an end stops TTS).
@@ -1207,6 +1205,11 @@ impl Shared {
             return None;
         }
         live.write(clause, true);
+        if live.sent.is_empty() {
+            // Nothing to say after all (a bare URL): dropping `live` without
+            // an end stops TTS quietly.
+            return None;
+        }
         let _ = live.text.send(TextPiece::End);
         if live.sent != speakable(clause) {
             tracing::warn!(
@@ -1214,9 +1217,6 @@ impl Shared {
                 spoken = live.sent,
                 "voice cascade: the clause read differently once complete; only what was streamed is spoken"
             );
-        }
-        if live.sent.is_empty() {
-            return None;
         }
         self.emit(ServerEvent::ResponseText {
             text: live.sent.clone(),

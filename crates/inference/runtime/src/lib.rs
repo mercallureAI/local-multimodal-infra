@@ -751,11 +751,20 @@ impl LoadedModel {
             }
             // A model that takes whole texts: wait for the end.
             let mut whole = String::new();
+            let mut ended = false;
             for piece in text {
                 match piece {
                     TextPiece::Text(piece) => whole.push_str(&piece),
-                    TextPiece::End => break,
+                    TextPiece::End => {
+                        ended = true;
+                        break;
+                    }
                 }
+            }
+            if !ended {
+                return Err(InfraError::BadRequest(
+                    "the text stream was abandoned before its end".to_string(),
+                ));
             }
             let mut task = task.clone();
             if let InferenceInput::TtsSynthesize { text, .. } = &mut task.input {

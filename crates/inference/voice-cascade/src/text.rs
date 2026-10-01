@@ -117,6 +117,31 @@ pub fn takes_floor(text: &str, names: Option<&[String]>) -> bool {
 }
 
 /// Plain spoken text: no Markdown, links or emoji.
+/// The part of a clause still being written that is sure to stay in it: a
+/// first clause with neither pause nor sentence end is cut near its
+/// `MAX_CHUNK_UNITS`th unit (`cut_long_sentence`), and text past that goes to
+/// the next clause.
+pub fn live_prefix(text: &str) -> &str {
+    let (mut count, mut in_word) = (0, false);
+    for (index, c) in text.char_indices() {
+        let starts_unit = if c.is_ascii_alphanumeric() {
+            let starts = !in_word;
+            in_word = true;
+            starts
+        } else {
+            in_word = false;
+            c.is_alphanumeric()
+        };
+        if starts_unit {
+            if count + 2 >= MAX_CHUNK_UNITS {
+                return &text[..index];
+            }
+            count += 1;
+        }
+    }
+    text
+}
+
 pub fn speakable(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut in_code = false;
@@ -324,6 +349,21 @@ impl ClauseSplitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_live_prefix_stops_before_an_overlong_clause_is_cut() {
+        let long: String = "很".repeat(MAX_CHUNK_UNITS + 10);
+        let mut splitter = ClauseSplitter::default();
+        let clause = splitter.feed(&long).remove(0);
+        let prefix = live_prefix(&long);
+        assert!(
+            clause.starts_with(prefix),
+            "{} vs {}",
+            prefix.len(),
+            clause.len()
+        );
+        assert_eq!(live_prefix("好的，see you"), "好的，see you");
+    }
 
     #[test]
     fn backchannels_do_not_take_the_floor() {

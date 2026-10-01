@@ -19,6 +19,30 @@ pub(crate) fn gpu_exclusive() -> RwLockWriteGuard<'static, ()> {
     GATE.write().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// A binding's last field: `Drop` puts a shared guard in it, so the fields
+/// before it (device buffers, the session they keep alive) are released under
+/// the gate. Only ever filled during drop, on the dropping thread.
+#[derive(Default)]
+pub(crate) struct DropGate(Option<RwLockReadGuard<'static, ()>>);
+
+impl DropGate {
+    pub(crate) fn hold(&mut self) {
+        self.0 = Some(gpu_shared());
+    }
+}
+
+impl std::fmt::Debug for DropGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DropGate")
+    }
+}
+
+// SAFETY: the guard is only set inside `Drop::drop` of the owning binding and
+// released when that binding's fields drop, on the same thread; the struct is
+// never shared or sent while it holds one.
+unsafe impl Send for DropGate {}
+unsafe impl Sync for DropGate {}
+
 /// Held for one run.
 pub(crate) enum GpuGate {
     #[allow(dead_code)]

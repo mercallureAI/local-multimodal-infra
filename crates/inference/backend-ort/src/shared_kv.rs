@@ -57,6 +57,8 @@ pub struct SharedKvBinding {
     session: Arc<SharedSessionInner>,
     logits_output: String,
     store: Arc<KvStore>,
+    /// Last: held while the fields above are released (see `Drop`).
+    drop_gate: crate::gpu_gate::DropGate,
 }
 
 impl SharedKvBinding {
@@ -247,6 +249,7 @@ impl OrtSession {
             .bind_output_to_device(logits_output, &host_output_memory()?)
             .map_err(map_ort_err)?;
         Ok(SharedKvBinding {
+            drop_gate: Default::default(),
             binding,
             session: self.real.session.inner(),
             logits_output: logits_output.to_string(),
@@ -463,4 +466,12 @@ fn extract_host_logits(name: &str, value: DynValue) -> Result<OrtTensorOutput> {
     Err(InfraError::Backend(format!(
         "logits output `{name}` is neither FP32 nor FP16"
     )))
+}
+
+impl Drop for SharedKvBinding {
+    fn drop(&mut self) {
+        // Its device buffers (and possibly the session) are freed as the
+        // fields drop: not while a CUDA graph is being captured.
+        self.drop_gate.hold();
+    }
 }

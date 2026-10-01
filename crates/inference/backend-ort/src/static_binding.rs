@@ -109,6 +109,8 @@ pub struct StaticIoBinding {
     graph_runs: Vec<(i64, usize)>,
     // Bound values reference this allocator's memory: dropped last.
     _allocator: Allocator,
+    /// Last: held while the fields above are released (see `Drop`).
+    drop_gate: crate::gpu_gate::DropGate,
 }
 
 impl StaticIoBinding {
@@ -232,6 +234,7 @@ impl StaticIoBinding {
 
     /// Drops every saved KV cache.
     pub fn clear_kv_snapshots(&mut self) {
+        let _gate = crate::gpu_shared();
         self.kv_snapshots.clear();
     }
 
@@ -367,6 +370,7 @@ impl OrtSession {
             });
         }
         Ok(StaticIoBinding {
+            drop_gate: Default::default(),
             binding,
             session: self.real.session.inner(),
             kv_shape,
@@ -764,4 +768,12 @@ fn host_output(name: &str, value: &ort::value::DynValue) -> Result<OrtTensorOutp
     Err(InfraError::Backend(format!(
         "host output `{name}` has an unsupported element type"
     )))
+}
+
+impl Drop for StaticIoBinding {
+    fn drop(&mut self) {
+        // Its device buffers (and possibly the session) are freed as the
+        // fields drop: not while a CUDA graph is being captured.
+        self.drop_gate.hold();
+    }
 }
