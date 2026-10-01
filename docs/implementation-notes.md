@@ -142,6 +142,18 @@ The directory (`<model_dir>/qwen3-4b-instruct-2507-int4-onnx`, a `local` artifac
 
 Opt-in real-model test: `LOCAL_QWEN3_CHAT_MODEL_DIR=<dir> ORT_DYLIB_PATH=<onnxruntime 1.30> cargo test --release -p local-adapter-qwen3-chat --features cuda real_model -- --nocapture`.
 
+## Streaming TTS (Qwen3-TTS) and the GPU gate
+
+`qwen3-tts-0.6b-onnx` implements `tts.synthesize` with the `qwen3_tts` adapter on our own export of Qwen/Qwen3-TTS-12Hz-0.6B-Base (`scripts/local/qwen3_tts_export.py`; a `local` artifact): a talker frame graph (INT8 weights, in-graph sampling, code predictor unrolled) replayed as a CUDA graph through `StaticIoBinding`, and a vocoder that streams exactly in fixed 4-frame chunks. `RuntimeManager::infer_streaming` sends each chunk as `InferenceEvent::AudioChunk`; `infer_streaming_text` takes the text as `TextPiece`s while it is written (the realtime cascade streams a reply's first clause that way). Design, checks and numbers: `docs/qwen3-tts.md`.
+
+ORT keeps CUDA graphs per thread, so the adapter runs its sessions on a thread of its own. A capture runs in CUDA's global mode, where a synchronizing CUDA call on any other thread (allocation, blocking copy, free) fails and invalidates it, so `backend-ort` has one process-wide gate (`gpu_gate.rs`): a graph's first runs hold it exclusively, and every other call that allocates, copies, frees or runs on the device holds it shared, in every adapter. Rules for new backend code:
+
+- Take `gpu_shared()` around such calls; binding a host input counts (ORT copies it to the device when it is bound), binding a tensor already on the session's device does not.
+- A type that owns device memory or a session ends with a `DropGate` field and implements `Drop` to fill it, so its memory is released under the gate.
+- Never drop such a type while the same thread holds a guard (the std `RwLock` is not re-entrant: a second read can wait behind a queued writer forever): build output tensors after the guard of the run is released.
+
+Opt-in real-model test: `LOCAL_QWEN3_TTS_MODEL_DIR=<abs dir> LOCAL_QWEN3_TTS_REFERENCE=<abs wav> ORT_DYLIB_PATH=<onnxruntime 1.30> cargo test --release -p local-adapter-qwen3-tts --features cuda real_model_smoke_if_env_set -- --nocapture`.
+
 ## Qwen ASR limitations
 
 The adapter validates the known `qwen3-asr-0.6b-onnx` artifact layout and establishes interfaces for WAV read/resampling, 128-bin feature extraction, tokenizer JSON loading, embeddings/KV-cache, and decoder loop orchestration. INT4 artifacts may require ORT contrib/custom-op support for `MatMulNBits`; use `LOCAL_QWEN_ASR_MODEL_DIR=<model-dir> cargo test -p local-adapter-qwen-asr real_model_smoke_if_env_set -- --nocapture` as an opt-in real-artifact smoke test.
@@ -266,6 +278,7 @@ The controller depends on the store for metadata/status only. It still does not 
 - Object detection: `aaurelions/yolo11n.onnx` at revision `f46d9b72aa9a0f02bc00484446e2310b1a549bce`; enabled. The model file downloads to `<model_dir>/yolo11n.onnx/yolo11n.onnx`. COCO labels are a separate URL artifact from Ultralytics raw GitHub because the HF repository does not provide labels.
 - OCR: `unlimited-ocr-onnx`, a local artifact exported with `scripts/local/unlimited_ocr_export.py` from `baidu/Unlimited-OCR` at revision `07dea832e22aefee32ad281d4b80551282e1c168` (no published download yet); enabled, CUDA required for the int8 experts.
 - TTS/IndexTTS: `ModaLeap/indextts-1.5-onnx`; enabled. The explicit A-F ONNX, `bpe.model`, `manifest.yaml`, and `manifest.json` subset downloads to `<model_dir>/indextts-1.5-onnx`.
+- TTS/Qwen3-TTS: `qwen3-tts-0.6b-onnx`, a local artifact exported with `scripts/local/qwen3_tts_export.py` from `Qwen/Qwen3-TTS-12Hz-0.6B-Base` at revision `5d83992436eae1d760afd27aff78a71d676296fc` (no published download yet); enabled, and the realtime cascade's default `tts_model`.
 
 Remote downloads use Hugging Face resolve URLs or direct URLs. `HF_TOKEN`/`HUGGINGFACE_HUB_TOKEN` is used for Hugging Face metadata and file requests when present. Explicit HF `files` remain supported; `allow_patterns` are expanded by reading HF model metadata siblings and matching simple `*`/`?` globs. SHA-256 is verified only when configured; otherwise status explicitly records that verification was skipped. No Candle/Python/C++/sidecar path is implemented.
 

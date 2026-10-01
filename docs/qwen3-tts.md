@@ -106,11 +106,14 @@ The adapter owns one thread: ORT's CUDA EP keeps CUDA graphs per thread, and
 the runtime's blocking pool would re-capture the decode frame per request.
 Load warms both graphs (capture, cuDNN plans). A capture runs in CUDA's
 global mode, which fails other threads' stream syncs, so `backend-ort` holds
-a process-wide gate shared around device calls and exclusive for a graph's
-first runs (`gpu_gate.rs`). `StaticIoBinding` binds the KV cache in place and
-fixed device inputs/outputs; per frame the host writes text id, previous
-codes, attention mask, seen-token mask and noise (about 0.2 ms) and reads 16
-codes.
+a process-wide gate (`gpu_gate.rs`) exclusive for a graph's first runs and
+shared around every other call that allocates, copies, frees or runs on the
+device, in every adapter: binding a host input (ORT copies it to the device
+then), creating a binding, a session's load and drop, and the release of
+bindings and device tensors (their `Drop` takes it). `StaticIoBinding`
+binds the KV cache in place and fixed device inputs/outputs; per frame the
+host writes text id, previous codes, attention mask, seen-token mask and
+noise (about 0.2 ms) and reads 16 codes.
 
 Request `params`: `reference_text` (ICL; else x-vector only), `language`
 (`chinese`, `english`, … or `auto`), `do_sample`, `temperature`,
@@ -130,8 +133,9 @@ Streaming: `InferenceEvent::AudioChunk` per vocoder chunk
 | RTF (FP16 / INT8) | 0.12 / 0.09 | 0.12 / 0.09 |
 
 Realtime cascade (`scripts.local.realtime_e2e`, everything on one GPU):
-first audio 0.93–1.05 s after the speaker's audio ends, of which 0.6 s is the
-VAD's end-of-speech silence; server side 0.3–0.5 s (ASR ~160 ms, first clause
+first audio 0.89–0.99 s after the speaker's audio ends (audio mode, where
+the test client answers: 1.11–1.16 s), of which 0.6 s is the VAD's
+end-of-speech silence; server side 0.3–0.5 s (ASR ~160 ms, first clause
 20–150 ms, TTS 50–150 ms). PyTorch (`qwen-tts`, bf16, HF `generate`): RTF
 2.2–3.1 on the same GPU.
 
@@ -156,14 +160,18 @@ python -m scripts.local.qwen3_tts_onnx_run --package workdir/models/qwen3-tts-0.
 # Rust:
 cargo run --release -p local-adapter-qwen3-tts --features cuda --example synthesize -- \
     workdir/models/qwen3-tts-0.6b-onnx scripts/assets/tts-input-mon3tr.wav --ref-text "<transcript>" --repeat 3 "你好。"
-LOCAL_QWEN3_TTS_MODEL_DIR=workdir/models/qwen3-tts-0.6b-onnx LOCAL_QWEN3_TTS_REFERENCE=scripts/assets/tts-input-mon3tr.wav \
-    cargo test --release -p local-adapter-qwen3-tts --features cuda real_model_smoke_if_env_set -- --nocapture
+# Tests run from the crate directory: absolute paths; ORT 1.30 via ORT_DYLIB_PATH (AGENTS.md).
+LOCAL_QWEN3_TTS_MODEL_DIR=<abs>/workdir/models/qwen3-tts-0.6b-onnx LOCAL_QWEN3_TTS_REFERENCE=<abs>/scripts/assets/tts-input-mon3tr.wav \
+    ORT_DYLIB_PATH=<onnxruntime 1.30> cargo test --release -p local-adapter-qwen3-tts --features cuda real_model_smoke_if_env_set -- --nocapture
 python -m scripts.local.realtime_e2e --audio-dir <r00.wav ...> --model-dir workdir/models --ref-text "<transcript>"
 ```
 
 ## Open
 
 * Measure on the RTX 3060 server (Linux: lower launch overhead than WDDM).
+* The cascade with IndexTTS as `tts_model` (whole clauses; no `language` or
+  `reference_text`, which only Qwen3-TTS gets) has not been run end to end
+  since Qwen3-TTS became the default.
 * The vocoder graph keeps shape arithmetic on the CPU, so it cannot replay as
   a CUDA graph; a static-shape export (fixed 4 frames) would fold it away.
 * Publish the package (e.g. a `ModaLeap/qwen3-tts-0.6b-onnx` repo) and pin it

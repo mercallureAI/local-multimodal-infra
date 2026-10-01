@@ -34,10 +34,11 @@
 | 语音识别 | `sensevoice-small-onnx` | 默认启用 | 文本、时间轴、语言、情绪、发言人 |
 | 语音合成 | `indextts-1.5-onnx` | 默认启用 | WAV 音频 |
 | 语音合成 | `indextts-2.5-onnx` | 默认启用（FP16，建议 NVIDIA GPU） | WAV 音频，支持情绪控制 |
+| 语音合成 | `qwen3-tts-0.6b-onnx` | 本地导出后启用（INT8 权重，建议 NVIDIA GPU） | 流式 24 kHz 音频，3 秒参考音频克隆声音，可边接收文字边合成 |
 | 文本向量 | `multilingual-e5-small-onnx` | 默认启用 | 384 维归一化向量 |
 | 文本重排 | `mmarco-minilm-l12-onnx` | 默认启用 | 文档相关性排序与分数 |
 | 对话补全 | `qwen3-4b-instruct-2507-int4-onnx` | 本地导出后启用 | 流式文本与工具调用（Qwen3 模板，KV 前缀复用） |
-| 实时语音 | `voice-cascade` | 默认启用，依赖 ASR、对话与 TTS 模型 | `/v1/realtime` WebSocket 语音对话（Silero VAD + SenseVoice + Qwen3 + IndexTTS，见 `docs/realtime-voice.md`） |
+| 实时语音 | `voice-cascade` | 默认启用，依赖 ASR、对话与 TTS 模型 | `/v1/realtime` WebSocket 语音对话（Silero VAD + SenseVoice + Qwen3 + Qwen3-TTS，TTS 也可换成 IndexTTS，见 `docs/realtime-voice.md`） |
 
 所有模型均通过 ONNX Runtime 运行（运行时加载官方 ONNX Runtime 1.30，见 `docs/implementation-notes.md`）。模型配置表达 CUDA 优先、CPU 回退；实际 provider 仍取决于构建方式、运行环境和具体模型算子支持情况。
 
@@ -152,6 +153,16 @@ curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
 
 `qwen3-4b-instruct-2507-int4-onnx` 没有发布的 ONNX 包，需按 [`configs/providers/chat/qwen3-chat.yaml`](configs/providers/chat/qwen3-chat.yaml) 中的命令从固定 revision 本地导出到 `workdir/models/qwen3-4b-instruct-2507-int4-onnx`。
 
+`qwen3-tts-0.6b-onnx`（实时语音默认的 TTS）同样没有发布的包，需从固定 revision 本地导出（导出环境、图结构、INT8 音质对比与延迟数据见 [`docs/qwen3-tts.md`](docs/qwen3-tts.md)）：
+
+```bash
+hf download Qwen/Qwen3-TTS-12Hz-0.6B-Base --revision 5d83992436eae1d760afd27aff78a71d676296fc --local-dir <src>
+python -m scripts.local.qwen3_tts_export --source-model-dir <src> \
+    --output-dir workdir/models/qwen3-tts-0.6b-onnx --builder-python <装有 onnxruntime-genai 的 python>
+```
+
+在 RTX 4090 上每帧（80 ms 语音）约 5.6 ms，一句话的首段音频约 50 ms 后开始播放；实时语音从说话人停下到听到回答约 0.9–1.0 s（其中 0.6 s 是 VAD 判断说完所需的静音）。
+
 `unlimited-ocr-onnx` 同样没有发布的包，需从 PyTorch 检查点本地导出：
 
 ```bash
@@ -232,6 +243,7 @@ python -m scripts.local.smoke --tests mcp \
 | multilingual-e5-small | [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) | `614241f622f53c4eeff9890bdc4f31cfecc418b3` |
 | mMARCO MiniLM reranker | [cross-encoder/mmarco-mMiniLMv2-L12-H384-v1](https://huggingface.co/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1) | `1427fd652930e4ba29e8149678df786c240d8825` |
 | Unlimited-OCR（本地导出 ONNX 的源模型） | [baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-OCR) | `07dea832e22aefee32ad281d4b80551282e1c168` |
+| Qwen3-TTS-12Hz-0.6B-Base（本地导出 ONNX 的源模型） | [Qwen/Qwen3-TTS-12Hz-0.6B-Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base) | `5d83992436eae1d760afd27aff78a71d676296fc` |
 | Qwen3-4B-Instruct-2507（本地导出 INT4 的源模型） | [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) | `cdbee75f17c01a7cc42f958dc650907174af0554` |
 | Silero VAD v6.2.3 | [snakers4/silero-vad](https://github.com/snakers4/silero-vad) | `5cd7945676eb32225748052e2e6a0580e4686a08` |
 
@@ -245,6 +257,7 @@ python -m scripts.local.smoke --tests mcp \
 - [baidu/Unlimited-OCR](https://github.com/baidu/Unlimited-OCR)：Unlimited-OCR 模型与官方实现（预处理、提示词、R-SWA 与防重复采样）；
 - [index-tts/index-tts](https://github.com/index-tts/index-tts)：IndexTTS 官方实现；
 - [DakeQQ/Text-to-Speech-TTS-ONNX](https://github.com/DakeQQ/Text-to-Speech-TTS-ONNX)：IndexTTS ONNX 导出与推理参考；
+- [QwenLM/Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)：Qwen3-TTS 官方实现（`qwen-tts`），导出与对齐的参考；
 - [snakers4/silero-vad](https://github.com/snakers4/silero-vad)：实时语音的 Silero VAD 模型；
 - [microsoft/onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai)：Qwen3 INT4 ONNX 导出（`models.builder`）；
 - [microsoft/onnxruntime](https://github.com/microsoft/onnxruntime)：CPU / CUDA 推理运行时；
@@ -253,6 +266,8 @@ python -m scripts.local.smoke --tests mcp \
 ### 项目文档
 
 - [实现说明](docs/implementation-notes.md)
+- [实时语音](docs/realtime-voice.md)
+- [Qwen3-TTS 导出与运行](docs/qwen3-tts.md)
 - [开发与验证约束](AGENTS.md)
 - [CPU Compose](docker-compose.yml)
 - [NVIDIA CUDA Compose](docker-compose-nvidia.yml)

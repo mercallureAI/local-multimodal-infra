@@ -34,10 +34,11 @@ Models and input files are not baked into the images. Local configs bind to loop
 | Speech recognition | `sensevoice-small-onnx` | Enabled by default | Text, timeline, language, emotion, speaker |
 | Speech synthesis | `indextts-1.5-onnx` | Enabled by default | WAV audio |
 | Speech synthesis | `indextts-2.5-onnx` | Enabled by default (FP16, NVIDIA GPU recommended) | WAV audio with emotion control |
+| Speech synthesis | `qwen3-tts-0.6b-onnx` | Enabled after a local export (INT8 weights, NVIDIA GPU recommended) | Streamed 24 kHz audio, voice cloned from a 3 s reference, text accepted while it is written |
 | Text embedding | `multilingual-e5-small-onnx` | Enabled by default | 384-dimensional normalized vectors |
 | Reranking | `mmarco-minilm-l12-onnx` | Enabled by default | Document relevance order and scores |
 | Chat completion | `qwen3-4b-instruct-2507-int4-onnx` | Enabled after a local export | Streaming text and tool calls (Qwen3 template, KV prefix reuse) |
-| Realtime voice | `voice-cascade` | Enabled by default; needs the ASR, chat and TTS models | `/v1/realtime` WebSocket voice conversation (Silero VAD + SenseVoice + Qwen3 + IndexTTS, see `docs/realtime-voice.md`) |
+| Realtime voice | `voice-cascade` | Enabled by default; needs the ASR, chat and TTS models | `/v1/realtime` WebSocket voice conversation (Silero VAD + SenseVoice + Qwen3 + Qwen3-TTS, or IndexTTS for TTS, see `docs/realtime-voice.md`) |
 
 All models run on ONNX Runtime (the official ONNX Runtime 1.30, loaded at run time; see `docs/implementation-notes.md`). Model configs ask for CUDA first with CPU fallback; the provider actually used still depends on the build, the environment and each model's operator support.
 
@@ -152,6 +153,16 @@ Other default model IDs:
 
 `qwen3-4b-instruct-2507-int4-onnx` has no published ONNX package; export it from the pinned revision with the commands in [`configs/providers/chat/qwen3-chat.yaml`](configs/providers/chat/qwen3-chat.yaml) into `workdir/models/qwen3-4b-instruct-2507-int4-onnx`.
 
+`qwen3-tts-0.6b-onnx` (the realtime voice's default TTS) has no published package either: export it from a pinned revision (export environment, graphs, INT8 quality comparison and latency numbers in [`docs/qwen3-tts.md`](docs/qwen3-tts.md)):
+
+```bash
+hf download Qwen/Qwen3-TTS-12Hz-0.6B-Base --revision 5d83992436eae1d760afd27aff78a71d676296fc --local-dir <src>
+python -m scripts.local.qwen3_tts_export --source-model-dir <src> \
+    --output-dir workdir/models/qwen3-tts-0.6b-onnx --builder-python <python with onnxruntime-genai>
+```
+
+On an RTX 4090 a frame (80 ms of speech) takes about 5.6 ms and a clause starts playing about 50 ms after it is asked for; in the realtime voice the answer starts about 0.9–1.0 s after the speaker stops (0.6 s of which is the VAD's end-of-speech silence).
+
 `unlimited-ocr-onnx` has no published package either; export it locally from the PyTorch checkpoint:
 
 ```bash
@@ -232,6 +243,7 @@ Both `rpc` and `mcp` include OCR (`--tests ocr` runs it alone); it is reported a
 | multilingual-e5-small | [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) | `614241f622f53c4eeff9890bdc4f31cfecc418b3` |
 | mMARCO MiniLM reranker | [cross-encoder/mmarco-mMiniLMv2-L12-H384-v1](https://huggingface.co/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1) | `1427fd652930e4ba29e8149678df786c240d8825` |
 | Unlimited-OCR (source of the local ONNX export) | [baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-OCR) | `07dea832e22aefee32ad281d4b80551282e1c168` |
+| Qwen3-TTS-12Hz-0.6B-Base (source of the local ONNX export) | [Qwen/Qwen3-TTS-12Hz-0.6B-Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base) | `5d83992436eae1d760afd27aff78a71d676296fc` |
 | Qwen3-4B-Instruct-2507 (source of the local INT4 export) | [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) | `cdbee75f17c01a7cc42f958dc650907174af0554` |
 | Silero VAD v6.2.3 | [snakers4/silero-vad](https://github.com/snakers4/silero-vad) | `5cd7945676eb32225748052e2e6a0580e4686a08` |
 
@@ -245,6 +257,7 @@ The exact files, revisions and SHA-256 sums are the ones in [`configs/providers`
 - [baidu/Unlimited-OCR](https://github.com/baidu/Unlimited-OCR): the Unlimited-OCR model and official implementation (preprocessing, prompt, R-SWA and the no-repeat sampler);
 - [index-tts/index-tts](https://github.com/index-tts/index-tts): the official IndexTTS implementation;
 - [DakeQQ/Text-to-Speech-TTS-ONNX](https://github.com/DakeQQ/Text-to-Speech-TTS-ONNX): reference for IndexTTS ONNX export and inference;
+- [QwenLM/Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS): the official Qwen3-TTS implementation (`qwen-tts`), reference for the export and its checks;
 - [snakers4/silero-vad](https://github.com/snakers4/silero-vad): the Silero VAD model for realtime voice;
 - [microsoft/onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai): Qwen3 INT4 ONNX export (`models.builder`);
 - [microsoft/onnxruntime](https://github.com/microsoft/onnxruntime): CPU / CUDA inference runtime;
@@ -253,6 +266,8 @@ The exact files, revisions and SHA-256 sums are the ones in [`configs/providers`
 ### Project documents
 
 - [Implementation notes](docs/implementation-notes.md)
+- [Realtime voice](docs/realtime-voice.md)
+- [Qwen3-TTS export and runtime](docs/qwen3-tts.md)
 - [Development and verification rules](AGENTS.md)
 - [CPU Compose](docker-compose.yml)
 - [NVIDIA CUDA Compose](docker-compose-nvidia.yml)

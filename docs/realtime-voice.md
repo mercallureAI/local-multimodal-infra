@@ -135,7 +135,7 @@ clients are not browsers.
 | `speaker` | | Cascade: the person talking, one to one. |
 | `instructions` | | Cascade: a persona appended to the bot's instructions. |
 | `ref_audio` | model's `default_reference_audio` | The voice: a WAV file, base64. |
-| `ref_text` | model's `default_reference_text` (with its audio) | What `ref_audio` says: Qwen3-TTS clones the voice in context (closer) instead of from its x-vector alone. |
+| `ref_text` | model's `default_reference_text` (with its audio) | Qwen3-TTS: what `ref_audio` says, so it clones the voice in context (closer) instead of from its x-vector alone. |
 | `tts_language` | model's `tts_language` | Qwen3-TTS: chinese, english, japanese, korean, german, french, russian, portuguese, spanish, italian (unset: the model decides). |
 | `tool_filler` | none | Cascade: said right away when a task is handed off. |
 | `chat_model`, `asr_model`, `tts_model` | the model's `metadata` | |
