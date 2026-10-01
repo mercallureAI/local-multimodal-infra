@@ -1,18 +1,58 @@
 id: indextts-2.5-onnx
-name: IndexTTS 2.5 ONNX FP16 (experimental)
-enabled: false
+name: IndexTTS 2.5 ONNX FP16
+enabled: true
 task_kinds:
   - tts.synthesize
 adapter: index_tts2
 backend: ort
 artifacts:
-  # Local export (path omitted: <model_dir>/indextts-2.5-onnx):
-  #   python scripts/indextts2_export.py export   ... --raw-dir <raw>
-  #   python scripts/indextts2_export.py optimize ... --raw-dir <raw> --output-dir <dir> --precision fp16
-  #   python scripts/indextts2_export.py package  ... --output-dir <dir> --precision fp16
-  # The directory holds the IndexTTS2_*.onnx runtime graphs, the shared
-  # initializer blob, the tiktoken vocabulary, tokenizer.json and manifest.json.
-  - type: local
+  # The fp16 package written by `scripts/indextts2_export.py package`
+  # (path omitted: startup materializes to <model_dir>/indextts-2.5-onnx).
+  - type: hugging_face
+    repo_id: ModaLeap/indextts-2.5-onnx
+    revision: fd246cb6c2cf046113cd3400565edf681ac1b68b
+    files:
+      - IndexTTS2_ReferencePreprocess.onnx
+      - IndexTTS2_Conditioning.onnx
+      - IndexTTS2_TargetPrefill_sampling.onnx
+      - IndexTTS2_DecodeStep_sampling.onnx
+      - IndexTTS2_Synthesis.onnx
+      - IndexTTS2_CFMEstimator.onnx
+      - IndexTTS2_Decoder.onnx
+      - IndexTTS2_Metadata.onnx
+      - IndexTTS_SharedInitializers.onnx
+      - IndexTTS_SharedInitializers.onnx.data
+      - multilingual_zh_ja_yue_char_del.tiktoken
+      - tokenizer.json
+      - manifest.json
+      - config.json
+  # Mandarin frontend (WeText TN + g2pW polyphones), downloaded into the
+  # model directory's zh-tts-frontend/; see its NOTICE for the licenses.
+  - type: hugging_face
+    repo_id: ModaLeap/zh-tts-frontend
+    revision: ba6b85aeb17ebc58d2d3d73121096f9495ee710e
+    path: zh-tts-frontend
+    files:
+      - config.json
+      - manifest.json
+      - NOTICE
+      - LICENSES/Apache-2.0.txt
+      - LICENSES/CC-BY-SA-4.0.txt
+      - LICENSES/MIT.txt
+      - LICENSES/Unicode-3.0.txt
+      - g2pw/g2pw_int8.onnx
+      - g2pw/meta.json
+      - g2pw/vocab.txt
+      - mainland/phrases.tsv
+      - mainland/readings.tsv
+      - paddlespeech/polyphonic.tsv
+      - pinyin/chars.tsv
+      - pinyin/phrases.tsv
+      - pinyin/t2s.tsv
+      - wetext/en/tn/tagger.fst
+      - wetext/en/tn/verbalizer.fst
+      - wetext/zh/tn/tagger.fst
+      - wetext/zh/tn/verbalizer.fst
 runtime:
   # FP16 weights target NVIDIA GPUs; CPU remains a slow functional fallback.
   provider_order: [cuda, cpu]
@@ -29,6 +69,5 @@ metadata:
   runtime: onnxruntime
   model_family: index_tts2
   task: text-to-speech
-  experimental: true
   precision: fp16
   sample_rate: 22050

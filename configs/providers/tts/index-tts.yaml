@@ -1,6 +1,6 @@
 id: indextts-1.5-onnx
-name: IndexTTS 1.5 ONNX (experimental)
-enabled: false
+name: IndexTTS 1.5 ONNX
+enabled: true
 task_kinds:
   - tts.synthesize
 adapter: index_tts
@@ -8,6 +8,7 @@ backend: ort
 artifacts:
   - type: hugging_face
     repo_id: ModaLeap/indextts-1.5-onnx
+    revision: 3f1a422cd97a0b7dbb9b6ad4698dc0fde66796d1
     # path omitted: startup materializes to <model_dir>/indextts-1.5-onnx
     files:
       - IndexTTS_A.onnx
@@ -19,6 +20,34 @@ artifacts:
       - bpe.model
       - manifest.json
       - manifest.yaml
+      - config.json
+  # Mandarin frontend (WeText TN + g2pW polyphones), downloaded into the
+  # model directory's zh-tts-frontend/; see its NOTICE for the licenses.
+  - type: hugging_face
+    repo_id: ModaLeap/zh-tts-frontend
+    revision: ba6b85aeb17ebc58d2d3d73121096f9495ee710e
+    path: zh-tts-frontend
+    files:
+      - config.json
+      - manifest.json
+      - NOTICE
+      - LICENSES/Apache-2.0.txt
+      - LICENSES/CC-BY-SA-4.0.txt
+      - LICENSES/MIT.txt
+      - LICENSES/Unicode-3.0.txt
+      - g2pw/g2pw_int8.onnx
+      - g2pw/meta.json
+      - g2pw/vocab.txt
+      - mainland/phrases.tsv
+      - mainland/readings.tsv
+      - paddlespeech/polyphonic.tsv
+      - pinyin/chars.tsv
+      - pinyin/phrases.tsv
+      - pinyin/t2s.tsv
+      - wetext/en/tn/tagger.fst
+      - wetext/en/tn/verbalizer.fst
+      - wetext/zh/tn/tagger.fst
+      - wetext/zh/tn/verbalizer.fst
 runtime:
   # Root FP32 artifacts use CUDA when available and retain CPU fallback.
   provider_order: [cuda, cpu]
@@ -35,7 +64,6 @@ metadata:
   runtime: onnxruntime
   model_family: index_tts
   task: text-to-speech
-  experimental: true
   precision: fp32
   artifact_layout: IndexTTS_A.onnx through IndexTTS_F.onnx plus bpe.model and manifest.yaml/json at the artifact root; FP32-only. Existing q4/ or fp16/ cache directories are ignored and no longer documented as supported runtime targets.
   mvp_status: Root FP32 A-F ORT sessions are configured for CUDA with CPU fallback. Real NVIDIA hardware execution remains unverified; q4cpu/fp16gpu paths remain withdrawn.

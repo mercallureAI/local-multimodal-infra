@@ -1,209 +1,243 @@
 # local-multimodal-infra
 
-> Turn local compute into a multimodal service for agents. It exposes a local MCP Server and an OpenAI-compatible API Server so agents can use local vision, speech recognition, speech synthesis, and related capabilities.
+> Turn the CPU / NVIDIA GPU of a local or private-network machine into multimodal inference services that agents can call.
 
 [中文 README](README.md)
 
-## Project overview
+## Overview
 
-`local-multimodal-infra` is a local multimodal compute gateway. Its goal is simple: **turn compute on your machine or private network into easily deployable model capabilities and expose them to agents with minimal setup**.
+`local-multimodal-infra` is **local multimodal infrastructure**. It manages models, files, tasks and runtimes in one place and offers them to agents and applications through standard MCP, legacy JSON-RPC and a subset of the OpenAI-compatible API.
 
-Think of it as:
+The project uses a controller / worker architecture:
 
-- **A local toolbox for agents**: agents do not need to know how models are loaded, where files live, or which worker runs a task.
-- **A standard MCP Server**: a separate official-SDK Streamable HTTP endpoint.
-- **A legacy JSON-RPC API**: controller-port model management, file upload, inference tasks, and result lookup.
-- **An OpenAI-compatible API Server**: limited OpenAI-style endpoints for existing apps and agent workflows.
-
-## When to use it
-
-- You want your agents to use compute on your own machine or idle machines for multimodal capabilities.
-- You want to turn a CPU/GPU/high-memory machine into an inference node for private-network agents.
-- You want images, audio, and model artifacts to stay local instead of going to a cloud service.
-- You need a local API Server for an agent framework.
-- You want to dynamically load and unload models under limited compute to maximize productivity and cost efficiency.
-- You want complete, maintainable local multimodal inference infrastructure instead of several one-off model scripts.
-- You want to build agents that coordinate cloud and local capabilities.
-
-## How agents use it
-
-The project exposes three main entry points:
-
-| Entry point | For | Purpose |
+| Component | Role | Default address |
 | --- | --- | --- |
-| Legacy JSON-RPC API | Agents / tool calls | `POST /rpc/admin` uses `LOCAL_ADMIN_TOKEN`; `POST /rpc/infer` accepts any configured `LOCAL_MCP_INFER_TOKENS` token. |
-| Standard MCP Server | Agents / standard MCP clients | Admin: `http://127.0.0.1:17892/mcp/admin`; inference: `http://127.0.0.1:17892/mcp/infer`. |
-| OpenAI-compatible API Server | Apps / OpenAI-style clients | Model listing plus inference guarded by `LOCAL_MCP_INFER_TOKENS`. |
+| Controller | Model and task management, file uploads, APIs, task scheduling | `http://127.0.0.1:17890` |
+| Standard MCP Server | Separate admin and inference tool catalogs | `http://127.0.0.1:17892/mcp/admin`, `http://127.0.0.1:17892/mcp/infer` |
+| Worker | Loads ONNX models and runs inference | `http://127.0.0.1:17891` |
 
-Default service addresses:
+All runtime data lives in `workdir`:
 
-- Controller / API Server / legacy JSON-RPC: `http://127.0.0.1:17890`
-- Legacy JSON-RPC: `POST /rpc/admin`, `POST /rpc/infer`
-- Standard MCP Streamable HTTP: `http://127.0.0.1:17892/mcp/admin`, `http://127.0.0.1:17892/mcp/infer`
-- Admin MCP/RPC requires `LOCAL_ADMIN_TOKEN`; send it as `Authorization: Bearer <token>` or `x-local-admin-token`
-- MCP, RPC, and OpenAI-compatible inference share optional `LOCAL_MCP_INFER_TOKENS=token-a,token-b`; an empty/unset list leaves inference open, while a non-empty list requires any one listed token via Bearer or `x-local-infer-token`. `GET /v1/models` remains an unauthenticated catalog route.
-- Model administration: `list_models` / `get_model` include `downloaded` and `download_state`; `download_model` queues background work and deduplicates both active and already-complete model downloads; use `get_model_download_status` for aggregate and per-file state.
-- Worker: `http://127.0.0.1:17891`
+- `workdir/models`: model artifacts;
+- `workdir/data`: SQLite, uploads, generated results, logs and temporary files.
 
-External agents should generally create a task, upload files, and wait for the result. This avoids sharing host file paths with the agent.
+Models and input files are not baked into the images. Local configs bind to loopback by default; the current Docker Compose publishes controller `17890` and worker `17891` on all host interfaces, while MCP `17892` is published on loopback only. Before deploying, adjust the port bindings to your use and configure authentication and network access control as well.
 
-## Current capability status
+## Features
 
-| Capability | Status |
-| --- | --- |
-| Object detection | `yolo11n.onnx` |
-| Speech recognition | `qwen3-asr-0.6b-onnx` |
-| Speech synthesis | `indextts-1.5-onnx` |
-| Chat completion | `qwen3-4b-instruct-2507-int4-onnx` (local export; streaming text and tool calls on `/v1/chat/completions`) |
-| Realtime voice | `voice-cascade`: Silero VAD, SenseVoice, Qwen3 and IndexTTS in one WebSocket conversation on `/v1/realtime` (see `docs/realtime-voice.md`) |
-| Artifact management | Lightweight private-network storage that manages inputs sent to models and outputs generated by models. |
-| Model management | Configured model declaration, download, enable/disable, and status lookup. |
-| Local validation | A smoke harness validates Docker, service, and API paths. |
+### Inference
 
-## Quick start
+| Capability | Default model | Status | Main output |
+| --- | --- | --- | --- |
+| Object detection | `yolo11n.onnx` | Enabled by default | Classes, confidences, bounding boxes |
+| Speech recognition | `sensevoice-small-onnx` | Enabled by default | Text, timeline, language, emotion, speaker |
+| Speech synthesis | `indextts-1.5-onnx` | Enabled by default | WAV audio |
+| Speech synthesis | `indextts-2.5-onnx` | Enabled by default (FP16, NVIDIA GPU recommended) | WAV audio with emotion control |
+| Text embedding | `multilingual-e5-small-onnx` | Enabled by default | 384-dimensional normalized vectors |
+| Reranking | `mmarco-minilm-l12-onnx` | Enabled by default | Document relevance order and scores |
+| Chat completion | `qwen3-4b-instruct-2507-int4-onnx` | Enabled after a local export | Streaming text and tool calls (Qwen3 template, KV prefix reuse) |
+| Realtime voice | `voice-cascade` | Enabled by default; needs the ASR, chat and TTS models | `/v1/realtime` WebSocket voice conversation (Silero VAD + SenseVoice + Qwen3 + IndexTTS, see `docs/realtime-voice.md`) |
 
-This project provides Docker Compose for a quick start, and you can also run the local binaries directly.
+All models run on ONNX Runtime (the official ONNX Runtime 1.30, loaded at run time; see `docs/implementation-notes.md`). Model configs ask for CUDA first with CPU fallback; the provider actually used still depends on the build, the environment and each model's operator support.
+
+SenseVoice ASR includes FSMN-VAD and CAM++ speaker identification. By default it returns plain text, `timestamped_text` at about 10-second granularity, `segments[].speaker` and `speakers[]`. Use `timestamps`, `timestamp_granularity_sec`, `token_timestamps` and `speaker_diarization` to adjust or turn off these results.
+
+### Interfaces
+
+| Interface | Use | Authentication |
+| --- | --- | --- |
+| `POST /rpc/admin` | Legacy JSON-RPC model, node and asset management | Requires `LOCAL_ADMIN_TOKEN` |
+| `POST /rpc/infer` | Legacy JSON-RPC inference and generic tasks | Enforced once `LOCAL_MCP_INFER_TOKENS` is set |
+| `/mcp/admin` | Standard MCP admin tools | Requires `LOCAL_ADMIN_TOKEN` |
+| `/mcp/infer` | Standard MCP inference tools | Enforced once `LOCAL_MCP_INFER_TOKENS` is set |
+| `/v1/models` | OpenAI-compatible model list | None |
+| `/v1/audio/transcriptions` | OpenAI-compatible ASR | `LOCAL_MCP_INFER_TOKENS` |
+| `/v1/audio/speech` | OpenAI-compatible TTS | `LOCAL_MCP_INFER_TOKENS` |
+| `/v1/embeddings` | OpenAI-compatible embeddings | `LOCAL_MCP_INFER_TOKENS` |
+| `/v1/chat/completions` | OpenAI-compatible chat (`stream: true` uses SSE) | `LOCAL_MCP_INFER_TOKENS` |
+| `/v1/realtime` | Realtime voice WebSocket (VAD → ASR → chat → TTS, see `docs/realtime-voice.md`) | `LOCAL_MCP_INFER_TOKENS` |
+| `/rerank`, `/v1/rerank`, `/v2/rerank` | vLLM / Jina / Cohere style reranking | `LOCAL_MCP_INFER_TOKENS` |
+
+Admin and all MCP, RPC and OpenAI-compatible inference interfaces accept `Authorization: Bearer <token>`; legacy JSON-RPC and OpenAI-compatible inference also accept `x-local-infer-token`, and the admin interfaces accept `x-local-admin-token`.
+
+### Infrastructure
+
+- Model configs, asynchronous downloads, SHA-256 checks, download status and deduplication of concurrent downloads;
+- Enabling and disabling models, lazy loading, concurrency limits and idle unloading;
+- Controller / worker scheduling, with CPU / CUDA provider selection and fallback;
+- Signed upload URLs, task inputs, generated artifacts and local asset management;
+- Standard MCP direct tools and the generic "create task → upload files → start → wait for result" flow;
+- Smoke harness for release, RPC, MCP and real-model call chains.
+
+## Quick deployment
+
+### 1. Prepare the configuration
+
+You need Docker and Docker Compose. Models are not shipped with the images; download them into `workdir/models` after the first start.
 
 ```bash
 cp .env.example .env
-docker compose up --build
 ```
 
-With Docker Compose you get:
+Edit `.env` and replace at least these placeholders:
 
-- A controller that exposes legacy JSON-RPC, the standard MCP Server, and the OpenAI-compatible API Server.
-- A worker that loads models and runs local inference.
-- A local `./workdir` directory for models, data, uploads, and logs.
+```dotenv
+LOCAL_WORKER_REGISTRATION_TOKEN=replace-with-a-long-random-worker-registration-token
+LOCAL_UPLOAD_SIGNING_SECRET=replace-with-a-long-random-upload-signing-secret
+LOCAL_ADMIN_TOKEN=replace-with-a-long-random-admin-token
+LOCAL_MCP_INFER_TOKENS=
+LOCAL_PUBLIC_BASE_URL=http://127.0.0.1:17890
+```
 
-Real models are not baked into the image. After the first startup, download the default models through the admin interface or place artifacts under `workdir/models` yourself.
+With `LOCAL_MCP_INFER_TOKENS` empty, the inference interfaces require no authentication; set it to a comma-separated list of tokens and the MCP, JSON-RPC and OpenAI-compatible inference interfaces all require one of them.
 
-### NVIDIA GPU Compose
+If the service is only for this machine, change `17890:17890` and `17891:17891` in the Compose file to `127.0.0.1:17890:17890` and `127.0.0.1:17891:17891`. `/v1/models`, the health check and some asset routes are outside inference authentication, so still protect the controller port with network access control.
 
-The default command above remains the CPU build and requests no GPU. For NVIDIA,
-install a current NVIDIA driver plus the
-[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html),
-and Docker Compose, then verify the prerequisites:
+### 2. Start the CPU services
 
 ```bash
-docker compose version
+docker compose up -d --build
+docker compose ps
+curl --fail http://127.0.0.1:17890/health
+```
+
+### 3. Start the NVIDIA CUDA services
+
+A CUDA deployment needs the NVIDIA driver, the NVIDIA Container Toolkit and a working `nvidia-smi`. The image uses the CUDA 12 build of ONNX Runtime and supports Linux x86_64 containers:
+
+```bash
 nvidia-smi
+ORT_CUDA_VERSION=12 docker compose -f docker-compose-nvidia.yml up -d --build
+docker compose -f docker-compose-nvidia.yml exec worker nvidia-smi
 ```
 
-Then run:
+CUDA Compose gives the GPU to the worker only; the controller keeps running the CPU image. `/health` only means the services are up; it does not prove that a model has run inference on CUDA.
+
+### 4. Download models
+
+First list the configured models and their download status:
 
 ```bash
-cp .env.example .env
-ORT_CUDA_VERSION=12 docker compose -f docker-compose-nvidia.yml up --build
-```
-
-`ORT_CUDA_VERSION` defaults to and currently supports `12`; the image adds the
-official ONNX Runtime 1.30.0 CUDA 12 build, which the worker loads at run time.
-This path is currently Linux x86_64 only, matching that published build. The NVIDIA worker alone reserves one GPU
-through `deploy.resources.reservations.devices`
-and uses a distinct `local-multimodal-infra:nvidia-cuda12` image; the controller
-continues to use the CPU image and receives no GPU.
-
-CPU and NVIDIA Compose share the sole `configs/providers` catalog (one
-directory per model category). YOLO, Qwen
-ASR, and FP32 IndexTTS express `[cuda, cpu]` intent. Before loading sessions,
-runtime availability resolution turns this into `[cpu]` when CUDA is not
-compiled or when a cached process-level tiny CUDA session probe cannot register
-and initialize the EP, without attempting model CUDA sessions; when usable it
-remains CUDA-first with CPU fallback. This probe does not validate every model
-or operator, and a model-specific CUDA load can still fall back to CPU.
-IndexTTS policy and all six A, B, C, D, E, and F sessions carry
-this order and report their selected provider, but real NVIDIA
-hardware/artifact validation is still outstanding.
-TensorRT is unsupported and out of scope.
-
-Do not use `/health` as proof of GPU inference. Verify container visibility
-with `docker compose -f docker-compose-nvidia.yml exec worker nvidia-smi`.
-After downloading/enabling the YOLO artifacts, copy the checked-in sample into
-the shared worker-visible workdir and send a real supported direct request:
-
-```bash
-mkdir -p workdir/data
-cp scripts/assets/yolo-input.jpg workdir/data/yolo-input.jpg
-curl --fail-with-body http://127.0.0.1:17890/rpc/infer \
+curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
   -H 'content-type: application/json' \
-  --data '{"jsonrpc":"2.0","id":"gpu-yolo","method":"object_detect","params":{"model":"yolo11n.onnx","image":{"path":"/app/workdir/data/yolo-input.jpg","mime":"image/jpeg"}}}'
-docker compose -f docker-compose-nvidia.yml logs worker |
-  grep 'lazy loading model'
-docker compose -f docker-compose-nvidia.yml exec worker nvidia-smi dmon -s pucvmet
+  -H 'x-local-admin-token: replace-with-your-admin-token' \
+  --data '{"jsonrpc":"2.0","id":"models","method":"list_models","params":{}}'
 ```
 
-Start `nvidia-smi dmon` in another terminal during the request. The lazy-load
-log shows the effective provider order and dmon can show concurrent GPU
-activity; neither proves per-node GPU placement.
-The hardware snapshot's `has_cuda` currently remains `false` because
-control-plane reporting does not probe NVML; this does not determine ORT CUDA
-EP selection.
+Submit an asynchronous download and query the per-file status:
 
-## Local development
+```bash
+curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
+  -H 'content-type: application/json' \
+  -H 'x-local-admin-token: replace-with-your-admin-token' \
+  --data '{"jsonrpc":"2.0","id":"download","method":"download_model","params":{"id":"sensevoice-small-onnx"}}'
 
-Without Docker, run the controller and worker directly. See [AGENTS.md](AGENTS.md) and [Implementation notes](docs/implementation-notes.md) for commands, service rules, and smoke harness details.
+curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
+  -H 'content-type: application/json' \
+  -H 'x-local-admin-token: replace-with-your-admin-token' \
+  --data '{"jsonrpc":"2.0","id":"status","method":"get_model_download_status","params":{"id":"sensevoice-small-onnx"}}'
+```
 
-Common smoke harness aliases:
+Other default model IDs:
 
-- `mcp`: runs the standard MCP SDK group against the isolated `/mcp/admin` and `/mcp/infer` endpoints, including authentication and catalog separation checks.
-- `all`: expands both `rpc` and `mcp`, while still honoring skip flags such as `--skip-yolo`, `--skip-qwen-asr`, and `--skip-indextts`.
-- `mcp_standard`: validates standard MCP tool listing, admin/catalog/assets, and generic/direct tool calls with the official Python MCP SDK, not by pretending `/rpc/*` is MCP.
+- `yolo11n.onnx`
+- `multilingual-e5-small-onnx`
+- `mmarco-minilm-l12-onnx`
+- `indextts-1.5-onnx`
+- `indextts-2.5-onnx` (FP16, about 2.8 GB)
+- `voice-cascade` (downloads only Silero VAD; the ASR, chat and TTS models the conversation uses are downloaded separately)
+
+`qwen3-4b-instruct-2507-int4-onnx` has no published ONNX package; export it from the pinned revision with the commands in [`configs/providers/chat/qwen3-chat.yaml`](configs/providers/chat/qwen3-chat.yaml) into `workdir/models/qwen3-4b-instruct-2507-int4-onnx`.
+
+### 5. Using it from an agent
+
+Give agents only the inference MCP:
+
+- Inference: `http://127.0.0.1:17892/mcp/infer`
+- Admin: `http://127.0.0.1:17892/mcp/admin`, configured separately and only when the agent really needs to download, enable or disable models
+
+A common Streamable HTTP MCP configuration looks like this; file and field names vary slightly between agents:
+
+```json
+{
+  "mcpServers": {
+    "local-multimodal": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:17892/mcp/infer",
+      "headers": {
+        "Authorization": "Bearer replace-with-your-infer-token"
+      }
+    }
+  }
+}
+```
+
+If `LOCAL_MCP_INFER_TOKENS` is empty, drop `headers`. For the admin tools, add a separate MCP server entry with the URL changed to `/mcp/admin` and `LOCAL_ADMIN_TOKEN`; do not reuse the inference token.
+
+Once connected, an agent can call `object_detect`, `asr_transcribe`, `tts_synthesize`, `text_embed` and `text_rerank` directly. For images or audio the agent cannot reach directly, use `create_task` → upload to the returned signed URL → `start_task` → `wait_task`; no host file paths need to be shared with the worker.
 
 Every MCP tool that returns an inference result accepts `with_url_result`:
 
-- `auto` (default) preserves the original inline structure through 1000 UTF-8 bytes; larger serialized results become an UTF-8-safe preview of at most 1000 bytes plus a download URL.
-- `on` always creates a download and includes an at-most-1000-byte preview (the full result when it is shorter).
-- `off` always returns the complete original result inline.
+- `auto` (default): when the result's UTF-8 serialized text is at most 1000 bytes, it is returned inline in its original structure; otherwise a preview of the first 1000 bytes (cut at a UTF-8 boundary) and a download URL are returned.
+- `on`: always returns a preview of at most 1000 UTF-8 bytes and a download URL; for short results the preview is the full text.
+- `off`: always returns the full original result inline through MCP.
 
-URL-backed results are managed `.txt` artifacts with `text/plain; charset=utf-8`. The response includes `preview`, `truncated`, `download_url`, `artifact_uri`, `size_bytes`, `sha256`, and `expires_at`. Text artifacts expire after 24 hours by default; identical content reuses and renews the same artifact. Signed download URLs expire after 10 minutes by default and a repeated call issues a fresh URL.
+In URL mode the full result is stored as a `.txt` artifact with `text/plain; charset=utf-8`, and the response includes `preview`, `truncated`, `download_url`, `artifact_uri`, `size_bytes`, `sha256` and `expires_at`. These text artifacts are managed by the artifact center: they are cleaned up after 24 hours by default, identical content reuses the same artifact and renews it, and signed download URLs are valid for 10 minutes by default; call again for a new URL.
 
+To integrate with OpenAI-style clients, point the base URL at `http://127.0.0.1:17890/v1` and use any token from `LOCAL_MCP_INFER_TOKENS` as the API key / Bearer token. This interface implements only the local capabilities listed above; it is not the full OpenAI API.
 
-Examples:
+### 6. Verify the deployment
+
+The repository includes a smoke harness that builds, starts the services, waits for health, sends real requests and cleans up the processes:
 
 ```bash
-python -m scripts.local.smoke --tests rpc --workdir ./workdir --model-dir ./workdir/models
-python -m scripts.local.smoke --tests mcp --workdir ./workdir --model-dir ./workdir/models
-python -m scripts.local.smoke --tests all --workdir ./workdir --model-dir ./workdir/models
+python -m scripts.local.smoke --tests rpc \
+  --workdir ./workdir --model-dir ./workdir/models
+
+python -m scripts.local.smoke --tests mcp \
+  --workdir ./workdir --model-dir ./workdir/models
 ```
 
-Common configuration entry points:
+The `mcp` tests need the official `mcp` SDK in the current Python environment. For release verification, run `cargo build --release --bins` first and add `--skip-build --release` to the smoke harness.
 
-- `configs/controller.yaml`
-- `configs/worker.yaml`
-- `configs/providers/<category>/*.yaml` (categories: `asr`, `tts`, `chat`,
-  `embedding`, `rerank`, `detect`, `realtime`)
+## References
 
-## Directory conventions
+### Model repositories
 
-- `workdir/models`: real model artifacts.
-- `workdir/data`: SQLite, uploads, logs, and generated outputs.
-- `docker-compose.yml` / `Dockerfile`: CPU container startup path.
-- `docker-compose-nvidia.yml` / `Dockerfile.nvidia`: NVIDIA CUDA 12 worker startup path.
-- `scripts/local/smoke.py`: local smoke harness.
-- `docs/implementation-notes.md`: implementation details.
+| Use | Repository | Pinned revision |
+| --- | --- | --- |
+| YOLO11n ONNX | [aaurelions/yolo11n.onnx](https://huggingface.co/aaurelions/yolo11n.onnx) | `f46d9b72aa9a0f02bc00484446e2310b1a549bce` |
+| YOLO COCO labels | [ultralytics/ultralytics](https://github.com/ultralytics/ultralytics/blob/eba96641b5cea142e21641909d6400fef7134244/ultralytics/cfg/datasets/coco.yaml) `coco.yaml` | `eba96641b5cea142e21641909d6400fef7134244` |
+| SenseVoiceSmall ONNX | [haixuantao/SenseVoiceSmall-onnx](https://huggingface.co/haixuantao/SenseVoiceSmall-onnx) | `c4c8747214bed7ebbf2557e0412c19efa540023c` |
+| FSMN-VAD ONNX | [funasr/fsmn-vad-onnx](https://huggingface.co/funasr/fsmn-vad-onnx) | `f6e9fbb4cefa7397216c763f21307993f147f585` |
+| FSMN-VAD config | [MoYoYoTech/Translator](https://huggingface.co/MoYoYoTech/Translator) | `58fbad4088820ed1253955c8faf1444cd0b2dc69` |
+| CAM++ Speaker | [welcomyou/campplus-3dspeaker-200k-onnx](https://huggingface.co/welcomyou/campplus-3dspeaker-200k-onnx) | `6265ff7af2a104d745b4389026ed9815c6c1c6ff` |
+| IndexTTS 1.5 ONNX | [ModaLeap/indextts-1.5-onnx](https://huggingface.co/ModaLeap/indextts-1.5-onnx) | `3f1a422cd97a0b7dbb9b6ad4698dc0fde66796d1` |
+| IndexTTS 2.5 ONNX FP16 | [ModaLeap/indextts-2.5-onnx](https://huggingface.co/ModaLeap/indextts-2.5-onnx) | `fd246cb6c2cf046113cd3400565edf681ac1b68b` |
+| IndexTTS Mandarin frontend (WeText + g2pW) | [ModaLeap/zh-tts-frontend](https://huggingface.co/ModaLeap/zh-tts-frontend) | `ba6b85aeb17ebc58d2d3d73121096f9495ee710e` |
+| multilingual-e5-small | [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) | `614241f622f53c4eeff9890bdc4f31cfecc418b3` |
+| mMARCO MiniLM reranker | [cross-encoder/mmarco-mMiniLMv2-L12-H384-v1](https://huggingface.co/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1) | `1427fd652930e4ba29e8149678df786c240d8825` |
+| Qwen3-4B-Instruct-2507 (source of the local INT4 export) | [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) | `cdbee75f17c01a7cc42f958dc650907174af0554` |
+| Silero VAD v6.2.3 | [snakers4/silero-vad](https://github.com/snakers4/silero-vad) | `5cd7945676eb32225748052e2e6a0580e4686a08` |
 
-## Roadmap
+The exact files, revisions and SHA-256 sums are the ones in [`configs/providers`](configs/providers) (one directory per category): Hugging Face artifacts are pinned to a commit and URL artifacts carry a SHA-256, which the `local-registry` tests check. The IndexTTS 1.5 and 2.5 configs both download the Mandarin frontend (`ModaLeap/zh-tts-frontend`, about 177 MB; per-file licenses in its `NOTICE`) into `zh-tts-frontend/` inside their model directories; `scripts/local/zh_frontend_export.py` can also rebuild it locally.
 
-- [ ] Improve the standard MCP implementation while keeping the legacy JSON-RPC boundary clear
-- [ ] More mature API Server
-- [ ] Stronger runtime management
-- [ ] IndexTTS local capability recovery
-- [ ] Optional hardware acceleration paths
-...
+### Reference code
 
-## More documentation
+- [modelscope/FunASR](https://github.com/modelscope/FunASR): reference for SenseVoice ONNX preprocessing, inference and the FSMN-VAD pipeline;
+- [FunAudioLLM/SenseVoice](https://github.com/FunAudioLLM/SenseVoice): the SenseVoice model and official implementation;
+- [ultralytics/ultralytics](https://github.com/ultralytics/ultralytics): YOLO preprocessing, output decoding and the COCO labels;
+- [index-tts/index-tts](https://github.com/index-tts/index-tts): the official IndexTTS implementation;
+- [DakeQQ/Text-to-Speech-TTS-ONNX](https://github.com/DakeQQ/Text-to-Speech-TTS-ONNX): reference for IndexTTS ONNX export and inference;
+- [snakers4/silero-vad](https://github.com/snakers4/silero-vad): the Silero VAD model for realtime voice;
+- [microsoft/onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai): Qwen3 INT4 ONNX export (`models.builder`);
+- [microsoft/onnxruntime](https://github.com/microsoft/onnxruntime): CPU / CUDA inference runtime;
+- [modelcontextprotocol/rust-sdk](https://github.com/modelcontextprotocol/rust-sdk): the standard MCP Rust SDK.
+
+### Project documents
 
 - [Implementation notes](docs/implementation-notes.md)
-- [AGENTS.md](AGENTS.md)
-- [Dockerfile](Dockerfile)
-- [docker-compose.yml](docker-compose.yml)
-- [docker-compose-nvidia.yml](docker-compose-nvidia.yml)
-- [.env.example](.env.example)
-
-Release smoke examples:
-
-```bash
-cargo build --release --bins
-python -m scripts.local.smoke --skip-build --release --tests mcp --workdir ./workdir --model-dir ./workdir/models --ready-timeout 60 --request-timeout 600
-python -m scripts.local.smoke --skip-build --release --tests rpc --workdir ./workdir --model-dir ./workdir/models --ready-timeout 60 --request-timeout 600
-```
+- [Development and verification rules](AGENTS.md)
+- [CPU Compose](docker-compose.yml)
+- [NVIDIA CUDA Compose](docker-compose-nvidia.yml)
+- [Environment variable example](.env.example)

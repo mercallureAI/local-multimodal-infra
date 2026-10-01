@@ -2,10 +2,12 @@
 //! normalization in place of the lightweight Rust rules, and g2pW polyphone
 //! readings passed to the model as pinyin.
 //!
-//! Loaded from `LOCAL_ZH_TTS_FRONTEND_DIR`, else from `zh-tts-frontend` next
-//! to the model's artifact directory (`<model_dir>/zh-tts-frontend`, built by
-//! `scripts/local/zh_frontend_export.py`). Without it, or with
-//! `LOCAL_ZH_TTS_FRONTEND=off`, the adapters keep their built-in frontend.
+//! Loaded from `LOCAL_ZH_TTS_FRONTEND_DIR`, else from `zh-tts-frontend` inside
+//! the model's artifact directory (where the model specs download
+//! `ModaLeap/zh-tts-frontend`), else from `zh-tts-frontend` next to it
+//! (`<model_dir>/zh-tts-frontend`, as `scripts/local/zh_frontend_export.py`
+//! builds it). Without it, or with `LOCAL_ZH_TTS_FRONTEND=off`, the adapters
+//! keep their built-in frontend.
 //!
 //! Only characters whose reading in context differs from their dictionary
 //! reading are annotated (银行 `HANG2`, 了解 `LIAO3`, 东西 `XI5`): the model
@@ -65,8 +67,13 @@ impl MandarinFrontend {
         if let Some(dir) = env::var_os("LOCAL_ZH_TTS_FRONTEND_DIR") {
             return Some(PathBuf::from(dir));
         }
-        let dir = artifact_root.parent()?.join(ASSET_DIR_NAME);
-        dir.is_dir().then_some(dir)
+        std::iter::once(artifact_root.join(ASSET_DIR_NAME))
+            .chain(
+                artifact_root
+                    .parent()
+                    .map(|parent| parent.join(ASSET_DIR_NAME)),
+            )
+            .find(|dir| dir.is_dir())
     }
 
     /// `locate` + `load`, logging instead of failing: the built-in frontend

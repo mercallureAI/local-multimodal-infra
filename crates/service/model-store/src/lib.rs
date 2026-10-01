@@ -1022,11 +1022,19 @@ fn normalize_artifact_path(artifact: &mut ModelArtifact, base: &Path) -> Result<
             for pattern in &artifact.allow_patterns {
                 validate_relative_component_path(pattern, "Hugging Face allow_pattern")?;
             }
+            let single_file = artifact.files.len() == 1 && artifact.allow_patterns.is_empty();
+            let dir = artifact.hugging_face_dir(base, single_file);
+            if dir != base {
+                let subdir = dir.strip_prefix(base).map_err(|e| {
+                    InfraError::Config(format!("strip Hugging Face path prefix: {e}"))
+                })?;
+                validate_relative_component_path(subdir, "Hugging Face artifact path")?;
+            }
             artifact.source_path = None;
-            artifact.path = if artifact.files.len() == 1 && artifact.allow_patterns.is_empty() {
-                base.join(&artifact.files[0])
+            artifact.path = if single_file {
+                dir.join(&artifact.files[0])
             } else {
-                base.to_path_buf()
+                dir
             };
         }
         ArtifactKind::Url => {

@@ -31,10 +31,12 @@
 | --- | --- | --- | --- |
 | 图片目标检测 | `yolo11n.onnx` | 默认启用 | 目标类别、置信度、边界框 |
 | 语音识别 | `sensevoice-small-onnx` | 默认启用 | 文本、时间轴、语言、情绪、发言人 |
-| 语音合成 | `indextts-1.5-onnx` | 实验性，默认禁用 | WAV 音频 |
+| 语音合成 | `indextts-1.5-onnx` | 默认启用 | WAV 音频 |
+| 语音合成 | `indextts-2.5-onnx` | 默认启用（FP16，建议 NVIDIA GPU） | WAV 音频，支持情绪控制 |
 | 文本向量 | `multilingual-e5-small-onnx` | 默认启用 | 384 维归一化向量 |
 | 文本重排 | `mmarco-minilm-l12-onnx` | 默认启用 | 文档相关性排序与分数 |
 | 对话补全 | `qwen3-4b-instruct-2507-int4-onnx` | 本地导出后启用 | 流式文本与工具调用（Qwen3 模板，KV 前缀复用） |
+| 实时语音 | `voice-cascade` | 默认启用，依赖 ASR、对话与 TTS 模型 | `/v1/realtime` WebSocket 语音对话（Silero VAD + SenseVoice + Qwen3 + IndexTTS，见 `docs/realtime-voice.md`） |
 
 所有模型均通过 ONNX Runtime 运行（运行时加载官方 ONNX Runtime 1.30，见 `docs/implementation-notes.md`）。模型配置表达 CUDA 优先、CPU 回退；实际 provider 仍取决于构建方式、运行环境和具体模型算子支持情况。
 
@@ -141,7 +143,11 @@ curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
 - `yolo11n.onnx`
 - `multilingual-e5-small-onnx`
 - `mmarco-minilm-l12-onnx`
-- `indextts-1.5-onnx`（实验性，下载后还需调用 `enable_model`）
+- `indextts-1.5-onnx`
+- `indextts-2.5-onnx`（FP16，约 2.8 GB）
+- `voice-cascade`（只下载 Silero VAD；对话所用的 ASR、对话与 TTS 模型需各自下载）
+
+`qwen3-4b-instruct-2507-int4-onnx` 没有发布的 ONNX 包，需按 [`configs/providers/chat/qwen3-chat.yaml`](configs/providers/chat/qwen3-chat.yaml) 中的命令从固定 revision 本地导出到 `workdir/models/qwen3-4b-instruct-2507-int4-onnx`。
 
 ### 5. Agent 如何使用
 
@@ -201,15 +207,20 @@ python -m scripts.local.smoke --tests mcp \
 | 用途 | 仓库 | 当前固定版本 |
 | --- | --- | --- |
 | YOLO11n ONNX | [aaurelions/yolo11n.onnx](https://huggingface.co/aaurelions/yolo11n.onnx) | `f46d9b72aa9a0f02bc00484446e2310b1a549bce` |
+| YOLO COCO 标签 | [ultralytics/ultralytics](https://github.com/ultralytics/ultralytics/blob/eba96641b5cea142e21641909d6400fef7134244/ultralytics/cfg/datasets/coco.yaml) `coco.yaml` | `eba96641b5cea142e21641909d6400fef7134244` |
 | SenseVoiceSmall ONNX | [haixuantao/SenseVoiceSmall-onnx](https://huggingface.co/haixuantao/SenseVoiceSmall-onnx) | `c4c8747214bed7ebbf2557e0412c19efa540023c` |
 | FSMN-VAD ONNX | [funasr/fsmn-vad-onnx](https://huggingface.co/funasr/fsmn-vad-onnx) | `f6e9fbb4cefa7397216c763f21307993f147f585` |
 | FSMN-VAD 配置 | [MoYoYoTech/Translator](https://huggingface.co/MoYoYoTech/Translator) | `58fbad4088820ed1253955c8faf1444cd0b2dc69` |
 | CAM++ Speaker | [welcomyou/campplus-3dspeaker-200k-onnx](https://huggingface.co/welcomyou/campplus-3dspeaker-200k-onnx) | `6265ff7af2a104d745b4389026ed9815c6c1c6ff` |
-| IndexTTS 1.5 ONNX | [ModaLeap/indextts-1.5-onnx](https://huggingface.co/ModaLeap/indextts-1.5-onnx) | 配置暂未固定 revision |
+| IndexTTS 1.5 ONNX | [ModaLeap/indextts-1.5-onnx](https://huggingface.co/ModaLeap/indextts-1.5-onnx) | `3f1a422cd97a0b7dbb9b6ad4698dc0fde66796d1` |
+| IndexTTS 2.5 ONNX FP16 | [ModaLeap/indextts-2.5-onnx](https://huggingface.co/ModaLeap/indextts-2.5-onnx) | `fd246cb6c2cf046113cd3400565edf681ac1b68b` |
+| IndexTTS 中文前端（WeText + g2pW） | [ModaLeap/zh-tts-frontend](https://huggingface.co/ModaLeap/zh-tts-frontend) | `ba6b85aeb17ebc58d2d3d73121096f9495ee710e` |
 | multilingual-e5-small | [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) | `614241f622f53c4eeff9890bdc4f31cfecc418b3` |
 | mMARCO MiniLM reranker | [cross-encoder/mmarco-mMiniLMv2-L12-H384-v1](https://huggingface.co/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1) | `1427fd652930e4ba29e8149678df786c240d8825` |
+| Qwen3-4B-Instruct-2507（本地导出 INT4 的源模型） | [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) | `cdbee75f17c01a7cc42f958dc650907174af0554` |
+| Silero VAD v6.2.3 | [snakers4/silero-vad](https://github.com/snakers4/silero-vad) | `5cd7945676eb32225748052e2e6a0580e4686a08` |
 
-实际下载文件、revision 与 SHA-256 以 [`configs/providers`](configs/providers)（按分类分目录）中的配置为准。
+实际下载文件、revision 与 SHA-256 以 [`configs/providers`](configs/providers)（按分类分目录）中的配置为准：Hugging Face 工件固定到 commit，URL 工件附带 SHA-256，`local-registry` 的测试会检查这两点。IndexTTS 1.5 与 2.5 的配置都会把中文前端（`ModaLeap/zh-tts-frontend`，约 177 MB，各文件许可见其 `NOTICE`）下载到各自模型目录下的 `zh-tts-frontend/`；也可用 `scripts/local/zh_frontend_export.py` 本地重新生成。
 
 ### 参考代码仓库
 
@@ -218,6 +229,8 @@ python -m scripts.local.smoke --tests mcp \
 - [ultralytics/ultralytics](https://github.com/ultralytics/ultralytics)：YOLO 预处理、输出解码与 COCO 标签来源；
 - [index-tts/index-tts](https://github.com/index-tts/index-tts)：IndexTTS 官方实现；
 - [DakeQQ/Text-to-Speech-TTS-ONNX](https://github.com/DakeQQ/Text-to-Speech-TTS-ONNX)：IndexTTS ONNX 导出与推理参考；
+- [snakers4/silero-vad](https://github.com/snakers4/silero-vad)：实时语音的 Silero VAD 模型；
+- [microsoft/onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai)：Qwen3 INT4 ONNX 导出（`models.builder`）；
 - [microsoft/onnxruntime](https://github.com/microsoft/onnxruntime)：CPU / CUDA 推理运行时；
 - [modelcontextprotocol/rust-sdk](https://github.com/modelcontextprotocol/rust-sdk)：标准 MCP Rust SDK。
 

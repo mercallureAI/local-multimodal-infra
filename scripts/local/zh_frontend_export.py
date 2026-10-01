@@ -14,12 +14,13 @@ data-driven from this directory:
     mainland/readings.tsv                       Mainland standard readings per character
                                                 (kTGHZ2013, else kXHC1983, via pypinyin-dict)
     manifest.json
+    README.md, NOTICE, LICENSES/                release files (zh_frontend_release)
 
 Readings are exported already converted by pypinyin itself (TONE3, neutral
 tone as 5), so the Rust side never re-implements tone-mark conversion. Run in
 an environment with jieba, pypinyin, pypinyin-dict, pyyaml and wetext:
 
-    python scripts/local/zh_frontend_export.py --paddlespeech <checkout> \\
+    python -m scripts.local.zh_frontend_export --paddlespeech <checkout> \\
         --g2pw-model-dir <modelscope pengzhendong/g2pw> --g2pw-package-dir <site-packages/g2pw> \\
         --g2p-mix <checkout> --out workdir/models/zh-tts-frontend
 """
@@ -27,7 +28,6 @@ an environment with jieba, pypinyin, pypinyin-dict, pyyaml and wetext:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib.util
 import json
 import shutil
@@ -35,6 +35,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+from .zh_frontend_release import LICENSES, check_licensed, copy_release_files, file_entries
 
 SCHEMA = "local.zh_tts_frontend.v1"
 
@@ -239,14 +241,6 @@ def git_revision(path: Path) -> str | None:
         return None
 
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 22), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--paddlespeech", required=True, type=Path)
@@ -269,20 +263,16 @@ def main() -> int:
         "mainland": export_mainland(args.g2p_mix, out),
         "wetext": export_wetext(out, args.wetext_fst_dir),
     }
-    files = sorted(p for p in out.rglob("*") if p.is_file() and p.name != "manifest.json")
+    copy_release_files(out)
+    files = file_entries(out)
+    check_licensed(files)
     manifest = {
         "schema": SCHEMA,
         "created_unix": int(time.time()),
         "python": sys.version.split()[0],
         "sources": sources,
-        "licenses": {
-            "wetext": "Apache-2.0 (WeTextProcessing / wetext)",
-            "g2pw": "Apache-2.0 (GitYCC/g2pW; INT8 graph from ModelScope pengzhendong/g2pw)",
-            "pinyin": "MIT (pypinyin, pypinyin-dict / phrase-pinyin-data)",
-            "paddlespeech": "Apache-2.0 (PaddlePaddle/PaddleSpeech)",
-            "mainland": "Apache-2.0 (pengzhendong/g2p-mix); readings.tsv: MIT (pypinyin-dict, from Unihan kTGHZ2013/kXHC1983)",
-        },
-        "files": [{"path": p.relative_to(out).as_posix(), "size_bytes": p.stat().st_size, "sha256": sha256(p)} for p in files],
+        "licenses": LICENSES,
+        "files": files,
     }
     (out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(sources, ensure_ascii=False, indent=2))

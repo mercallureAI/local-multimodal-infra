@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -366,6 +366,24 @@ pub struct ModelArtifact {
 }
 
 impl ModelArtifact {
+    /// The directory a Hugging Face artifact's files go to under the model
+    /// directory `root`: `root` itself, or the subdirectory `path` names
+    /// (relative as configured, or already materialized under `root`, where a
+    /// `single_file` path ends in the file name). Not validated here.
+    pub fn hugging_face_dir(&self, root: &Path, single_file: bool) -> PathBuf {
+        let subdir = match self.path.strip_prefix(root) {
+            Ok(relative) if single_file => relative.parent().unwrap_or(Path::new("")),
+            Ok(relative) => relative,
+            Err(_) if self.path.is_relative() => self.path.as_path(),
+            Err(_) => Path::new(""),
+        };
+        if subdir.as_os_str().is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(subdir)
+        }
+    }
+
     pub fn source(&self) -> ArtifactSource {
         match self.kind {
             ArtifactKind::Local => ArtifactSource::Local {

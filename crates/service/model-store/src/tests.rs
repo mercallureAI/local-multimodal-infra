@@ -458,6 +458,54 @@ fn rejects_hf_file_path_traversal() {
 }
 
 #[test]
+fn hf_path_names_a_subdirectory_of_the_model_dir() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteModelStore::new(dir.path().join("data/local.db"), dir.path().join("models"))
+        .expect("store");
+    let mut model = artifact(ArtifactKind::HuggingFace, PathBuf::new());
+    model.repo_id = Some("owner/model".to_string());
+    model.files = vec!["a.onnx".to_string(), "b.onnx".to_string()];
+    let mut frontend = artifact(ArtifactKind::HuggingFace, PathBuf::from("frontend"));
+    frontend.repo_id = Some("owner/frontend".to_string());
+    frontend.files = vec!["g2pw/model.onnx".to_string(), "NOTICE".to_string()];
+    let mut single = artifact(ArtifactKind::HuggingFace, PathBuf::from("extra"));
+    single.repo_id = Some("owner/extra".to_string());
+    single.files = vec!["LICENSE".to_string()];
+
+    let saved = store
+        .upsert_model(base_spec("m", vec![model, frontend, single]))
+        .expect("upsert");
+    let root = dir.path().join("models/m");
+    assert_eq!(saved.artifacts[0].path, root);
+    assert_eq!(saved.artifacts[1].path, root.join("frontend"));
+    assert_eq!(
+        hf_target_path(&saved.artifacts[1], "g2pw/model.onnx"),
+        root.join("frontend/g2pw/model.onnx")
+    );
+    assert_eq!(saved.artifacts[2].path, root.join("extra/LICENSE"));
+
+    // Normalizing the stored spec again keeps the subdirectories.
+    let again = store
+        .upsert_model(saved.clone())
+        .expect("upsert normalized");
+    let paths: Vec<_> = again.artifacts.iter().map(|a| a.path.clone()).collect();
+    let before: Vec<_> = saved.artifacts.iter().map(|a| a.path.clone()).collect();
+    assert_eq!(paths, before);
+}
+
+#[test]
+fn rejects_hf_path_traversal() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteModelStore::new(dir.path().join("data/local.db"), dir.path().join("models"))
+        .expect("store");
+    let mut hf = artifact(ArtifactKind::HuggingFace, PathBuf::from("../escape"));
+    hf.repo_id = Some("owner/repo".to_string());
+    hf.files = vec!["a.onnx".to_string(), "b.onnx".to_string()];
+    let err = store.upsert_model(base_spec("m", vec![hf])).unwrap_err();
+    assert!(err.to_string().contains("parent traversal"), "{err}");
+}
+
+#[test]
 fn hf_single_file_without_extension_targets_normalized_path() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = SqliteModelStore::new(dir.path().join("data/local.db"), dir.path().join("models"))

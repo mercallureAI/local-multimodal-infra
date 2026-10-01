@@ -1,0 +1,100 @@
+zh-tts-frontend
+Copyright 2026 local-multimodal-infra contributors
+
+This package collects data and model files from the projects below. Each file
+keeps the license of its sources; see README.md for the per-file table and
+LICENSES/ for the full texts. The files were produced by
+scripts/local/zh_frontend_export.py in
+https://github.com/mercallureAI/local-multimodal-infra; the changes made to
+each source are stated here as Apache-2.0 section 4(b) and CC BY-SA 4.0
+section 3(a)(1)(B) require.
+
+-------------------------------------------------------------------------------
+WeTextProcessing / wetext                                  Apache-2.0
+-------------------------------------------------------------------------------
+wetext/{zh,en}/tn/{tagger,verbalizer}.fst
+  Text normalization FSTs built by WeTextProcessing
+  (https://github.com/wenet-e2e/WeTextProcessing) and distributed with the
+  Python package wetext 0.1.0 (https://github.com/pengzhendong/wetext).
+  Copied unchanged.
+
+-------------------------------------------------------------------------------
+g2pW                                                       Apache-2.0
+-------------------------------------------------------------------------------
+g2pw/g2pw_int8.onnx
+  g2pW polyphone model (https://github.com/GitYCC/g2pW; G2PWModel version
+  v3.0), dynamically quantized to INT8. The INT8
+  graph is the one published on ModelScope as pengzhendong/g2pw
+  (G2PWModel/g2pw_int8.onnx, SHA-256 000a3dc34bebf3adf8a898d17b6be77c527b
+  7d15ddd672b6abf028a73b81a8e1). Copied unchanged.
+g2pw/meta.json
+  Generated from g2pW's POLYPHONIC_CHARS.txt and MONOPHONIC_CHARS.txt and the
+  bopomofo-to-pinyin map of the g2pw Python package: labels, per-character
+  label masks and monophonic readings, with bopomofo converted to pinyin.
+
+-------------------------------------------------------------------------------
+BERT (bert-base-chinese)                                   Apache-2.0
+-------------------------------------------------------------------------------
+g2pw/vocab.txt
+  WordPiece vocabulary of bert-base-chinese
+  (https://github.com/google-research/bert), the g2pW encoder's tokenizer.
+  Copied unchanged.
+
+-------------------------------------------------------------------------------
+PaddleSpeech                                               Apache-2.0
+-------------------------------------------------------------------------------
+paddlespeech/polyphonic.tsv, pinyin/t2s.tsv
+  From PaddleSpeech (https://github.com/PaddlePaddle/PaddleSpeech) at commit
+  6b25a400008d393f9c3af837b3c692b17f29ee1a:
+  paddlespeech/t2s/frontend/polyphonic.yaml converted to TSV, and the
+  traditional-to-simplified character pairs of
+  paddlespeech/t2s/frontend/zh_normalization/char_convert.py written as TSV.
+  The custom phrase readings PaddleSpeech's zh_frontend.py loads into
+  pypinyin are included in pinyin/phrases.tsv.
+
+-------------------------------------------------------------------------------
+g2p-mix                                                    Apache-2.0
+-------------------------------------------------------------------------------
+mainland/phrases.tsv
+  g2p_mix/dict/phrases.txt of g2p-mix (https://github.com/pengzhendong/g2p-mix)
+  at commit 0893439a6d1336670ac755b60156f08beec2ac87, readings rewritten in
+  numbered-tone pinyin (TONE3, neutral tone as 5).
+
+-------------------------------------------------------------------------------
+pypinyin, pinyin-data, phrase-pinyin-data, pypinyin-dict   MIT
+Unicode Han Database (Unihan)                              Unicode-3.0
+-------------------------------------------------------------------------------
+pinyin/chars.tsv
+  Single-character readings of pypinyin 0.55.0
+  (https://github.com/mozillazg/python-pinyin), whose character data comes
+  from pinyin-data (https://github.com/mozillazg/pinyin-data), largely
+  derived from the Unicode Han Database. Each character's default reading
+  under PaddleSpeech's pypinyin configuration, written as TONE3.
+mainland/readings.tsv
+  Readings from the kTGHZ2013 field, else kXHC1983, of the Unicode Han
+  Database, as packaged by pypinyin-dict 0.9.0
+  (https://github.com/mozillazg/pypinyin-dict), written as TONE3.
+
+  Unicode Han Database: Copyright (c) 1991-2026 Unicode, Inc.
+  https://www.unicode.org/reports/tr38/
+
+-------------------------------------------------------------------------------
+CC-CEDICT                                                  CC BY-SA 4.0
+-------------------------------------------------------------------------------
+pinyin/phrases.tsv
+  Phrase readings of pypinyin 0.55.0 with the large_pinyin dictionary of
+  pypinyin-dict 0.9.0 loaded, as PaddleSpeech configures it. large_pinyin
+  comes from phrase-pinyin-data (https://github.com/mozillazg/phrase-pinyin-data),
+  which merges, among other sources, readings collected from zdic.net and
+  CC-CEDICT. Each phrase's reading was resolved by pypinyin and written as
+  TONE3; phrases whose reading does not cover every character were dropped.
+
+  CC-CEDICT, published by MDBG (https://www.mdbg.net/chinese/dictionary?page=cc-cedict).
+  Referenced work: CEDICT, Copyright (C) 1997, 1998 Paul Andrew Denisowski.
+  Licensed under the Creative Commons Attribution-ShareAlike 4.0
+  International License (https://creativecommons.org/licenses/by-sa/4.0/).
+  Because it contains CC-CEDICT data, pinyin/phrases.tsv as a whole is
+  distributed under CC BY-SA 4.0; the MIT notices of pypinyin,
+  phrase-pinyin-data and pypinyin-dict also apply to it. The other files
+  of this package are separate works and are not covered by CC BY-SA.
+  No warranties are given.

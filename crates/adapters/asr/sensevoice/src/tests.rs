@@ -309,7 +309,8 @@ fn real_model_smoke_if_env_set() {
         .map(PathBuf::from)
         .filter(|path| path.exists())
         .unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../scripts/assets/tts-input-mon3tr.wav")
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../../scripts/assets/tts-input-mon3tr.wav")
         });
     let mut adapter = SenseVoiceAsrAdapter::load(&model_spec(PathBuf::from(model_dir)))
         .expect("load real SenseVoice model");

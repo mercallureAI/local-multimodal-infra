@@ -2098,3 +2098,24 @@ vocab_size: 8194
         IndexTtsArtifacts::validate(dir.path(), IndexTtsPrecision::CpuFp32).expect("artifacts");
     (dir, artifacts)
 }
+
+#[test]
+fn mandarin_frontend_is_found_in_then_next_to_the_model_dir() {
+    if std::env::var_os("LOCAL_ZH_TTS_FRONTEND_DIR").is_some()
+        || std::env::var_os("LOCAL_ZH_TTS_FRONTEND").is_some()
+    {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let model = dir.path().join("indextts-2.5-onnx");
+    std::fs::create_dir_all(&model).expect("model dir");
+    assert_eq!(MandarinFrontend::locate(&model), None);
+
+    let sibling = dir.path().join("zh-tts-frontend");
+    std::fs::create_dir_all(&sibling).expect("sibling");
+    assert_eq!(MandarinFrontend::locate(&model), Some(sibling));
+
+    let inside = model.join("zh-tts-frontend");
+    std::fs::create_dir_all(&inside).expect("inside");
+    assert_eq!(MandarinFrontend::locate(&model), Some(inside));
+}

@@ -3,7 +3,7 @@
 //!   https://github.com/ultralytics/ultralytics
 //!   https://docs.ultralytics.com/tasks/detect/
 //! - Default COCO labels follow Ultralytics' dataset metadata:
-//!   https://raw.githubusercontent.com/ultralytics/ultralytics/main/ultralytics/cfg/datasets/coco.yaml
+//!   `ultralytics/cfg/datasets/coco.yaml`, pinned in `configs/providers/detect/yolo.yaml`
 //! - The current default Hugging Face ONNX model source may include:
 //!   https://huggingface.co/aaurelions/yolo11n.onnx
 //! - This crate is an adapter implemented inside this project and does not directly depend on or

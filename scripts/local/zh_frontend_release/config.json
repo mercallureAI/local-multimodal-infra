@@ -1,0 +1,6 @@
+{
+  "model_type": "zh-tts-frontend",
+  "schema": "local.zh_tts_frontend.v1",
+  "manifest": "manifest.json",
+  "used_by": "https://github.com/mercallureAI/local-multimodal-infra"
+}

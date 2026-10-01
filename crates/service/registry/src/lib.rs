@@ -336,7 +336,6 @@ fn index_tts_default(model_dir: &Path) -> ModelSpec {
     metadata.insert("runtime".to_string(), json!("onnxruntime"));
     metadata.insert("model_family".to_string(), json!("index_tts"));
     metadata.insert("task".to_string(), json!("text-to-speech"));
-    metadata.insert("experimental".to_string(), json!(true));
     metadata.insert("precision".to_string(), json!("fp32"));
     metadata.insert(
         "artifact_note".to_string(),
@@ -348,8 +347,8 @@ fn index_tts_default(model_dir: &Path) -> ModelSpec {
     );
     ModelSpec {
         id: id.to_string(),
-        name: "IndexTTS 1.5 ONNX (experimental)".to_string(),
-        enabled: false,
+        name: "IndexTTS 1.5 ONNX".to_string(),
+        enabled: true,
         task_kinds: vec![TaskKind::TtsSynthesize],
         adapter: AdapterKind::IndexTts,
         backend: BackendKind::Ort,
@@ -360,7 +359,7 @@ fn index_tts_default(model_dir: &Path) -> ModelSpec {
             sha256: None,
             url: None,
             repo_id: Some("ModaLeap/indextts-1.5-onnx".to_string()),
-            revision: None,
+            revision: Some("3f1a422cd97a0b7dbb9b6ad4698dc0fde66796d1".to_string()),
             files: [
                 "IndexTTS_A.onnx",
                 "IndexTTS_B.onnx",
@@ -405,8 +404,10 @@ pub fn materialize_artifact_paths(spec: &mut ModelSpec, model_dir: impl AsRef<Pa
         }
         artifact.path = match artifact.kind {
             ArtifactKind::Local => root.clone(),
-            ArtifactKind::HuggingFace if artifact.files.len() == 1 => root.join(&artifact.files[0]),
-            ArtifactKind::HuggingFace => root.clone(),
+            ArtifactKind::HuggingFace if artifact.files.len() == 1 => artifact
+                .hugging_face_dir(&root, true)
+                .join(&artifact.files[0]),
+            ArtifactKind::HuggingFace => artifact.hugging_face_dir(&root, false),
             ArtifactKind::Url => {
                 if let Ok(relative) = artifact.path.strip_prefix(&root) {
                     if !relative.as_os_str().is_empty() {
@@ -597,8 +598,10 @@ fn yolo_default(model_dir: &Path) -> ModelSpec {
                 kind: ArtifactKind::Url,
                 path: root.join("coco.yaml"),
                 source_path: None,
-                sha256: None,
-                url: Some("https://raw.githubusercontent.com/ultralytics/ultralytics/main/ultralytics/cfg/datasets/coco.yaml".to_string()),
+                sha256: Some(
+                    "38ed1eb122fad6eed8e18dcf8da56a4b26db9c2064be41530485e2644fae9f7f".to_string(),
+                ),
+                url: Some("https://raw.githubusercontent.com/ultralytics/ultralytics/eba96641b5cea142e21641909d6400fef7134244/ultralytics/cfg/datasets/coco.yaml".to_string()),
                 repo_id: None,
                 revision: None,
                 files: Vec::new(),
@@ -747,7 +750,6 @@ backend: ort
                 spec.id
             );
             if spec.task_kinds.contains(&TaskKind::TtsSynthesize) {
-                assert!(!spec.enabled, "{} TTS must be disabled by default", spec.id);
                 assert_eq!(spec.adapter, AdapterKind::IndexTts);
                 assert!(spec
                     .artifacts
@@ -764,7 +766,8 @@ backend: ort
 
     #[test]
     fn checked_in_yaml_models_are_cuda_first_with_cpu_fallback() {
-        let providers_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../configs/providers");
+        let providers_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../configs/providers");
         let specs = load_yaml_specs(&providers_dir).expect("load checked-in YAML specs");
 
         assert!(!specs.is_empty());
@@ -784,28 +787,66 @@ backend: ort
                 "{} must prefer CUDA then CPU",
                 spec.id
             );
-            if spec.task_kinds.contains(&TaskKind::TtsSynthesize) {
-                assert!(!spec.enabled, "{} TTS must be disabled by default", spec.id);
-                match spec.adapter {
-                    AdapterKind::IndexTts => {
-                        assert!(spec
-                            .artifacts
-                            .iter()
-                            .all(|artifact| artifact.kind == ArtifactKind::HuggingFace));
-                        assert!(spec
-                            .artifacts
-                            .iter()
-                            .all(|artifact| artifact.repo_id.as_deref()
-                                == Some("ModaLeap/indextts-1.5-onnx")));
-                    }
-                    // IndexTTS-2.5 is exported locally; no published package yet.
-                    AdapterKind::IndexTts2 => assert!(spec
-                        .artifacts
-                        .iter()
-                        .all(|artifact| artifact.kind == ArtifactKind::Local)),
-                    other => panic!("{} TTS uses unexpected adapter {other:?}", spec.id),
+            // Downloads are pinned: a Hugging Face artifact names a commit,
+            // a URL artifact carries its SHA-256.
+            for artifact in &spec.artifacts {
+                match artifact.kind {
+                    ArtifactKind::HuggingFace => assert!(
+                        artifact.revision.as_deref().is_some_and(|rev| {
+                            rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit())
+                        }),
+                        "{} pins {:?} to a commit",
+                        spec.id,
+                        artifact.repo_id
+                    ),
+                    ArtifactKind::Url => assert!(
+                        artifact.sha256.is_some(),
+                        "{} pins {:?} by SHA-256",
+                        spec.id,
+                        artifact.url
+                    ),
+                    ArtifactKind::Local => {}
                 }
             }
+            if spec.task_kinds.contains(&TaskKind::TtsSynthesize) {
+                let repo_id = match spec.adapter {
+                    AdapterKind::IndexTts => "ModaLeap/indextts-1.5-onnx",
+                    AdapterKind::IndexTts2 => "ModaLeap/indextts-2.5-onnx",
+                    other => panic!("{} TTS uses unexpected adapter {other:?}", spec.id),
+                };
+                // The model package, then the Mandarin frontend in its
+                // zh-tts-frontend/ subdirectory.
+                let repos: Vec<_> = spec
+                    .artifacts
+                    .iter()
+                    .map(|artifact| (artifact.kind, artifact.repo_id.as_deref()))
+                    .collect();
+                assert_eq!(
+                    repos,
+                    [
+                        (ArtifactKind::HuggingFace, Some(repo_id)),
+                        (ArtifactKind::HuggingFace, Some("ModaLeap/zh-tts-frontend")),
+                    ],
+                    "{} artifacts",
+                    spec.id
+                );
+                assert!(spec.artifacts[1].path.ends_with("zh-tts-frontend"));
+            }
+        }
+    }
+    #[test]
+    fn index_tts_frontend_materializes_inside_the_model_dir() {
+        let providers_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../configs/providers");
+        let model_dir = Path::new("models");
+        for mut spec in load_yaml_specs(&providers_dir).expect("load checked-in YAML specs") {
+            if !matches!(spec.adapter, AdapterKind::IndexTts | AdapterKind::IndexTts2) {
+                continue;
+            }
+            materialize_artifact_paths(&mut spec, model_dir);
+            let root = model_dir.join(&spec.id);
+            assert_eq!(spec.artifacts[0].path, root);
+            assert_eq!(spec.artifacts[1].path, root.join("zh-tts-frontend"));
         }
     }
 }
