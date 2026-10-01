@@ -17,6 +17,8 @@ pub enum AdapterKind {
     SenseVoiceAsr,
     IndexTts,
     IndexTts2,
+    /// Qwen3-TTS-12Hz Base (voice cloning), streaming.
+    Qwen3Tts,
     E5Embedding,
     MmarcoReranker,
     Qwen3Chat,
@@ -32,6 +34,7 @@ impl AdapterKind {
         AdapterKind::SenseVoiceAsr,
         AdapterKind::IndexTts,
         AdapterKind::IndexTts2,
+        AdapterKind::Qwen3Tts,
         AdapterKind::E5Embedding,
         AdapterKind::MmarcoReranker,
         AdapterKind::Qwen3Chat,
@@ -44,7 +47,9 @@ impl AdapterKind {
         match self {
             AdapterKind::Yolo => ModelCategory::Detect,
             AdapterKind::SenseVoiceAsr => ModelCategory::Asr,
-            AdapterKind::IndexTts | AdapterKind::IndexTts2 => ModelCategory::Tts,
+            AdapterKind::IndexTts | AdapterKind::IndexTts2 | AdapterKind::Qwen3Tts => {
+                ModelCategory::Tts
+            }
             AdapterKind::E5Embedding => ModelCategory::Embedding,
             AdapterKind::MmarcoReranker => ModelCategory::Rerank,
             AdapterKind::Qwen3Chat => ModelCategory::Chat,

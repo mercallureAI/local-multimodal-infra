@@ -20,8 +20,9 @@ use std::{
 
 mod device_binding;
 mod io_binding;
-mod shared_kv;
 mod shared_initializers;
+mod shared_kv;
+mod static_binding;
 pub use device_binding::{DeviceBinding, DeviceBindingOutputs, DeviceTensor};
 pub use shared_initializers::{InitializerRange, SharedInitializers};
 
@@ -32,6 +33,8 @@ struct SessionExtras<'a> {
     initializers: &'a [(String, std::sync::Arc<DynValue>)],
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     cuda_memory: Option<CudaMemoryOptions>,
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    cuda: CudaSessionOptions,
 }
 
 /// CUDA allocator settings for models whose activations dwarf what they keep
@@ -46,11 +49,23 @@ pub struct CudaMemoryOptions {
     /// Let cuDNN pick convolution algorithms that need its largest workspace.
     pub conv_max_workspace: bool,
 }
+
+/// CUDA execution provider options for the sessions a backend loads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CudaSessionOptions {
+    /// Capture and replay runs as CUDA graphs (`gpu_graph_id` run option);
+    /// inputs and outputs must then be bound at fixed addresses.
+    pub cuda_graph: bool,
+    /// TF32 matmul/conv math on Ampere and later; `None` keeps ORT's default.
+    pub tf32: Option<bool>,
+}
 pub use io_binding::{
     PinnedCudaF32IoBinding, PinnedCudaIoBinding, ResidentBindingOutputs, ResidentCudaTensor,
     ResidentIoBinding, ResidentTensorInput,
 };
 pub use shared_kv::{SharedKvBinding, SharedKvPair};
+pub use static_binding::{FixedTensorSpec, StaticIoBinding};
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -434,6 +449,7 @@ pub struct OrtBackend {
     cpu_session_options: Option<CpuSessionOptions>,
     config_entries: Vec<(String, String)>,
     cuda_memory: Option<CudaMemoryOptions>,
+    cuda_options: CudaSessionOptions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -449,12 +465,20 @@ impl OrtBackend {
             cpu_session_options: None,
             config_entries: Vec::new(),
             cuda_memory: None,
+            cuda_options: CudaSessionOptions::default(),
         }
     }
 
     /// CUDA allocator settings for every CUDA session this backend loads.
     pub fn with_cuda_memory_options(mut self, options: CudaMemoryOptions) -> Self {
         self.cuda_memory = Some(options);
+        self
+    }
+
+    /// CUDA execution provider options for every session this backend loads
+    /// on CUDA.
+    pub fn with_cuda_session_options(mut self, options: CudaSessionOptions) -> Self {
+        self.cuda_options = options;
         self
     }
 
@@ -500,6 +524,7 @@ impl OrtBackend {
             config_entries: &self.config_entries,
             initializers,
             cuda_memory: self.cuda_memory,
+            cuda: self.cuda_options,
         };
         OrtSession::load_with_provider_loaders(
             model_path,
@@ -811,6 +836,12 @@ impl RealSession {
                 }
                 cuda = cuda.with_conv_max_workspace(memory.conv_max_workspace);
             }
+            if extras.cuda.cuda_graph {
+                cuda = cuda.with_cuda_graph(true);
+            }
+            if let Some(tf32) = extras.cuda.tf32 {
+                cuda = cuda.with_tf32(tf32);
+            }
             let builder = Session::builder()
                 .map_err(map_ort_err)?
                 .with_execution_providers([cuda.build().error_on_failure()])
@@ -1032,55 +1063,55 @@ pub(crate) fn host_tensor_output(
     value: &DynValue,
     available_outputs: &[TensorMetadata],
 ) -> Result<OrtTensorOutput> {
-        if let Ok((shape, data)) = value.try_extract_tensor::<f32>() {
-            return Ok(OrtTensorOutput {
-                name: name.to_string(),
-                shape: shape_to_usize(name, shape)?,
-                data: OrtTensorData::F32(data.to_vec()),
-            });
-        }
-        if let Ok((shape, data)) = value.try_extract_tensor::<half::f16>() {
-            return Ok(OrtTensorOutput {
-                name: name.to_string(),
-                shape: shape_to_usize(name, shape)?,
-                data: OrtTensorData::F16(data.to_vec()),
-            });
-        }
-        if let Ok((shape, data)) = value.try_extract_tensor::<bool>() {
-            return Ok(OrtTensorOutput {
-                name: name.to_string(),
-                shape: shape_to_usize(name, shape)?,
-                data: OrtTensorData::Bool(data.to_vec()),
-            });
-        }
-        if let Ok((shape, data)) = value.try_extract_tensor::<i8>() {
-            return Ok(OrtTensorOutput {
-                name: name.to_string(),
-                shape: shape_to_usize(name, shape)?,
-                data: OrtTensorData::I8(data.to_vec()),
-            });
-        }
-        if let Ok((shape, data)) = value.try_extract_tensor::<i16>() {
-            return Ok(OrtTensorOutput {
-                name: name.to_string(),
-                shape: shape_to_usize(name, shape)?,
-                data: OrtTensorData::I16(data.to_vec()),
-            });
-        }
-        if let Ok((shape, data)) = value.try_extract_tensor::<i32>() {
-            return Ok(OrtTensorOutput {
-                name: name.to_string(),
-                shape: shape_to_usize(name, shape)?,
-                data: OrtTensorData::I32(data.to_vec()),
-            });
-        }
-        if let Ok((shape, data)) = value.try_extract_tensor::<i64>() {
-            return Ok(OrtTensorOutput {
-                name: name.to_string(),
-                shape: shape_to_usize(name, shape)?,
-                data: OrtTensorData::I64(data.to_vec()),
-            });
-        }
+    if let Ok((shape, data)) = value.try_extract_tensor::<f32>() {
+        return Ok(OrtTensorOutput {
+            name: name.to_string(),
+            shape: shape_to_usize(name, shape)?,
+            data: OrtTensorData::F32(data.to_vec()),
+        });
+    }
+    if let Ok((shape, data)) = value.try_extract_tensor::<half::f16>() {
+        return Ok(OrtTensorOutput {
+            name: name.to_string(),
+            shape: shape_to_usize(name, shape)?,
+            data: OrtTensorData::F16(data.to_vec()),
+        });
+    }
+    if let Ok((shape, data)) = value.try_extract_tensor::<bool>() {
+        return Ok(OrtTensorOutput {
+            name: name.to_string(),
+            shape: shape_to_usize(name, shape)?,
+            data: OrtTensorData::Bool(data.to_vec()),
+        });
+    }
+    if let Ok((shape, data)) = value.try_extract_tensor::<i8>() {
+        return Ok(OrtTensorOutput {
+            name: name.to_string(),
+            shape: shape_to_usize(name, shape)?,
+            data: OrtTensorData::I8(data.to_vec()),
+        });
+    }
+    if let Ok((shape, data)) = value.try_extract_tensor::<i16>() {
+        return Ok(OrtTensorOutput {
+            name: name.to_string(),
+            shape: shape_to_usize(name, shape)?,
+            data: OrtTensorData::I16(data.to_vec()),
+        });
+    }
+    if let Ok((shape, data)) = value.try_extract_tensor::<i32>() {
+        return Ok(OrtTensorOutput {
+            name: name.to_string(),
+            shape: shape_to_usize(name, shape)?,
+            data: OrtTensorData::I32(data.to_vec()),
+        });
+    }
+    if let Ok((shape, data)) = value.try_extract_tensor::<i64>() {
+        return Ok(OrtTensorOutput {
+            name: name.to_string(),
+            shape: shape_to_usize(name, shape)?,
+            data: OrtTensorData::I64(data.to_vec()),
+        });
+    }
     Err(InfraError::Backend(format!(
         "output `{name}` has unsupported tensor type; extractable output element types are f32, f16, bool, i8, i16, i32, and i64; available outputs: {}",
         format_names(available_outputs.iter().map(|output| output.name.as_str()))

@@ -463,6 +463,27 @@ def assemble_frame_graph(body, model):
 # Frames of pre-transformer output the upsampling stack sees before the new
 # frames (its receptive field: 4 matches 25 to within 0.1 dB).
 VOCODER_CONV_CONTEXT = 4
+# Positions in the vocoder's rotary table: the longest stream (reference
+# priming plus generated frames) it decodes.
+VOCODER_CAPACITY = 4096
+
+
+# Set while tracing the vocoder's back half: convs zero the left-context
+# frames of their input when the context is not real (a stream's start), which
+# is exactly the zero padding they would apply with no context at all.
+_CONTEXT_MASK: dict = {}
+
+
+def _mask_context(x):
+    import torch
+
+    if not _CONTEXT_MASK:
+        return x
+    length = x.shape[-1]
+    context = (length // _CONTEXT_MASK["frames"]) * VOCODER_CONV_CONTEXT
+    keep = (torch.arange(length, device=x.device) >= context).to(torch.float32)
+    mask = torch.maximum(keep, _CONTEXT_MASK["valid"]).to(x.dtype)
+    return x * mask
 
 
 def _shape_free_codec_modules() -> None:
@@ -479,10 +500,10 @@ def _shape_free_codec_modules() -> None:
 
     def conv_forward(self, x):
         assert self.stride == 1
-        return self.conv(F.pad(x, (self.padding, 0)))
+        return self.conv(F.pad(_mask_context(x), (self.padding, 0)))
 
     def trans_forward(self, x):
-        x = self.conv(x)
+        x = self.conv(_mask_context(x))
         return x[..., : -self.right_pad] if self.right_pad > 0 else x
 
     def snake_forward(self, x):
@@ -503,9 +524,13 @@ def build_vocoder_halves(model, dtype):
     * front: codes (1,16,N) + ``pre_ctx`` (1,512,2), the quantized latents of
       the 2 frames before (zeros at a stream's start) -> the transformer
       input (1,N,512) and the next ``pre_ctx``;
-    * back: transformer output (1,N,1024) + ``conv_ctx`` (1,1024,C<=4), the
-      transformer outputs of the frames before (C=0 at a stream's start) ->
-      the N frames' 24 kHz audio and the next ``conv_ctx``.
+    * back: transformer output (1,N,1024) + ``conv_ctx`` (1,1024,4), the
+      transformer outputs of the 4 frames before, + ``context_valid`` (1,),
+      0 at a stream's start (the context is then masked out) -> the N frames'
+      24 kHz audio and the next ``conv_ctx`` (N >= 4).
+
+    Shapes stay fixed for a fixed N: ORT re-plans every cuDNN convolution
+    (about 40 ms in all) whenever an input shape changes.
     """
     import torch
 
@@ -546,15 +571,19 @@ def build_vocoder_halves(model, dtype):
             self.upsample = dec.upsample
             self.decoder = dec.decoder
 
-        def forward(self, h, conv_ctx):
+        def forward(self, h, conv_ctx, context_valid):
             n = h.shape[1]
             x = torch.cat([conv_ctx, h.transpose(1, 2)], dim=-1)
             next_conv = x[..., -VOCODER_CONV_CONTEXT:]
-            for blocks in self.upsample:
-                for block in blocks:
+            _CONTEXT_MASK.update(frames=n + VOCODER_CONV_CONTEXT, valid=context_valid.float())
+            try:
+                for blocks in self.upsample:
+                    for block in blocks:
+                        x = block(x)
+                for block in self.decoder:
                     x = block(x)
-            for block in self.decoder:
-                x = block(x)
+            finally:
+                _CONTEXT_MASK.clear()
             return x.clamp(-1, 1)[0, :, -n * upsample:].float(), next_conv
 
     front = Front().to(dtype).cuda().eval()
@@ -655,11 +684,11 @@ def add_vocoder_transformer(graph, model, capacity: int) -> None:
     g.op("Add", [out, g.init("output_proj.bias", _np(tr.output_proj.bias))], outputs=["transformer_out"])
 
 
-def export_vocoder(model, work: Path, out: Path, capacity: int = 4096) -> None:
+def export_vocoder(model, work: Path, out: Path, capacity: int = VOCODER_CAPACITY) -> None:
     """vocoder.onnx: new frames' codes + stream state -> their audio + state.
 
-    Inputs: ``codes`` (1,16,N), ``pre_ctx`` (1,512,2), ``conv_ctx``
-    (1,1024,C<=4), ``past_key.i``/``past_value.i`` (1,16,capacity,64) shared
+    Inputs: ``codes`` (1,16,N>=4), ``pre_ctx`` (1,512,2), ``conv_ctx``
+    (1,1024,4), ``context_valid`` (1,) (0 at a stream's start), ``past_key.i``/``past_value.i`` (1,16,capacity,64) shared
     with ``present_*`` (bind the same buffer), ``seqlens_k`` (frames so far
     including the new ones, minus 1) and ``total_sequence_length`` (the KV
     capacity, or frames so far for an unshared cache). Outputs: ``audio``
@@ -686,12 +715,12 @@ def export_vocoder(model, work: Path, out: Path, capacity: int = 4096) -> None:
         torch.onnx.export(
             back,
             (torch.zeros(1, n, cfg.latent_dim, dtype=dtype, device="cuda"),
-             torch.zeros(1, cfg.latent_dim, 3, dtype=dtype, device="cuda")),
+             torch.zeros(1, cfg.latent_dim, VOCODER_CONV_CONTEXT, dtype=dtype, device="cuda"),
+             torch.zeros(1, dtype=torch.float32, device="cuda")),
             str(work / "vocoder_back.onnx"),
-            input_names=["transformer_out", "conv_ctx"],
+            input_names=["transformer_out", "conv_ctx", "context_valid"],
             output_names=["audio", "next_conv_ctx"],
-            dynamic_axes={"transformer_out": {1: "frames"}, "conv_ctx": {2: "context"}, "audio": {1: "samples"},
-                          "next_conv_ctx": {2: "next_context"}},
+            dynamic_axes={"transformer_out": {1: "frames"}, "audio": {1: "samples"}},
             opset_version=20,
             do_constant_folding=False,
             dynamo=False,
@@ -699,7 +728,7 @@ def export_vocoder(model, work: Path, out: Path, capacity: int = 4096) -> None:
     f = onnx.load(str(work / "vocoder_front.onnx"))
     b = onnx.load(str(work / "vocoder_back.onnx"))
     _prefix_graph(f, "front/", {"codes", "pre_ctx", "transformer_in", "next_pre_ctx"})
-    _prefix_graph(b, "back/", {"transformer_out", "conv_ctx", "audio", "next_conv_ctx"})
+    _prefix_graph(b, "back/", {"transformer_out", "conv_ctx", "context_valid", "audio", "next_conv_ctx"})
     graph = onnx.helper.make_graph(
         nodes=list(f.graph.node),
         name="qwen3_tts_vocoder_stream",
@@ -886,6 +915,7 @@ def write_package(source: Path, out: Path) -> None:
     tok_cfg = json.loads((source / "speech_tokenizer" / "config.json").read_text(encoding="utf-8"))
     t = cfg["talker_config"]
     c = t["code_predictor_config"]
+    d = tok_cfg["decoder_config"]
     package = {
         "schema": MANIFEST_SCHEMA,
         "adapter": ADAPTER,
@@ -915,6 +945,25 @@ def write_package(source: Path, out: Path) -> None:
             "codec_think_eos": t["codec_think_eos_id"],
         },
         "languages": t["codec_language_id"],
+        "graphs": {
+            "talker": "talker.onnx",
+            "vocoder": "vocoder.onnx",
+            "speaker_encoder": "speaker_encoder.onnx",
+            "codec_encoder": "codec_encoder.onnx",
+        },
+        "precision": "fp16",
+        "vocoder": {
+            "layers": d["num_hidden_layers"],
+            "kv_heads": d["num_key_value_heads"],
+            "head_dim": d["head_dim"],
+            "kv_window": d["sliding_window"],
+            "pre_ctx_channels": d["codebook_dim"],
+            "pre_ctx_frames": 2,
+            "conv_ctx_channels": d["latent_dim"],
+            "conv_ctx_frames": VOCODER_CONV_CONTEXT,
+            "max_frames": VOCODER_CAPACITY,
+        },
+        "codec_frame_samples": CODEC_FRAME_SAMPLES,
         "generation": {
             "do_sample": gen.get("do_sample", True),
             "temperature": gen.get("temperature", 0.9),

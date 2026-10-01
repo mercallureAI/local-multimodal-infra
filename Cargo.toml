@@ -67,6 +67,7 @@ local-zh-tts-frontend = { path = "crates/text/zh-tts-frontend" }
 local-adapter-sensevoice-asr = { path = "crates/adapters/asr/sensevoice" }
 local-adapter-index-tts = { path = "crates/adapters/tts/index-tts" }
 local-adapter-index-tts2 = { path = "crates/adapters/tts/index-tts2" }
+local-adapter-qwen3-tts = { path = "crates/adapters/tts/qwen3-tts" }
 local-adapter-qwen3-chat = { path = "crates/adapters/chat/qwen3" }
 local-adapter-e5-embedding = { path = "crates/adapters/embedding/e5" }
 local-adapter-mmarco-reranker = { path = "crates/adapters/rerank/mmarco" }

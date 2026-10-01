@@ -812,6 +812,8 @@ backend: ort
                 let repo_id = match spec.adapter {
                     AdapterKind::IndexTts => "ModaLeap/indextts-1.5-onnx",
                     AdapterKind::IndexTts2 => "ModaLeap/indextts-2.5-onnx",
+                    // Not frontend-dependent: one local package (see below).
+                    AdapterKind::Qwen3Tts => continue,
                     other => panic!("{} TTS uses unexpected adapter {other:?}", spec.id),
                 };
                 // The model package, then the Mandarin frontend in its

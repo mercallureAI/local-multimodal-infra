@@ -22,6 +22,8 @@ use local_adapter_index_tts2::IndexTts2Adapter;
 use local_adapter_mmarco_reranker::MmarcoRerankerAdapter;
 #[cfg(feature = "chat")]
 use local_adapter_qwen3_chat::Qwen3ChatAdapter;
+#[cfg(feature = "tts")]
+use local_adapter_qwen3_tts::Qwen3TtsAdapter;
 #[cfg(feature = "asr")]
 use local_adapter_sensevoice_asr::SenseVoiceAsrAdapter;
 #[cfg(feature = "ocr")]
@@ -55,7 +57,9 @@ pub fn compiled_adapters() -> Vec<AdapterKind> {
         .filter(|adapter| match adapter {
             AdapterKind::Yolo => cfg!(feature = "detect"),
             AdapterKind::SenseVoiceAsr => cfg!(feature = "asr"),
-            AdapterKind::IndexTts | AdapterKind::IndexTts2 => cfg!(feature = "tts"),
+            AdapterKind::IndexTts | AdapterKind::IndexTts2 | AdapterKind::Qwen3Tts => {
+                cfg!(feature = "tts")
+            }
             AdapterKind::E5Embedding => cfg!(feature = "embedding"),
             AdapterKind::MmarcoReranker => cfg!(feature = "rerank"),
             AdapterKind::Qwen3Chat => cfg!(feature = "chat"),
@@ -522,6 +526,8 @@ impl LoadedEntry {
             AdapterKind::IndexTts => LoadedModel::IndexTts(IndexTtsAdapter::load(&spec)?),
             #[cfg(feature = "tts")]
             AdapterKind::IndexTts2 => LoadedModel::IndexTts2(IndexTts2Adapter::load(&spec)?),
+            #[cfg(feature = "tts")]
+            AdapterKind::Qwen3Tts => LoadedModel::Qwen3Tts(Box::new(Qwen3TtsAdapter::load(&spec)?)),
             #[cfg(feature = "embedding")]
             AdapterKind::E5Embedding => LoadedModel::E5Embedding(E5EmbeddingAdapter::load(&spec)?),
             #[cfg(feature = "rerank")]
@@ -664,6 +670,8 @@ fn validated_runtime_providers_for_model(model_id: &str) -> Option<&'static [&'s
         // IndexTTS-2.5 packages are exported FP16 for NVIDIA GPUs; CPU stays a
         // functional (slow) fallback.
         "indextts-2.5-onnx" => Some(&["cuda", "cpu"]),
+        // FP16 GroupQueryAttention graphs, CUDA graph decode.
+        "qwen3-tts-0.6b-onnx" => Some(&["cuda", "cpu"]),
         "multilingual-e5-small-onnx" => Some(&["cuda", "cpu"]),
         "mmarco-minilm-l12-onnx" => Some(&["cuda", "cpu"]),
         "qwen3-4b-instruct-2507-int4-onnx" => Some(&["cuda", "cpu"]),
@@ -682,6 +690,8 @@ enum LoadedModel {
     IndexTts(IndexTtsAdapter),
     #[cfg(feature = "tts")]
     IndexTts2(IndexTts2Adapter),
+    #[cfg(feature = "tts")]
+    Qwen3Tts(Box<Qwen3TtsAdapter>),
     #[cfg(feature = "embedding")]
     E5Embedding(E5EmbeddingAdapter),
     #[cfg(feature = "rerank")]
@@ -751,6 +761,15 @@ impl LoadedModel {
             #[cfg(feature = "tts")]
             (
                 LoadedModel::IndexTts2(adapter),
+                TaskKind::TtsSynthesize,
+                InferenceInput::TtsSynthesize {
+                    text,
+                    reference_audio,
+                },
+            ) => adapter.synthesize(task.id, text, reference_audio.as_ref(), &task.params),
+            #[cfg(feature = "tts")]
+            (
+                LoadedModel::Qwen3Tts(adapter),
                 TaskKind::TtsSynthesize,
                 InferenceInput::TtsSynthesize {
                     text,
@@ -1373,7 +1392,9 @@ mod tests {
         let task_kinds = match adapter {
             AdapterKind::Yolo => vec![TaskKind::ObjectDetect],
             AdapterKind::SenseVoiceAsr => vec![TaskKind::AsrTranscribe],
-            AdapterKind::IndexTts | AdapterKind::IndexTts2 => vec![TaskKind::TtsSynthesize],
+            AdapterKind::IndexTts | AdapterKind::IndexTts2 | AdapterKind::Qwen3Tts => {
+                vec![TaskKind::TtsSynthesize]
+            }
             AdapterKind::E5Embedding => vec![TaskKind::TextEmbed],
             AdapterKind::MmarcoReranker => vec![TaskKind::TextRerank],
             AdapterKind::Qwen3Chat => vec![TaskKind::ChatComplete],

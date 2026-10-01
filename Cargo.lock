@@ -1429,6 +1429,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "local-adapter-qwen3-tts"
+version = "0.1.0"
+dependencies = [
+ "half",
+ "hound",
+ "local-backend-ort",
+ "local-core",
+ "local-error",
+ "local-files",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokenizers",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "local-adapter-sensevoice-asr"
 version = "0.1.0"
 dependencies = [
@@ -1688,6 +1707,7 @@ dependencies = [
  "local-adapter-index-tts2",
  "local-adapter-mmarco-reranker",
  "local-adapter-qwen3-chat",
+ "local-adapter-qwen3-tts",
  "local-adapter-sensevoice-asr",
  "local-adapter-unlimited-ocr",
  "local-adapter-yolo",

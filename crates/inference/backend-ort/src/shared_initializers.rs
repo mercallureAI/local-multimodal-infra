@@ -160,7 +160,9 @@ fn host_value(range: &InitializerRange, bytes: &[u8]) -> Result<DynValue> {
         TensorElement::F32 => build(shape, le_values(bytes, f32::from_le_bytes)),
         TensorElement::F16 => build(
             shape,
-            le_values(bytes, |raw: [u8; 2]| half::f16::from_bits(u16::from_le_bytes(raw))),
+            le_values(bytes, |raw: [u8; 2]| {
+                half::f16::from_bits(u16::from_le_bytes(raw))
+            }),
         ),
         TensorElement::I64 => build(shape, le_values(bytes, i64::from_le_bytes)),
         TensorElement::I32 => build(shape, le_values(bytes, i32::from_le_bytes)),
@@ -272,7 +274,10 @@ mod tests {
                 }],
             )
             .expect("upload");
-        assert_eq!((shared.len(), shared.bytes(), shared.cuda_device()), (1, 8, None));
+        assert_eq!(
+            (shared.len(), shared.bytes(), shared.cuda_device()),
+            (1, 8, None)
+        );
         let (_, data) = shared.values()[0]
             .1
             .try_extract_tensor::<f32>()

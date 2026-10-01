@@ -58,7 +58,9 @@ impl DeviceBindingOutputs {
             .iter()
             .position(|(candidate, _)| candidate == name)
             .ok_or_else(|| {
-                InfraError::Backend(format!("device binding did not return device output `{name}`"))
+                InfraError::Backend(format!(
+                    "device binding did not return device output `{name}`"
+                ))
             })?;
         Ok(self.device.swap_remove(index).1)
     }
@@ -69,7 +71,9 @@ impl DeviceBindingOutputs {
             .iter()
             .position(|output| output.name == name)
             .ok_or_else(|| {
-                InfraError::Backend(format!("device binding did not return host output `{name}`"))
+                InfraError::Backend(format!(
+                    "device binding did not return host output `{name}`"
+                ))
             })?;
         Ok(self.host.swap_remove(index))
     }
@@ -172,7 +176,10 @@ impl OrtSession {
         binding.binding.clear_inputs();
         let bound = (|| {
             for (name, value) in &host_values {
-                binding.binding.bind_input(name, value).map_err(map_ort_err)?;
+                binding
+                    .binding
+                    .bind_input(name, value)
+                    .map_err(map_ort_err)?;
             }
             for (name, tensor) in device_inputs {
                 binding
@@ -195,12 +202,20 @@ impl OrtSession {
                 .map_err(map_ort_err)?;
             let mut collected = DeviceBindingOutputs::default();
             for (name, value) in outputs {
-                if binding.device_outputs.iter().any(|expected| expected == name) {
-                    collected.device.push((name.to_string(), device_tensor(name, value)?));
-                } else {
+                if binding
+                    .device_outputs
+                    .iter()
+                    .any(|expected| expected == name)
+                {
                     collected
-                        .host
-                        .push(host_tensor_output(name, &value, &self.real.metadata.outputs)?);
+                        .device
+                        .push((name.to_string(), device_tensor(name, value)?));
+                } else {
+                    collected.host.push(host_tensor_output(
+                        name,
+                        &value,
+                        &self.real.metadata.outputs,
+                    )?);
                 }
             }
             Ok(collected)
@@ -227,7 +242,8 @@ fn device_tensor(name: &str, value: DynValue) -> Result<DeviceTensor> {
 
 fn owned_input_tensor(input: OrtTensorInput) -> Result<DynTensor> {
     let expected_len = input.shape.iter().try_fold(1usize, |acc, dim| {
-        acc.checked_mul(*dim).ok_or_else(|| shape_overflow(&input.name, *dim))
+        acc.checked_mul(*dim)
+            .ok_or_else(|| shape_overflow(&input.name, *dim))
     })?;
     if expected_len != input.data.len() {
         return Err(InfraError::Backend(format!(
