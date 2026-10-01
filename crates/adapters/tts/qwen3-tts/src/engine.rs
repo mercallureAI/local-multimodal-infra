@@ -21,8 +21,11 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::mpsc,
-    time::{Instant, SystemTime},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    time::{Duration, Instant, SystemTime},
 };
 use tokenizers::Tokenizer;
 
@@ -98,14 +101,24 @@ impl Engine {
         // The vocoder graph keeps shape arithmetic on the CPU, which CUDA
         // graph capture refuses: plain runs.
         let vocoder_backend = base.clone();
-        // The stream: a primed reference (at most ~30 s = 375 frames) and the
-        // talker's longest output.
+        // A stream: a primed reference and the talker's longest output (its
+        // context), plus a padded last chunk.
+        let vocoder_frames = vocoder_frames(capacity, chunk, config.frame_rate());
+        if vocoder_frames > config.vocoder.max_frames {
+            return Err(InfraError::ModelNotConfigured {
+                model_id: spec.id.clone(),
+                reason: format!(
+                    "max_context {capacity} needs a {vocoder_frames}-frame vocoder stream; the package's vocoder covers {}",
+                    config.vocoder.max_frames
+                ),
+            });
+        }
         let vocoder = Vocoder::load(
             &vocoder_backend,
             &artifacts.file(&config.graphs.vocoder),
             config,
             chunk,
-            capacity + 400,
+            vocoder_frames,
             false,
         )?;
         // FP32 encoders: TF32 flips residual-VQ code choices.
@@ -201,6 +214,7 @@ impl Engine {
         text: TextSource<'_>,
         reference_audio: Option<&Path>,
         params: &BTreeMap<String, Value>,
+        cancel: &AtomicBool,
         on_audio: &mut dyn FnMut(&[f32]) -> bool,
     ) -> Result<SynthesisStats> {
         let started = Instant::now();
@@ -230,7 +244,21 @@ impl Engine {
             }
             None => None,
         };
-        let language = params.language.as_ref().map(|name| config.languages[name]);
+        let language = params
+            .language
+            .as_ref()
+            .map(|name| {
+                config.languages.get(name).copied().ok_or_else(|| {
+                    InfraError::BadRequest(format!("this package has no language `{name}`"))
+                })
+            })
+            .transpose()?;
+        if ref_ids.is_some() && voice.codes.is_empty() {
+            return Err(InfraError::BadRequest(format!(
+                "the reference audio is {:.1} s; with reference_text (in-context cloning) it may be at most {} s (max_reference_seconds), as its transcript covers all of it",
+                voice.seconds, params.max_reference_seconds
+            )));
+        }
         let reference = ref_ids.as_deref().map(|ids| Reference {
             ids,
             codes: &voice.codes,
@@ -250,8 +278,16 @@ impl Engine {
 
         // The text's tokens, as far as they are known (all at once, or as a
         // stream writes them).
-        let mut feed = TextFeed::new(text, &self.tokenizer, &role);
+        let mut feed = TextFeed::new(text, &self.tokenizer, &role, cancel);
         feed.wait_for(tokens_needed(reference))?;
+        if feed.aborted() {
+            return Ok(SynthesisStats {
+                voice_ms,
+                stopped: true,
+                total_ms: started.elapsed().as_millis() as u64,
+                ..SynthesisStats::default()
+            });
+        }
         let text_at = Instant::now();
         let known = feed.committed().len();
         let prompt = build_prompt_parts(
@@ -349,8 +385,18 @@ impl Engine {
                 }
             }
             stats.text_wait_ms += waited.elapsed().as_millis() as u64;
+            if feed.aborted() {
+                // The text was abandoned (or the caller left): say no more.
+                stats.stopped = true;
+                break;
+            }
             let step_started = Instant::now();
-            seen[codes[0] as usize] = 1.0;
+            if let Some(seen) = usize::try_from(codes[0])
+                .ok()
+                .and_then(|code| seen.get_mut(code))
+            {
+                *seen = 1.0;
+            }
             let text_id = queue.get(frame).copied().unwrap_or(pad);
             fill_noise(&mut noise);
             codes = self
@@ -413,6 +459,13 @@ impl Engine {
     }
 }
 
+/// Vocoder frames a stream needs: the longest reference it is primed with,
+/// `capacity` talker positions (prompt and generated frames) and a padded
+/// last chunk.
+fn vocoder_frames(capacity: usize, chunk: usize, frame_rate: f32) -> usize {
+    (crate::params::MAX_REFERENCE_SECONDS * frame_rate).ceil() as usize + capacity + chunk
+}
+
 /// Where a synthesis gets its text.
 pub(crate) enum TextSource<'a> {
     Whole(&'a str),
@@ -431,17 +484,27 @@ struct TextFeed<'a> {
     role_len: usize,
     text: String,
     ended: bool,
+    /// The stream went away without `End`, or the caller cancelled.
+    aborted: bool,
+    cancel: &'a AtomicBool,
     committed: Vec<i64>,
 }
 
 impl<'a> TextFeed<'a> {
-    fn new(source: TextSource<'a>, tokenizer: &'a Tokenizer, role: &[i64]) -> Self {
+    fn new(
+        source: TextSource<'a>,
+        tokenizer: &'a Tokenizer,
+        role: &[i64],
+        cancel: &'a AtomicBool,
+    ) -> Self {
         let mut feed = Self {
             source,
             tokenizer,
             role_len: role.len(),
             text: String::new(),
             ended: false,
+            aborted: false,
+            cancel,
             committed: Vec::new(),
         };
         if let TextSource::Whole(text) = feed.source {
@@ -460,15 +523,21 @@ impl<'a> TextFeed<'a> {
         self.ended
     }
 
+    fn aborted(&self) -> bool {
+        self.aborted || self.cancel.load(Ordering::Relaxed)
+    }
+
     /// Waits until `count` tokens are final or the text has ended.
     fn wait_for(&mut self, count: usize) -> Result<()> {
-        while self.committed.len() < count && !self.ended {
+        while self.committed.len() < count && !self.ended && !self.aborted() {
             self.poll(true)?;
         }
         Ok(())
     }
 
-    /// Takes what the stream has written (waiting for a piece if `block`).
+    /// Takes what the stream has written (waiting for a piece if `block`,
+    /// as long as the caller has not cancelled). A stream that goes away
+    /// without `End` aborts the text.
     fn poll(&mut self, block: bool) -> Result<()> {
         let TextSource::Stream(pieces) = self.source else {
             return Ok(());
@@ -476,20 +545,39 @@ impl<'a> TextFeed<'a> {
         if self.ended {
             return Ok(());
         }
+        let disconnected = |feed: &mut Self| {
+            feed.ended = true;
+            feed.aborted = true;
+        };
         if block {
-            match pieces.recv() {
-                Ok(piece) => self.take(piece),
-                Err(_) => self.ended = true,
+            loop {
+                if self.cancel.load(Ordering::Relaxed) {
+                    disconnected(self);
+                    break;
+                }
+                match pieces.recv_timeout(Duration::from_millis(20)) {
+                    Ok(piece) => {
+                        self.take(piece);
+                        break;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        disconnected(self);
+                        break;
+                    }
+                }
             }
         }
         while !self.ended {
             match pieces.try_recv() {
                 Ok(piece) => self.take(piece),
                 Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => self.ended = true,
+                Err(mpsc::TryRecvError::Disconnected) => disconnected(self),
             }
         }
-        self.commit();
+        if !self.aborted {
+            self.commit();
+        }
         Ok(())
     }
 

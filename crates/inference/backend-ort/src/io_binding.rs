@@ -157,6 +157,8 @@ impl OrtSession {
         input_shape: &[usize],
         output_shape: &[usize],
     ) -> Result<PinnedCudaF32IoBinding> {
+        // Allocates pinned host memory (cudaHostAlloc).
+        let _gate = crate::gpu_shared();
         let selected_device = self.device_id.unwrap_or(0);
         if self.provider != ProviderKind::Cuda
             || self.whole_session_cpu_fallback_used()
@@ -322,6 +324,8 @@ impl OrtSession {
         output_name: &str,
         output_shape: &[usize],
     ) -> Result<PinnedCudaIoBinding> {
+        // Allocates pinned host memory (cudaHostAlloc).
+        let _gate = crate::gpu_shared();
         let selected_device = self.device_id.unwrap_or(0);
         if self.provider != ProviderKind::Cuda
             || self.whole_session_cpu_fallback_used()

@@ -762,8 +762,19 @@ impl OrtSession {
 
 #[derive(Debug)]
 struct RealSession {
-    session: Session,
+    /// Dropped under the GPU gate (see `Drop`).
+    session: std::mem::ManuallyDrop<Session>,
     metadata: SessionMetadata,
+}
+
+impl Drop for RealSession {
+    fn drop(&mut self) {
+        // Releasing a session frees its device memory (cudaFree), which a
+        // CUDA graph capture elsewhere must not see.
+        let _gate = gpu_shared();
+        // SAFETY: dropped once, here; the field is not used afterwards.
+        unsafe { std::mem::ManuallyDrop::drop(&mut self.session) };
+    }
 }
 
 impl RealSession {
@@ -943,7 +954,10 @@ impl RealSession {
             inputs: session.inputs().iter().map(tensor_metadata).collect(),
             outputs: session.outputs().iter().map(tensor_metadata).collect(),
         };
-        Ok(Self { session, metadata })
+        Ok(Self {
+            session: std::mem::ManuallyDrop::new(session),
+            metadata,
+        })
     }
 
     fn metadata(&self) -> &SessionMetadata {

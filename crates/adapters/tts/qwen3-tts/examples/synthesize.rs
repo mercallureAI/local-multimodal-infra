@@ -101,10 +101,15 @@ fn main() {
                     .unwrap();
                 let mut streamed = Vec::new();
                 adapter
-                    .synthesize_text_stream(write_text(text.clone(), 0.0), Some(&reference), &params, &mut |c| {
-                        streamed.extend_from_slice(c);
-                        true
-                    })
+                    .synthesize_text_stream(
+                        write_text(text.clone(), 0.0),
+                        Some(&reference),
+                        &params,
+                        &mut |c| {
+                            streamed.extend_from_slice(c);
+                            true
+                        },
+                    )
                     .unwrap();
                 let mut again = Vec::new();
                 adapter
@@ -114,7 +119,10 @@ fn main() {
                     })
                     .unwrap();
                 let diff = |a: &[f32], b: &[f32]| {
-                    a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+                    a.iter()
+                        .zip(b)
+                        .map(|(x, y)| (x - y).abs())
+                        .fold(0.0f32, f32::max)
                 };
                 println!(
                     "    stream written at once vs whole text: max diff {:.2e} ({} vs {} samples); whole vs whole again: max diff {:.2e}",

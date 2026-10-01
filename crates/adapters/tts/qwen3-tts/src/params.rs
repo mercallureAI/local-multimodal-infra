@@ -5,6 +5,11 @@ use local_error::{InfraError, Result};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+/// Longest reference for in-context cloning unless `max_reference_seconds`
+/// says otherwise (at most [`MAX_REFERENCE_SECONDS`]).
+pub const DEFAULT_MAX_REFERENCE_SECONDS: f32 = 15.0;
+pub const MAX_REFERENCE_SECONDS: f32 = 30.0;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SynthesisParams {
     /// A codec language (`chinese`, `english`, ...) or `None` for auto.
@@ -67,7 +72,8 @@ impl SynthesisParams {
                 .unwrap_or(defaults.repetition_penalty),
             max_frames: integer(params, &["max_frames", "max_new_tokens"])?.unwrap_or(1500)
                 as usize,
-            max_reference_seconds: number(params, &["max_reference_seconds"])?.unwrap_or(10.0),
+            max_reference_seconds: number(params, &["max_reference_seconds"])?
+                .unwrap_or(DEFAULT_MAX_REFERENCE_SECONDS),
             seed: integer(params, &["seed"])?.unwrap_or_else(time_seed),
         };
         parsed.validate()?;
@@ -88,9 +94,9 @@ impl SynthesisParams {
         if self.max_frames == 0 {
             return bad("max_frames must be positive".to_string());
         }
-        if !(1.0..=30.0).contains(&self.max_reference_seconds) {
+        if !(1.0..=MAX_REFERENCE_SECONDS).contains(&self.max_reference_seconds) {
             return bad(format!(
-                "max_reference_seconds must be in [1, 30], got {}",
+                "max_reference_seconds must be in [1, {MAX_REFERENCE_SECONDS}], got {}",
                 self.max_reference_seconds
             ));
         }

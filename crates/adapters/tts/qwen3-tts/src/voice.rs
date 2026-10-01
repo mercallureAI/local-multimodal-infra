@@ -14,8 +14,11 @@ use std::path::Path;
 pub struct Voice {
     /// The ECAPA x-vector of the whole reference.
     pub speaker: Vec<f32>,
-    /// Codec codes of (the first `max_seconds` of) the reference.
+    /// Codec codes of the whole reference; empty when it is longer than
+    /// in-context cloning takes (its transcript covers all of it, so codes of
+    /// a part would not match).
     pub codes: Vec<Codes>,
+    pub seconds: f32,
 }
 
 #[derive(Debug)]
@@ -43,7 +46,7 @@ impl VoiceEncoder {
         [self.speaker.provider_report(), self.codec.provider_report()]
     }
 
-    /// `audio`: mono 24 kHz. Codes cover at most `max_samples` of it.
+    /// `audio`: mono 24 kHz. Codes only for audio of at most `max_samples`.
     pub fn encode(&mut self, audio: &[f32], max_samples: usize) -> Result<Voice> {
         if audio.len() < self.frame_samples {
             return Err(InfraError::BadRequest(
@@ -63,10 +66,17 @@ impl VoiceEncoder {
                 ))
             }
         };
+        let seconds = audio.len() as f32 / 24_000.0;
+        if audio.len() > max_samples {
+            return Ok(Voice {
+                speaker,
+                codes: Vec::new(),
+                seconds,
+            });
+        }
         // Whole frames: the codec's causal convs pad the last one with zeros.
-        let clip = &audio[..audio.len().min(max_samples)];
-        let frames = clip.len().div_ceil(self.frame_samples);
-        let mut padded = clip.to_vec();
+        let frames = audio.len().div_ceil(self.frame_samples);
+        let mut padded = audio.to_vec();
         padded.resize(frames * self.frame_samples, 0.0);
         let codes = self.codec.run_tensors(&[OrtTensorInput {
             name: "audio".to_string(),
@@ -97,6 +107,10 @@ impl VoiceEncoder {
                 codes
             })
             .collect();
-        Ok(Voice { speaker, codes })
+        Ok(Voice {
+            speaker,
+            codes,
+            seconds,
+        })
     }
 }

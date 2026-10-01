@@ -29,7 +29,7 @@ pub enum AdapterKind {
 }
 
 impl AdapterKind {
-    pub const ALL: [AdapterKind; 9] = [
+    pub const ALL: [AdapterKind; 10] = [
         AdapterKind::Yolo,
         AdapterKind::SenseVoiceAsr,
         AdapterKind::IndexTts,

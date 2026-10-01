@@ -318,6 +318,8 @@ impl OrtSession {
         for spec in fixed_outputs {
             check_fixed(&metadata.outputs, spec, "output")?;
         }
+        // Allocates the cache and the fixed tensors on the device.
+        let _gate = crate::gpu_shared();
         let allocator = Allocator::new(&self.real.session, memory.clone()).map_err(map_ort_err)?;
         let mut binding = self.real.session.create_binding().map_err(map_ort_err)?;
         let mut kv_views = Vec::with_capacity(kv.len());
@@ -411,6 +413,9 @@ impl OrtSession {
             .iter()
             .map(|input| input.name.clone())
             .collect::<Vec<_>>();
+        // From here the fixed inputs are no longer (all) bound, even if a
+        // bind below fails.
+        binding.fixed_bound = false;
         for input in host_inputs {
             let name = input.name.clone();
             let value = owned_tensor(input)?;
@@ -427,7 +432,6 @@ impl OrtSession {
                     .map_err(map_ort_err)?;
             }
         }
-        binding.fixed_bound = false;
         for name in host_outputs {
             binding
                 .binding

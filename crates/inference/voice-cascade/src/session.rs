@@ -941,11 +941,11 @@ async fn reply(shared: Arc<Shared>, steer: Steer, utterance: Option<(u64, String
         if let InferenceEvent::ChatDelta { content } = event {
             for clause in splitter.feed(&content) {
                 let said = match live.take() {
-                    Some(live) => shared.finish_live(live, &clause),
-                    None => shared.speak(epoch, &clause, None),
+                    Some(live) => shared.finish_live(epoch, live, &clause),
+                    None => shared.speak(epoch, &clause, None).then_some(clause),
                 };
-                if said {
-                    spoken.push_str(&clause);
+                if let Some(said) = said {
+                    spoken.push_str(&said);
                 }
                 first = false;
             }
@@ -953,7 +953,7 @@ async fn reply(shared: Arc<Shared>, steer: Steer, utterance: Option<(u64, String
                 live = shared.speak_live(epoch);
             }
             if let Some(live) = &mut live {
-                live.write(splitter.partial());
+                live.write(splitter.partial(), false);
             }
         }
     }
@@ -987,15 +987,16 @@ async fn reply(shared: Arc<Shared>, steer: Steer, utterance: Option<(u64, String
     if completion.is_some() {
         if let Some(rest) = splitter.flush() {
             let said = match live.take() {
-                Some(live) => shared.finish_live(live, &rest),
-                None => shared.speak(epoch, &rest, None),
+                Some(live) => shared.finish_live(epoch, live, &rest),
+                None => shared.speak(epoch, &rest, None).then_some(rest),
             };
-            if said {
-                spoken.push_str(&rest);
+            if let Some(said) = said {
+                spoken.push_str(&said);
             }
         }
     }
-    // A live clause left (cut, or nothing came after it) ends here.
+    // A live clause left (cut, or the chat model failed) is dropped without
+    // an end: TTS stops (what it said is not in the reply's history).
     drop(live);
     let assistant = |content: String, tool_calls: Vec<ChatToolCall>| ChatMessage {
         role: "assistant".to_string(),
@@ -1198,17 +1199,30 @@ impl Shared {
 
     /// Ends a live clause with its whole text; false when nothing of it is
     /// to be said.
-    fn finish_live(&self, mut live: LiveClause, clause: &str) -> bool {
-        live.write(clause);
+    /// Ends a live clause with its whole text: what TTS was given to say,
+    /// none when nothing (or the reply was cut meanwhile: dropping `live`
+    /// without an end stops TTS).
+    fn finish_live(&self, epoch: u64, mut live: LiveClause, clause: &str) -> Option<String> {
+        if epoch != self.current_epoch() {
+            return None;
+        }
+        live.write(clause, true);
         let _ = live.text.send(TextPiece::End);
+        if live.sent != speakable(clause) {
+            tracing::warn!(
+                clause,
+                spoken = live.sent,
+                "voice cascade: the clause read differently once complete; only what was streamed is spoken"
+            );
+        }
         if live.sent.is_empty() {
-            return false;
+            return None;
         }
         self.emit(ServerEvent::ResponseText {
             text: live.sent.clone(),
             response_id: None,
         });
-        true
+        Some(live.sent)
     }
 
     /// Queues `clause` to be spoken (as part of `response`, in audio mode);
@@ -1598,8 +1612,16 @@ struct LiveClause {
 }
 
 impl LiveClause {
-    /// Gives TTS what `partial` (the clause so far) adds.
-    fn write(&mut self, partial: &str) {
+    /// Gives TTS what `partial` (the clause so far, or all of it when
+    /// `whole`) adds.
+    fn write(&mut self, partial: &str, whole: bool) {
+        // A word still being written is held back while it may turn out to
+        // be one `speakable` drops (a URL): only ASCII words can.
+        let partial = if whole {
+            partial
+        } else {
+            partial.trim_end_matches(|c: char| c.is_ascii() && !c.is_ascii_whitespace())
+        };
         let speakable = speakable(partial);
         // Only extensions: a later character can change how earlier text
         // reads (a URL, markup), and what was sent stays sent.
@@ -2005,6 +2027,27 @@ fn read_wav(path: &Path) -> Result<Vec<f32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_live_clause_holds_back_a_word_that_may_be_a_url() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut live = LiveClause {
+            text: tx,
+            sent: String::new(),
+        };
+        live.write("好的，see https://exa", false);
+        live.write("好的，see https://example.com and", false);
+        live.write("好的，see https://example.com and more。", true);
+        let said: String = rx
+            .try_iter()
+            .map(|piece| match piece {
+                TextPiece::Text(text) => text,
+                TextPiece::End => String::new(),
+            })
+            .collect();
+        assert_eq!(said, speakable("好的，see https://example.com and more。"));
+        assert_eq!(live.sent, said);
+    }
 
     #[test]
     fn slice_takes_what_the_buffer_still_holds() {

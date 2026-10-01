@@ -30,7 +30,17 @@ use local_backend_ort::SessionProviderReport;
 use local_core::{FileRef, InferenceEvent, InferenceOutput, ModelSpec, TextPiece};
 use local_error::{InfraError, Result};
 use serde_json::Value;
-use std::{collections::BTreeMap, env, fs, path::PathBuf, sync::mpsc, thread::JoinHandle};
+use std::{
+    collections::BTreeMap,
+    env, fs,
+    panic::{catch_unwind, AssertUnwindSafe},
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
+    thread::JoinHandle,
+};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy)]
@@ -76,12 +86,17 @@ enum Job {
         reference: Option<PathBuf>,
         params: BTreeMap<String, Value>,
         chunks: mpsc::SyncSender<Chunk>,
+        /// Set when the caller stops listening: the engine stops, also while
+        /// it waits for streamed text.
+        cancel: Arc<AtomicBool>,
     },
 }
 
 enum Chunk {
     Audio(Vec<f32>),
     Done(Result<SynthesisStats>),
+    /// The engine panicked (its thread ends).
+    Panicked(String),
 }
 
 /// A handle to the engine thread.
@@ -92,6 +107,8 @@ pub struct Qwen3TtsAdapter {
     report: Qwen3TtsProviderReport,
     output_dir: PathBuf,
     jobs: Option<mpsc::Sender<Job>>,
+    /// The latest job's cancel flag (set on drop).
+    cancel: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -129,19 +146,34 @@ impl Qwen3TtsAdapter {
                     reference,
                     params,
                     chunks,
+                    cancel,
                 }) = jobs_rx.recv()
                 {
                     let source = match &text {
                         JobText::Whole(text) => engine::TextSource::Whole(text),
                         JobText::Stream(pieces) => engine::TextSource::Stream(pieces),
                     };
-                    let result = engine.synthesize_stream(
-                        source,
-                        reference.as_deref(),
-                        &params,
-                        &mut |samples| chunks.send(Chunk::Audio(samples.to_vec())).is_ok(),
-                    );
-                    let _ = chunks.send(Chunk::Done(result));
+                    let result = catch_unwind(AssertUnwindSafe(|| {
+                        engine.synthesize_stream(
+                            source,
+                            reference.as_deref(),
+                            &params,
+                            &cancel,
+                            &mut |samples| chunks.send(Chunk::Audio(samples.to_vec())).is_ok(),
+                        )
+                    }));
+                    match result {
+                        Ok(result) => {
+                            let _ = chunks.send(Chunk::Done(result));
+                        }
+                        Err(panic) => {
+                            // The sessions' state is suspect: end the thread;
+                            // the caller passes the panic on so the runtime
+                            // reloads the model.
+                            let _ = chunks.send(Chunk::Panicked(panic_message(&*panic)));
+                            return;
+                        }
+                    }
                 }
             })
             .map_err(|e| InfraError::Adapter(format!("spawn the Qwen3-TTS thread: {e}")))?;
@@ -157,6 +189,7 @@ impl Qwen3TtsAdapter {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("workdir/data")),
             jobs: Some(jobs_tx),
+            cancel: Arc::new(AtomicBool::new(false)),
             thread: Some(thread),
         })
     }
@@ -307,24 +340,32 @@ impl Qwen3TtsAdapter {
     ) -> Result<SynthesisStats> {
         let reference = reference_audio.map(local_files::local_path).transpose()?;
         let (chunks_tx, chunks) = mpsc::sync_channel(16);
-        self.jobs
-            .as_ref()
-            .ok_or_else(|| InfraError::Adapter("the Qwen3-TTS thread is gone".to_string()))?
-            .send(Job::Synthesize {
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cancel = cancel.clone();
+        let sent = self.jobs.as_ref().is_some_and(|jobs| {
+            jobs.send(Job::Synthesize {
                 text,
                 reference,
                 params: params.clone(),
                 chunks: chunks_tx,
+                cancel: cancel.clone(),
             })
-            .map_err(|_| InfraError::Adapter("the Qwen3-TTS thread is gone".to_string()))?;
+            .is_ok()
+        });
+        if !sent {
+            // The engine thread ended (it panicked before): this adapter is
+            // dead; a panic makes the runtime reload it.
+            panic!("the Qwen3-TTS engine thread of `{}` is gone", self.model_id);
+        }
         let mut samples = 0usize;
         loop {
             match chunks.recv() {
                 Ok(Chunk::Audio(audio)) => {
                     samples += audio.len();
                     if !on_audio(&audio) {
-                        // Dropping the receiver stops the engine at its next
-                        // chunk.
+                        // The engine stops at its next frame (or while it
+                        // waits for text).
+                        cancel.store(true, Ordering::Relaxed);
                         return Ok(SynthesisStats {
                             samples,
                             stopped: true,
@@ -333,19 +374,34 @@ impl Qwen3TtsAdapter {
                     }
                 }
                 Ok(Chunk::Done(result)) => return result,
-                Err(_) => {
-                    return Err(InfraError::Adapter(
-                        "the Qwen3-TTS thread ended mid-synthesis".to_string(),
-                    ))
+                Ok(Chunk::Panicked(message)) => {
+                    panic!(
+                        "the Qwen3-TTS engine of `{}` panicked: {message}",
+                        self.model_id
+                    )
                 }
+                Err(_) => panic!(
+                    "the Qwen3-TTS engine thread of `{}` ended mid-synthesis",
+                    self.model_id
+                ),
             }
         }
     }
 }
 
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|text| text.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
+}
+
 impl Drop for Qwen3TtsAdapter {
     fn drop(&mut self) {
-        // Closing the job queue ends the thread, which drops the sessions.
+        // Closing the job queue ends the thread, which drops the sessions;
+        // a job still waiting for text stops.
+        self.cancel.store(true, Ordering::Relaxed);
         self.jobs.take();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();

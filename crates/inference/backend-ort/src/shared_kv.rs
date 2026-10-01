@@ -156,6 +156,8 @@ impl OrtSession {
                 )))
             }
         };
+        // Allocates (and zeroes) the cache on the device.
+        let _gate = crate::gpu_shared();
         let allocator = Allocator::new(&self.real.session, device_memory).map_err(map_ort_err)?;
         let dims = Shape::new(shape.iter().map(|dim| *dim as i64));
         let mut layers = Vec::with_capacity(pairs.len());

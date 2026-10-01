@@ -91,6 +91,13 @@ pub struct Qwen3TtsArtifacts {
     pub config: PackageConfig,
 }
 
+impl PackageConfig {
+    /// Codec frames per second (12.5).
+    pub fn frame_rate(&self) -> f32 {
+        self.sample_rate as f32 / self.samples_per_frame as f32
+    }
+}
+
 impl Qwen3TtsArtifacts {
     /// The first artifact path when configured, else `<model_dir>/<id>` as
     /// materialized by the registry.
