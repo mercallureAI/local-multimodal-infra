@@ -30,6 +30,7 @@ Models and input files are not baked into the images. Local configs bind to loop
 | Capability | Default model | Status | Main output |
 | --- | --- | --- | --- |
 | Object detection | `yolo11n.onnx` | Enabled by default | Classes, confidences, bounding boxes |
+| Document OCR | `unlimited-ocr-onnx` | Enabled after a local export (int8 experts, NVIDIA GPU required) | Page text (Markdown/HTML tables) with layout categories and boxes |
 | Speech recognition | `sensevoice-small-onnx` | Enabled by default | Text, timeline, language, emotion, speaker |
 | Speech synthesis | `indextts-1.5-onnx` | Enabled by default | WAV audio |
 | Speech synthesis | `indextts-2.5-onnx` | Enabled by default (FP16, NVIDIA GPU recommended) | WAV audio with emotion control |
@@ -39,6 +40,8 @@ Models and input files are not baked into the images. Local configs bind to loop
 | Realtime voice | `voice-cascade` | Enabled by default; needs the ASR, chat and TTS models | `/v1/realtime` WebSocket voice conversation (Silero VAD + SenseVoice + Qwen3 + IndexTTS, see `docs/realtime-voice.md`) |
 
 All models run on ONNX Runtime (the official ONNX Runtime 1.30, loaded at run time; see `docs/implementation-notes.md`). Model configs ask for CUDA first with CPU fallback; the provider actually used still depends on the build, the environment and each model's operator support.
+
+Document OCR uses [baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-OCR) (DeepEncoder + DeepSeek-V2 MoE with R-SWA attention) and recognizes one page image per request (base mode, padded to 1024×1024). The result is the page text with a `<|det|>category [x1, y1, x2, y2]<|/det|>` tag before each layout block, coordinates normalized to 0–999, tables as HTML. Call it through the MCP / legacy RPC `ocr_recognize` (an `image` FileRef or `image_path`) or the generic `ocr.recognize` task (upload `image`).
 
 SenseVoice ASR includes FSMN-VAD and CAM++ speaker identification. By default it returns plain text, `timestamped_text` at about 10-second granularity, `segments[].speaker` and `speakers[]`. Use `timestamps`, `timestamp_granularity_sec`, `token_timestamps` and `speaker_diarization` to adjust or turn off these results.
 
@@ -149,6 +152,15 @@ Other default model IDs:
 
 `qwen3-4b-instruct-2507-int4-onnx` has no published ONNX package; export it from the pinned revision with the commands in [`configs/providers/chat/qwen3-chat.yaml`](configs/providers/chat/qwen3-chat.yaml) into `workdir/models/qwen3-4b-instruct-2507-int4-onnx`.
 
+`unlimited-ocr-onnx` has no published package either; export it locally from the PyTorch checkpoint:
+
+```bash
+hf download baidu/Unlimited-OCR --revision 07dea832e22aefee32ad281d4b80551282e1c168 --local-dir <src>
+python -m scripts.local.unlimited_ocr_export export --source <src> --out workdir/models/unlimited-ocr-onnx
+```
+
+The export runs on Python 3.11 with the upstream pins `torch==2.10.0` (the CPU build is enough), `torchvision==0.25.0` and `transformers==4.57.1`, plus `onnx onnxruntime-gpu==1.30.0 einops addict easydict safetensors pillow matplotlib`; the `parity` subcommand compares the package with the PyTorch model token by token. The default int8 experts run only on CUDA (build the worker with `--features cuda`). On an RTX 4090 a page decodes at about 145 tokens/s in about 6.6 GB of VRAM; the 14-page paper PDF averages 6.8 s per page, against 35 s per page for the official transformers implementation on the same GPU.
+
 ### 5. Using it from an agent
 
 Give agents only the inference MCP:
@@ -174,7 +186,7 @@ A common Streamable HTTP MCP configuration looks like this; file and field names
 
 If `LOCAL_MCP_INFER_TOKENS` is empty, drop `headers`. For the admin tools, add a separate MCP server entry with the URL changed to `/mcp/admin` and `LOCAL_ADMIN_TOKEN`; do not reuse the inference token.
 
-Once connected, an agent can call `object_detect`, `asr_transcribe`, `tts_synthesize`, `text_embed` and `text_rerank` directly. For images or audio the agent cannot reach directly, use `create_task` → upload to the returned signed URL → `start_task` → `wait_task`; no host file paths need to be shared with the worker.
+Once connected, an agent can call `object_detect`, `ocr_recognize`, `asr_transcribe`, `tts_synthesize`, `text_embed` and `text_rerank` directly. For images or audio the agent cannot reach directly, use `create_task` → upload to the returned signed URL → `start_task` → `wait_task`; no host file paths need to be shared with the worker.
 
 Every MCP tool that returns an inference result accepts `with_url_result`:
 
@@ -200,6 +212,8 @@ python -m scripts.local.smoke --tests mcp \
 
 The `mcp` tests need the official `mcp` SDK in the current Python environment. For release verification, run `cargo build --release --bins` first and add `--skip-build --release` to the smoke harness.
 
+Both `rpc` and `mcp` include OCR (`--tests ocr` runs it alone); it is reported as skipped when there is no local `unlimited-ocr-onnx` export or the worker has no usable CUDA. To cover OCR, build with `cargo build --release --bins -p local-cli --features cuda` and run `python -m scripts.local.smoke --skip-build --release --tests ocr --workdir ./workdir --model-dir ./workdir/models --request-timeout 300`.
+
 ## References
 
 ### Model repositories
@@ -217,6 +231,7 @@ The `mcp` tests need the official `mcp` SDK in the current Python environment. F
 | IndexTTS Mandarin frontend (WeText + g2pW) | [ModaLeap/zh-tts-frontend](https://huggingface.co/ModaLeap/zh-tts-frontend) | `ba6b85aeb17ebc58d2d3d73121096f9495ee710e` |
 | multilingual-e5-small | [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) | `614241f622f53c4eeff9890bdc4f31cfecc418b3` |
 | mMARCO MiniLM reranker | [cross-encoder/mmarco-mMiniLMv2-L12-H384-v1](https://huggingface.co/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1) | `1427fd652930e4ba29e8149678df786c240d8825` |
+| Unlimited-OCR (source of the local ONNX export) | [baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-OCR) | `07dea832e22aefee32ad281d4b80551282e1c168` |
 | Qwen3-4B-Instruct-2507 (source of the local INT4 export) | [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) | `cdbee75f17c01a7cc42f958dc650907174af0554` |
 | Silero VAD v6.2.3 | [snakers4/silero-vad](https://github.com/snakers4/silero-vad) | `5cd7945676eb32225748052e2e6a0580e4686a08` |
 
@@ -227,6 +242,7 @@ The exact files, revisions and SHA-256 sums are the ones in [`configs/providers`
 - [modelscope/FunASR](https://github.com/modelscope/FunASR): reference for SenseVoice ONNX preprocessing, inference and the FSMN-VAD pipeline;
 - [FunAudioLLM/SenseVoice](https://github.com/FunAudioLLM/SenseVoice): the SenseVoice model and official implementation;
 - [ultralytics/ultralytics](https://github.com/ultralytics/ultralytics): YOLO preprocessing, output decoding and the COCO labels;
+- [baidu/Unlimited-OCR](https://github.com/baidu/Unlimited-OCR): the Unlimited-OCR model and official implementation (preprocessing, prompt, R-SWA and the no-repeat sampler);
 - [index-tts/index-tts](https://github.com/index-tts/index-tts): the official IndexTTS implementation;
 - [DakeQQ/Text-to-Speech-TTS-ONNX](https://github.com/DakeQQ/Text-to-Speech-TTS-ONNX): reference for IndexTTS ONNX export and inference;
 - [snakers4/silero-vad](https://github.com/snakers4/silero-vad): the Silero VAD model for realtime voice;

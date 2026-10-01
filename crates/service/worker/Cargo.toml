@@ -7,13 +7,14 @@ publish.workspace = true
 [features]
 # Model categories (see local-runtime); `realtime` serves /v1/realtime and
 # needs ASR and TTS models.
-default = ["asr", "tts", "chat", "embedding", "rerank", "detect", "realtime"]
+default = ["asr", "tts", "chat", "embedding", "rerank", "detect", "ocr", "realtime"]
 asr = ["local-runtime/asr"]
 tts = ["local-runtime/tts"]
 chat = ["local-runtime/chat"]
 embedding = ["local-runtime/embedding"]
 rerank = ["local-runtime/rerank"]
 detect = ["local-runtime/detect"]
+ocr = ["local-runtime/ocr"]
 realtime = ["dep:local-voice-cascade", "asr", "tts"]
 
 [dependencies]

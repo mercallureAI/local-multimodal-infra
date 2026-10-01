@@ -7,14 +7,19 @@
 //! `past` input (a borrowed view) and the `present` output (the owning
 //! tensor), so decode steps never copy or reallocate the cache; the valid
 //! length is carried by the `attention_mask` the caller binds for each run.
+//!
+//! The cache can be bound to several sessions of the same model (a prefill
+//! and a decode graph): [`OrtSession::share_kv_binding`] binds another session
+//! to the same device memory.
 
 use super::*;
 use crate::io_binding::owned_tensor;
+use crate::shared_initializers::{device_view, element_size};
 use half::f16;
 use ort::{
     memory::{AllocationDevice, Allocator, AllocatorType, MemoryInfo, MemoryType},
     session::{IoBinding, SharedSessionInner},
-    value::{DynTensorValueType, DynValue, Shape, Tensor, TensorRefMut},
+    value::{DynTensorValueType, DynValue, Shape, Tensor},
 };
 use std::sync::Arc;
 
@@ -26,33 +31,47 @@ pub struct SharedKvPair {
     pub present_output: String,
 }
 
+/// The cache tensors, shared by every binding made over them.
 #[derive(Debug)]
-pub struct SharedKvBinding {
-    binding: IoBinding,
-    session: Arc<SharedSessionInner>,
+struct KvStore {
+    /// Owning device tensors, one per pair.
+    layers: Vec<(SharedKvPair, DynValue)>,
     shape: [usize; 4],
     element: TensorElement,
-    logits_output: String,
-    // The owning cache tensors are bound as outputs (held by `binding`); the
-    // input views borrow their memory. Views and binding must be released
-    // before the allocator that owns the device memory: fields drop in
-    // declaration order, so the allocator is last.
+    device: (ProviderKind, Option<u32>),
+    // Fields drop in declaration order: the tensors before their allocator.
     _allocator: Allocator,
+}
+
+// SAFETY: a `KvStore` is never mutated after construction. Bindings only read
+// the tensors' device pointers and shapes through `&KvStore` (to create views),
+// and the ORT allocator, tensors and memory info are released once, when the
+// last `Arc` drops. Sharing it between threads therefore races on nothing.
+unsafe impl Sync for KvStore {}
+unsafe impl Send for KvStore {}
+
+#[derive(Debug)]
+pub struct SharedKvBinding {
+    // Holds views into `store`, so it is released first.
+    binding: IoBinding,
+    session: Arc<SharedSessionInner>,
+    logits_output: String,
+    store: Arc<KvStore>,
 }
 
 impl SharedKvBinding {
     /// `[batch, kv_heads, capacity, head_size]` of every cache tensor.
     pub fn shape(&self) -> [usize; 4] {
-        self.shape
+        self.store.shape
     }
 
     /// The maximum number of tokens the cache holds.
     pub fn capacity(&self) -> usize {
-        self.shape[2]
+        self.store.shape[2]
     }
 
     pub fn element(&self) -> TensorElement {
-        self.element
+        self.store.element
     }
 }
 
@@ -68,6 +87,28 @@ impl OrtSession {
         pairs: &[SharedKvPair],
         shape: [usize; 4],
         logits_output: &str,
+    ) -> Result<SharedKvBinding> {
+        self.shared_kv_binding(pairs, shape, logits_output, false)
+    }
+
+    /// [`Self::create_shared_kv_binding`] with the cache zero-filled, for
+    /// graphs that read every slot and mask the unused ones with an additive
+    /// bias: masked slots must still hold finite values, as `0 * NaN` is NaN.
+    pub fn create_zeroed_shared_kv_binding(
+        &self,
+        pairs: &[SharedKvPair],
+        shape: [usize; 4],
+        logits_output: &str,
+    ) -> Result<SharedKvBinding> {
+        self.shared_kv_binding(pairs, shape, logits_output, true)
+    }
+
+    fn shared_kv_binding(
+        &self,
+        pairs: &[SharedKvPair],
+        shape: [usize; 4],
+        logits_output: &str,
+        zeroed: bool,
     ) -> Result<SharedKvBinding> {
         if pairs.is_empty() {
             return Err(InfraError::Backend(
@@ -115,24 +156,90 @@ impl OrtSession {
                 )))
             }
         };
-        let allocator =
-            Allocator::new(&self.real.session, device_memory.clone()).map_err(map_ort_err)?;
-        let mut binding = self.real.session.create_binding().map_err(map_ort_err)?;
+        let allocator = Allocator::new(&self.real.session, device_memory).map_err(map_ort_err)?;
         let dims = Shape::new(shape.iter().map(|dim| *dim as i64));
+        let mut layers = Vec::with_capacity(pairs.len());
         for pair in pairs {
-            match element {
-                TensorElement::F16 => {
-                    bind_layer::<f16>(&mut binding, &allocator, &device_memory, pair, dims.clone())?
-                }
-                TensorElement::F32 => {
-                    bind_layer::<f32>(&mut binding, &allocator, &device_memory, pair, dims.clone())?
-                }
+            let owner = match element {
+                TensorElement::F16 => cache_tensor::<f16>(&allocator, dims.clone(), zeroed)?,
+                TensorElement::F32 => cache_tensor::<f32>(&allocator, dims.clone(), zeroed)?,
                 other => {
                     return Err(InfraError::Backend(format!(
                         "shared KV cache element type {other:?} is not supported"
                     )))
                 }
-            }
+            };
+            layers.push((pair.clone(), owner));
+        }
+        let store = Arc::new(KvStore {
+            layers,
+            shape,
+            element,
+            device: (self.provider, self.device_id),
+            _allocator: allocator,
+        });
+        self.bind_kv_store(store, logits_output)
+    }
+
+    /// Binds this session to the cache of `other` (made for another session
+    /// of the same model on the same device): runs of either session read and
+    /// update the same memory. Each binding must only run on its own session,
+    /// and bindings of one cache must never run concurrently (they use
+    /// different CUDA streams): keep them behind one owner that runs them in
+    /// turn, as an adapter's `&mut self` does.
+    pub fn share_kv_binding(
+        &self,
+        other: &SharedKvBinding,
+        logits_output: &str,
+    ) -> Result<SharedKvBinding> {
+        let store = Arc::clone(&other.store);
+        if store.device != (self.provider, self.device_id) || self.whole_session_cpu_fallback_used()
+        {
+            return Err(InfraError::Backend(format!(
+                "shared KV cache lives on {:?}; this session runs on {:?} {:?}",
+                store.device, self.provider, self.device_id
+            )));
+        }
+        let pairs = store
+            .layers
+            .iter()
+            .map(|(pair, _)| pair.clone())
+            .collect::<Vec<_>>();
+        let element = shared_kv_element(self.metadata(), &pairs, store.shape)?;
+        if element != store.element {
+            return Err(InfraError::Backend(format!(
+                "shared KV cache is {:?}; this session expects {element:?}",
+                store.element
+            )));
+        }
+        self.bind_kv_store(store, logits_output)
+    }
+
+    fn bind_kv_store(&self, store: Arc<KvStore>, logits_output: &str) -> Result<SharedKvBinding> {
+        if !self
+            .metadata()
+            .outputs
+            .iter()
+            .any(|output| output.name == logits_output)
+        {
+            return Err(InfraError::Backend(format!(
+                "shared KV binding logits output `{logits_output}` is not a graph output"
+            )));
+        }
+        let bytes = store.shape.iter().product::<usize>()
+            * element_size(store.element).expect("cache element is F16 or F32");
+        let mut binding = self.real.session.create_binding().map_err(map_ort_err)?;
+        for (pair, owner) in &store.layers {
+            // Views borrow the store's memory; the binding holds them and is
+            // dropped before the store.
+            let past = device_view(owner, &store.shape, bytes, &pair.past_input)?;
+            binding
+                .bind_input(pair.past_input.as_str(), &past)
+                .map_err(map_ort_err)?;
+            let present = device_view(owner, &store.shape, bytes, &pair.present_output)?;
+            binding
+                .bind_output(pair.present_output.as_str(), present)
+                .map_err(map_ort_err)?;
         }
         binding
             .bind_output_to_device(logits_output, &host_output_memory()?)
@@ -140,10 +247,8 @@ impl OrtSession {
         Ok(SharedKvBinding {
             binding,
             session: self.real.session.inner(),
-            shape,
-            element,
             logits_output: logits_output.to_string(),
-            _allocator: allocator,
+            store,
         })
     }
 
@@ -153,6 +258,33 @@ impl OrtSession {
         &mut self,
         binding: &mut SharedKvBinding,
         host_inputs: Vec<OrtTensorInput>,
+    ) -> Result<OrtTensorOutput> {
+        self.run_kv_binding(binding, host_inputs, None)
+    }
+
+    /// [`Self::run_shared_kv_binding`], then shrinks this session's device
+    /// arena so the run's activations go back to the driver (effective with
+    /// [`CudaMemoryOptions::arena_same_as_requested`]): for a long prefill
+    /// whose activations the following decode steps do not need.
+    pub fn run_shared_kv_binding_releasing_memory(
+        &mut self,
+        binding: &mut SharedKvBinding,
+        host_inputs: Vec<OrtTensorInput>,
+    ) -> Result<OrtTensorOutput> {
+        let shrink = match (self.provider, self.device_id) {
+            (ProviderKind::Cuda, Some(device)) if !self.whole_session_cpu_fallback_used() => {
+                Some(format!("gpu:{device}"))
+            }
+            _ => None,
+        };
+        self.run_kv_binding(binding, host_inputs, shrink.as_deref())
+    }
+
+    fn run_kv_binding(
+        &mut self,
+        binding: &mut SharedKvBinding,
+        host_inputs: Vec<OrtTensorInput>,
+        shrink_arenas: Option<&str>,
     ) -> Result<OrtTensorOutput> {
         if !Arc::ptr_eq(&binding.session, &self.real.session.inner()) {
             return Err(InfraError::Backend(
@@ -189,11 +321,23 @@ impl OrtSession {
             .binding
             .bind_output_to_device(&binding.logits_output, &host_output_memory()?)
             .map_err(map_ort_err)?;
-        let outputs = self
-            .real
-            .session
-            .run_binding(&binding.binding)
-            .map_err(map_ort_err)?;
+        let outputs = match shrink_arenas {
+            None => self
+                .real
+                .session
+                .run_binding(&binding.binding)
+                .map_err(map_ort_err)?,
+            Some(arenas) => {
+                let mut options = ort::session::RunOptions::new().map_err(map_ort_err)?;
+                options
+                    .add_config_entry("memory.enable_memory_arena_shrinkage", arenas)
+                    .map_err(map_ort_err)?;
+                self.real
+                    .session
+                    .run_binding_with_options(&binding.binding, &options)
+                    .map_err(map_ort_err)?
+            }
+        };
         let mut logits = None;
         for (name, value) in outputs {
             if name == binding.logits_output {
@@ -219,30 +363,18 @@ fn host_output_memory() -> Result<MemoryInfo> {
     .map_err(map_ort_err)
 }
 
-fn bind_layer<T>(
-    binding: &mut IoBinding,
-    allocator: &Allocator,
-    memory: &MemoryInfo,
-    pair: &SharedKvPair,
-    dims: Shape,
-) -> Result<()>
+fn cache_tensor<T>(allocator: &Allocator, dims: Shape, zeroed: bool) -> Result<DynValue>
 where
-    T: ort::value::PrimitiveTensorElementType + std::fmt::Debug + 'static,
+    T: ort::value::PrimitiveTensorElementType + std::fmt::Debug + Default + Clone + 'static,
 {
     let mut owner = Tensor::<T>::new(allocator, dims.clone()).map_err(map_ort_err)?;
-    let data = owner.data_ptr_mut();
-    // SAFETY: `data` is the device allocation of `owner`, which is moved into
-    // the binding as the present output right below and lives as long as the
-    // binding; the view is also held by the binding and released with it.
-    let view =
-        unsafe { TensorRefMut::<T>::from_raw(memory.clone(), data, dims) }.map_err(map_ort_err)?;
-    binding
-        .bind_input(pair.past_input.as_str(), &*view)
-        .map_err(map_ort_err)?;
-    binding
-        .bind_output(pair.present_output.as_str(), owner)
-        .map_err(map_ort_err)?;
-    Ok(())
+    if zeroed {
+        let len = dims.iter().product::<i64>() as usize;
+        let zeros =
+            Tensor::<T>::from_array((dims, vec![T::default(); len])).map_err(map_ort_err)?;
+        zeros.copy_into(&mut owner).map_err(map_ort_err)?;
+    }
+    Ok(owner.into_dyn())
 }
 
 fn shared_kv_element(

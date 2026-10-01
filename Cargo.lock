@@ -1453,6 +1453,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "local-adapter-unlimited-ocr"
+version = "0.1.0"
+dependencies = [
+ "half",
+ "image",
+ "local-backend-ort",
+ "local-core",
+ "local-error",
+ "local-files",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokenizers",
+ "tracing",
+]
+
+[[package]]
 name = "local-adapter-yolo"
 version = "0.1.0"
 dependencies = [
@@ -1671,6 +1689,7 @@ dependencies = [
  "local-adapter-mmarco-reranker",
  "local-adapter-qwen3-chat",
  "local-adapter-sensevoice-asr",
+ "local-adapter-unlimited-ocr",
  "local-adapter-yolo",
  "local-backend-ort",
  "local-core",

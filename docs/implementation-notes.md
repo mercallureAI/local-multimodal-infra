@@ -104,6 +104,24 @@ built or configured. The control-plane hardware snapshot still reports
 independent of actual ORT EP selection.
 
 
+## Document OCR (Unlimited-OCR)
+
+`unlimited-ocr-onnx` serves `ocr.recognize` (generic task flow with an `image` upload, legacy RPC `ocr_recognize`, standard MCP tool `ocr_recognize`) through `crates/adapters/ocr/unlimited-ocr`. The model is baidu/Unlimited-OCR: the DeepSeek-OCR DeepEncoder (SAM ViT-B + CLIP-L, linear projector) and a 12-layer DeepSeek-V2 MoE decoder (64 routed experts, top-6, 2 shared) whose attention is R-SWA.
+
+Package (`scripts/local/unlimited_ocr_export.py export`, traced from the PyTorch checkpoint with the upstream module code):
+
+- `unlimited_ocr_vision.onnx`: `pixel_values [N,3,1024,1024]` to the 273 image-token embeddings per page (16x16 projected features, an `image_newline` per row, a `view_seperator`). FP16 with normalization layers in FP32.
+- `unlimited_ocr_prefill.onnx` / `unlimited_ocr_decode.onnx`: one LLM step over the prompt (any length; image embeddings spliced in by `images_seq_mask`) and over one token (static shapes). Both reference the same weights in `unlimited_ocr_llm.data`; `manifest.json` lists them under `device_shared_initializers`, so the adapter uploads them once and hands them to both sessions.
+- Weights: linear layers FP16 (FP16 GEMMs, FP32 residual stream, RMSNorm, router and attention); routed experts int8 (symmetric per output channel, CUTLASS-prepacked by ONNX Runtime's `CudaQuantizer`) through `com.microsoft.QMoE` in both graphs. Only the CUDA `QMoE` kernel reads that layout, so the adapter refuses a CPU session for an int8 package; `--expert-precision fp16` exports FP16 experts instead (fused `MoE` in prefill, a gather of the six selected experts in decode, ~5.6 GB).
+
+KV cache and R-SWA: every layer reads `past_key_values.{l}.*` and writes `present.{l}.*` of one fixed `[1,10,prompt+128,128]` buffer, bound in place to both sessions (`OrtSession::share_kv_binding`). New K/V are scattered to the slots in `write_index` and attention spans the whole buffer plus `attention_bias`. Prefill writes the prompt causally; decode step `t` writes slot `prompt + t % 128` and sees the prompt plus the ring slots written so far, which is upstream's `SlidingWindowLlamaAttention` (the ring order does not matter: RoPE is applied before caching and decode has no mask). The KV size is constant however long the page is.
+
+Decoding follows upstream `infer`: base-mode preprocessing (`ImageOps.pad` to 1024 with the mean colour, EXIF orientation), the prompt `[BOS] + 273 image tokens + "document parsing."`, greedy decoding with the sliding-window no-repeat-ngram processor (35-grams over the last 128 tokens, no whitelist), stopping at EOS.
+
+Memory: the OCR backend grows CUDA arenas by the requested size, skips cuDNN's maximal workspace, and shrinks the vision and prefill arenas after each run; shared weights are uploaded largest first so the copy staging buffer is reused. On an RTX 4090 the process holds about 6.6 GB with a 7.9 GB transient peak during the vision encoder.
+
+Accuracy and speed (RTX 4090, ORT 1.30): against the upstream PyTorch model the package matches token for token except where two coordinate tokens are within the logit noise of the precisions involved. On the 14 pages of the Unlimited-OCR paper (300 dpi), recognized text is identical to the official HF transformers pipeline (bf16) on 12 pages and differs by one token on the other two; the run takes 95.7 s (6.8 s per page, 144.5 tokens/s decode) against 490.5 s (35 s per page) for the official pipeline on the same GPU. Batched multi-request decoding and the multi-page prompt are not implemented.
+
 ## Chat completion (Qwen3)
 
 `qwen3-4b-instruct-2507-int4-onnx` implements `chat.complete` with the `qwen3_chat` adapter on decoder graphs exported by the onnxruntime-genai model builder:
@@ -246,6 +264,7 @@ The controller depends on the store for metadata/status only. It still does not 
 
 - ASR: `andrewleech/qwen3-asr-0.6b-onnx` at revision `4fc24a1402e74db89c4d2ef256875e71680128c4`; enabled because it is ONNX/ORT. The int4 file subset is downloaded into `<model_dir>/qwen3-asr-0.6b-onnx`. The real CPU ORT encoder/decoder/tokenizer path is implemented; real INT4 execution still depends on ORT contrib `MatMulNBits` support and should be verified with the `LOCAL_QWEN_ASR_MODEL_DIR`-gated smoke test.
 - Object detection: `aaurelions/yolo11n.onnx` at revision `f46d9b72aa9a0f02bc00484446e2310b1a549bce`; enabled. The model file downloads to `<model_dir>/yolo11n.onnx/yolo11n.onnx`. COCO labels are a separate URL artifact from Ultralytics raw GitHub because the HF repository does not provide labels.
+- OCR: `unlimited-ocr-onnx`, a local artifact exported with `scripts/local/unlimited_ocr_export.py` from `baidu/Unlimited-OCR` at revision `07dea832e22aefee32ad281d4b80551282e1c168` (no published download yet); enabled, CUDA required for the int8 experts.
 - TTS/IndexTTS: `ModaLeap/indextts-1.5-onnx`; enabled. The explicit A-F ONNX, `bpe.model`, `manifest.yaml`, and `manifest.json` subset downloads to `<model_dir>/indextts-1.5-onnx`.
 
 Remote downloads use Hugging Face resolve URLs or direct URLs. `HF_TOKEN`/`HUGGINGFACE_HUB_TOKEN` is used for Hugging Face metadata and file requests when present. Explicit HF `files` remain supported; `allow_patterns` are expanded by reading HF model metadata siblings and matching simple `*`/`?` globs. SHA-256 is verified only when configured; otherwise status explicitly records that verification was skipped. No Candle/Python/C++/sidecar path is implemented.

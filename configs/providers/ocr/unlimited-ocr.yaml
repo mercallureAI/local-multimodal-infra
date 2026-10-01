@@ -1,0 +1,36 @@
+id: unlimited-ocr-onnx
+name: Unlimited-OCR ONNX (int8 experts)
+enabled: true
+task_kinds:
+  - ocr.recognize
+adapter: unlimited_ocr
+backend: ort
+artifacts:
+  # Local export (path omitted: <model_dir>/unlimited-ocr-onnx), not published
+  # for download yet:
+  #   hf download baidu/Unlimited-OCR --revision 07dea832e22aefee32ad281d4b80551282e1c168 --local-dir <src>
+  #   python -m scripts.local.unlimited_ocr_export export --source <src> --out <dir>
+  # The directory holds unlimited_ocr_{vision,prefill,decode}.onnx, their
+  # weights (unlimited_ocr_vision.onnx.data, unlimited_ocr_llm.data),
+  # tokenizer.json and manifest.json; the adapter checks them at load.
+  - type: local
+runtime:
+  # The int8 experts are packed for the CUDA kernels: the adapter refuses to
+  # run them on CPU rather than produce wrong text.
+  provider_order: [cuda, cpu]
+  max_concurrency: 1
+  idle_ttl_sec: 600
+resources:
+  min_ram_mb: 4096
+  min_vram_mb: 8192
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  runtime: onnxruntime
+  model_family: unlimited_ocr
+  task: document-ocr
+  precision: int8 routed experts, fp16 LLM and vision
+  # Greedy decode budget per page.
+  max_new_tokens: 8192

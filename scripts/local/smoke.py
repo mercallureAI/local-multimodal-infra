@@ -33,6 +33,27 @@ MCP_INFER_URL = "http://127.0.0.1:17892/mcp/infer"
 PORTS = (17890, 17891, 17892)
 ASSET_DIR = repo_root() / "scripts" / "assets"
 DEFAULT_YOLO_IMAGE = ASSET_DIR / "yolo-input.jpg"
+DEFAULT_OCR_IMAGE = ASSET_DIR / "ocr-input.png"
+OCR_MODEL_ID = "unlimited-ocr-onnx"
+# Text of scripts/assets/ocr-input.png that the OCR result must contain.
+OCR_EXPECTED_TEXT = ("Local Multimodal Infra", "OCR smoke test", "2026-0042", "1,280.50")
+# The first request loads ~4 GB of weights and the page decodes ~100 tokens.
+OCR_MIN_TIMEOUT = 180.0
+# Errors that mean OCR cannot run here rather than that it is broken.
+OCR_NEEDS_CUDA = "packed for CUDA"
+OCR_NO_WORKER = "no registered worker can serve the requested model"
+
+
+def ocr_skip_reason(text: str, *, external_build: bool) -> str | None:
+    """An int8 package on a worker without a usable CUDA device is a skip. A
+    missing OCR worker is a skip only for binaries this harness did not build
+    (an audio-only build, say): its own build has the `ocr` feature, so there
+    the error means the wiring is broken."""
+    if OCR_NEEDS_CUDA in text:
+        return "no usable CUDA device on the worker (the int8 package needs a --features cuda build and an NVIDIA GPU)"
+    if external_build and OCR_NO_WORKER in text:
+        return "the worker binaries were built without the ocr feature"
+    return None
 DEFAULT_SENSEVOICE_ASR_AUDIO = ASSET_DIR / "tts-input-mon3tr.wav"
 TEST_ALIASES = {
     "all",
@@ -40,6 +61,7 @@ TEST_ALIASES = {
     "mcp",
     "assets",
     "yolo",
+    "ocr",
     "sensevoice-asr",
     "indextts",
     "indextts_asr",
@@ -51,7 +73,7 @@ TEST_ALIASES = {
     "text",
     "mcp_standard",
 }
-RPC_TESTS = {"assets", "yolo", "sensevoice-asr", "indextts", "indextts_asr", "indextts2", "indextts2_asr", "embedding", "rerank", "chat"}
+RPC_TESTS = {"assets", "yolo", "ocr", "sensevoice-asr", "indextts", "indextts_asr", "indextts2", "indextts2_asr", "embedding", "rerank", "chat"}
 MCP_TESTS = {"mcp_standard"}
 INDEXTTS_MODEL_ID = "indextts-1.5-onnx"
 INDEXTTS2_MODEL_ID = "indextts-2.5-onnx"
@@ -81,6 +103,9 @@ def main(argv: list[str] | None = None) -> int:
     workdir = resolve_cli_path(args.workdir, root)
     model_dir = resolve_cli_path(args.model_dir, root) if args.model_dir else (workdir / "models").resolve()
     yolo_image = resolve_cli_path(args.yolo_image, root) if args.yolo_image else DEFAULT_YOLO_IMAGE
+    ocr_image = resolve_cli_path(args.ocr_image, root) if args.ocr_image else DEFAULT_OCR_IMAGE
+    # Like chat, OCR has no published download: cover it only where it was exported.
+    ocr_ready = (model_dir / OCR_MODEL_ID / "manifest.json").exists()
     sensevoice_asr_audio = resolve_cli_path(args.sensevoice_asr_audio, root) if args.sensevoice_asr_audio else DEFAULT_SENSEVOICE_ASR_AUDIO
     indextts_reference = resolve_cli_path(args.indextts_reference, root) if args.indextts_reference else sensevoice_asr_audio
     data_dir = workdir / "data"
@@ -115,8 +140,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[smoke] workdir={workdir}")
         print(f"[smoke] model_dir={model_dir}")
         print(f"[smoke] data_dir={data_dir}")
-        print("[smoke] default assets=scripts/assets/yolo-input.jpg, tts-input-mon3tr.wav")
+        print("[smoke] default assets=scripts/assets/yolo-input.jpg, ocr-input.png, tts-input-mon3tr.wav")
         print(f"[smoke] yolo_image={yolo_image}")
+        print(f"[smoke] ocr_image={ocr_image}")
         print(f"[smoke] sensevoice_asr_audio={sensevoice_asr_audio}")
         print(f"[smoke] indextts_reference={indextts_reference}")
         print(f"[smoke] requested_tests={','.join(sorted(requested_tests)) or '<none>'}")
@@ -201,10 +227,12 @@ def main(argv: list[str] | None = None) -> int:
                     timestamp,
                     args.request_timeout,
                     None if args.skip_yolo else yolo_image,
+                    ocr_image if ocr_ready and not args.skip_ocr else None,
                     None if args.skip_sensevoice_asr else sensevoice_asr_audio,
                     None if args.skip_indextts else indextts_reference,
                     args.indextts_text,
                     {"ready": False, "reason": "--skip-indextts"} if args.skip_indextts else indextts_artifacts,
+                    external_build=not args.build,
                 )
             except SmokeError as exc:
                 failures.append(f"mcp_standard: {exc}")
@@ -214,6 +242,19 @@ def main(argv: list[str] | None = None) -> int:
                 run_yolo(yolo_image, data_dir, timestamp, args.request_timeout)
             except SmokeError as exc:
                 failures.append(f"yolo: {exc}")
+
+        if "ocr" in requested_tests:
+            try:
+                run_ocr(
+                    model_dir,
+                    ocr_image,
+                    data_dir,
+                    timestamp,
+                    max(args.request_timeout, OCR_MIN_TIMEOUT),
+                    external_build=not args.build,
+                )
+            except SmokeError as exc:
+                failures.append(f"ocr: {exc}")
 
         if "sensevoice-asr" in requested_tests:
             try:
@@ -330,14 +371,21 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--tests",
         default="assets,yolo,sensevoice-asr,indextts",
         help=(
-            "Comma-separated smoke tests or groups: rpc,mcp,all,assets,yolo,sensevoice-asr,indextts,"
+            "Comma-separated smoke tests or groups: rpc,mcp,all,assets,yolo,ocr,sensevoice-asr,indextts,"
             "indextts_asr,embedding,rerank,text,chat,mcp_standard. "
             "rpc expands to legacy JSON-RPC coverage on /rpc/admin and /rpc/infer. "
             "mcp expands to standard MCP SDK coverage on /mcp/admin and /mcp/infer. "
-            "all runs both groups. OCR smoke aliases were removed after withdrawal."
+            "all runs both groups. ocr runs Unlimited-OCR (needs <model_dir>/unlimited-ocr-onnx and CUDA)."
         ),
     )
     parser.add_argument("--skip-yolo", action="store_true")
+    parser.add_argument("--skip-ocr", action="store_true", help="Skip Unlimited-OCR smoke coverage.")
+    parser.add_argument(
+        "--ocr-image",
+        type=Path,
+        default=None,
+        help="Document image for OCR smoke. Default: scripts/assets/ocr-input.png (its text is checked).",
+    )
     parser.add_argument(
         "--skip-sensevoice-asr",
         dest="skip_sensevoice_asr",
@@ -404,6 +452,8 @@ def selected_tests(args: argparse.Namespace) -> set[str]:
     tests.difference_update({"all", "rpc", "mcp", "text"})
     if args.skip_yolo:
         tests.discard("yolo")
+    if args.skip_ocr:
+        tests.discard("ocr")
     if args.skip_sensevoice_asr:
         tests.discard("sensevoice-asr")
     if args.skip_indextts:
@@ -574,10 +624,13 @@ def run_mcp_standard(
     timestamp: str,
     timeout: float,
     sample_image: Path | None,
+    ocr_image: Path | None,
     sample_audio: Path | None,
     reference_audio: Path | None,
     text: str,
     indextts_artifacts: dict,
+    *,
+    external_build: bool = False,
 ) -> None:
     print("[smoke] validating standard admin and inference MCP endpoints")
     output_path = data_dir / f"smoke-mcp-standard-{timestamp}.json"
@@ -599,8 +652,16 @@ def run_mcp_standard(
         "--timeout",
         str(int(timeout)),
     ]
+    subprocess_timeout = timeout
     if sample_image is not None:
         cmd.extend(["--sample-image", str(sample_image)])
+    if ocr_image is not None:
+        cmd.extend(["--ocr-image", str(ocr_image)])
+        if external_build:
+            cmd.append("--ocr-worker-optional")
+        # The first OCR request loads the model inside the task wait.
+        subprocess_timeout = max(timeout, OCR_MIN_TIMEOUT)
+        cmd[cmd.index("--timeout") + 1] = str(int(subprocess_timeout))
     if sample_audio is not None:
         cmd.extend(["--sample-audio", str(sample_audio)])
     if reference_audio is not None:
@@ -613,7 +674,7 @@ def run_mcp_standard(
             cwd=str(repo_root()),
             text=True,
             capture_output=True,
-            timeout=max(10.0, timeout + 15.0),
+            timeout=max(10.0, subprocess_timeout + 15.0),
         )
     except subprocess.TimeoutExpired as exc:
         raise SmokeError(f"standard MCP client timed out after {exc.timeout}s") from exc
@@ -947,6 +1008,69 @@ def run_yolo(image: Path, data_dir: Path, timestamp: str, timeout: float) -> Non
         },
     )
     print(f"[smoke] yolo car_count={car_count} object_count={object_count} saved {out}")
+
+
+def run_ocr(model_dir: Path, image: Path, data_dir: Path, timestamp: str, timeout: float, *, external_build: bool) -> None:
+    """Generic task flow (create_task, signed upload, start) plus the direct
+    legacy RPC method, both through the controller."""
+    out = data_dir / f"smoke-ocr-{timestamp}.json"
+    if not (model_dir / OCR_MODEL_ID / "manifest.json").exists():
+        save_json(out, {"status": "skipped", "reason": f"no local export under {model_dir / OCR_MODEL_ID}"})
+        print(f"[smoke] ocr skipped: no local {OCR_MODEL_ID} export; details saved {out}")
+        return
+    if not image.exists():
+        raise SmokeError(f"OCR image does not exist: {image}")
+    content_type = image_mime(image)
+    create = rpc_create_task(
+        {
+            "task_kind": "ocr.recognize",
+            "model": OCR_MODEL_ID,
+            "files": [{"name": image.name, "mime": content_type, "role": "image", "required": True}],
+            "params": {},
+        },
+        f"smoke-ocr-create-{timestamp}",
+        timeout,
+    )
+    upload = first_upload(create, "image")
+    try:
+        payload = upload_file(upload["upload_url"] + "&with_start_task=true", image, content_type, timeout)
+        if payload.get("uri", "").startswith("assets://"):
+            payload = rpc_start_task(create["task_id"], f"smoke-ocr-start-{timestamp}", timeout)
+    except SmokeError as exc:
+        if ocr_skip_reason(str(exc), external_build=external_build) is None:
+            raise
+        payload = {"state": "failed", "error": str(exc)}
+    if payload.get("state") != "succeeded":
+        reason = ocr_skip_reason(json.dumps(payload), external_build=external_build)
+        if reason is not None:
+            save_json(out, {"status": "skipped", "reason": reason, "task": payload})
+            print(f"[smoke] ocr skipped: {reason}; details saved {out}")
+            return
+        raise SmokeError(f"OCR generic task did not succeed: {payload}")
+    generic_text = validate_ocr_output(payload.get("output"), "OCR generic task")
+
+    status, direct = rpc_infer(
+        "ocr_recognize",
+        {"model": OCR_MODEL_ID, "image": {"path": str(image), "mime": content_type}},
+        f"smoke-ocr-direct-{timestamp}",
+        timeout,
+    )
+    assert_rpc_success(status, direct, "legacy RPC ocr_recognize")
+    direct_text = validate_ocr_output(direct.get("result"), "legacy RPC ocr_recognize")
+    save_json(out, {"input_image": str(image), "task": payload, "direct": direct})
+    print(f"[smoke] ocr generic={len(generic_text)} chars direct={len(direct_text)} chars saved {out}")
+
+
+def validate_ocr_output(output: object, label: str) -> str:
+    if not isinstance(output, dict) or output.get("type") != "ocr_text":
+        raise SmokeError(f"{label} output type mismatch: {output}")
+    text = output.get("text")
+    if not isinstance(text, str):
+        raise SmokeError(f"{label} output has no text: {output}")
+    missing = [expected for expected in OCR_EXPECTED_TEXT if expected not in text]
+    if missing:
+        raise SmokeError(f"{label} text misses {missing!r}: {text!r}")
+    return text
 
 
 def run_sensevoice_asr(audio: Path, data_dir: Path, timestamp: str, timeout: float) -> None:

@@ -461,6 +461,9 @@ mod tests {
                     total_tokens: 5,
                 },
                 TaskKind::ChatComplete => chat_output(),
+                TaskKind::OcrRecognize => InferenceOutput::OcrText {
+                    text: "ok".to_string(),
+                },
                 TaskKind::VoiceRealtime => InferenceOutput::Accepted {
                     job_id: "unsupported-test".to_string(),
                 },

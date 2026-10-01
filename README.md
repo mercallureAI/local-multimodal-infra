@@ -30,6 +30,7 @@
 | 能力 | 默认模型 | 状态 | 主要输出 |
 | --- | --- | --- | --- |
 | 图片目标检测 | `yolo11n.onnx` | 默认启用 | 目标类别、置信度、边界框 |
+| 文档 OCR | `unlimited-ocr-onnx` | 本地导出后启用（int8 专家，需 NVIDIA GPU） | 页面文本（Markdown/HTML 表格），带版面类别与坐标 |
 | 语音识别 | `sensevoice-small-onnx` | 默认启用 | 文本、时间轴、语言、情绪、发言人 |
 | 语音合成 | `indextts-1.5-onnx` | 默认启用 | WAV 音频 |
 | 语音合成 | `indextts-2.5-onnx` | 默认启用（FP16，建议 NVIDIA GPU） | WAV 音频，支持情绪控制 |
@@ -39,6 +40,8 @@
 | 实时语音 | `voice-cascade` | 默认启用，依赖 ASR、对话与 TTS 模型 | `/v1/realtime` WebSocket 语音对话（Silero VAD + SenseVoice + Qwen3 + IndexTTS，见 `docs/realtime-voice.md`） |
 
 所有模型均通过 ONNX Runtime 运行（运行时加载官方 ONNX Runtime 1.30，见 `docs/implementation-notes.md`）。模型配置表达 CUDA 优先、CPU 回退；实际 provider 仍取决于构建方式、运行环境和具体模型算子支持情况。
+
+文档 OCR 使用 [baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-OCR)（DeepEncoder + DeepSeek-V2 MoE，R-SWA 注意力），每次请求识别一页图片（base 模式，缩放填充到 1024×1024）。结果为整页文本，每个版面块前带 `<|det|>类别 [x1, y1, x2, y2]<|/det|>` 标签，坐标按 0–999 归一化，表格为 HTML。可通过 MCP / legacy RPC 的 `ocr_recognize`（传 `image` FileRef 或 `image_path`）或通用任务 `ocr.recognize`（上传 `image`）调用。
 
 SenseVoice ASR 集成 FSMN-VAD 和 CAM++ 发言人识别，默认返回纯文本、约 10 秒粒度的 `timestamped_text`、`segments[].speaker` 和 `speakers[]`。可通过 `timestamps`、`timestamp_granularity_sec`、`token_timestamps`、`speaker_diarization` 调整或关闭这些结果。
 
@@ -149,6 +152,15 @@ curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
 
 `qwen3-4b-instruct-2507-int4-onnx` 没有发布的 ONNX 包，需按 [`configs/providers/chat/qwen3-chat.yaml`](configs/providers/chat/qwen3-chat.yaml) 中的命令从固定 revision 本地导出到 `workdir/models/qwen3-4b-instruct-2507-int4-onnx`。
 
+`unlimited-ocr-onnx` 同样没有发布的包，需从 PyTorch 检查点本地导出：
+
+```bash
+hf download baidu/Unlimited-OCR --revision 07dea832e22aefee32ad281d4b80551282e1c168 --local-dir <src>
+python -m scripts.local.unlimited_ocr_export export --source <src> --out workdir/models/unlimited-ocr-onnx
+```
+
+导出环境为 Python 3.11，版本与上游一致：`torch==2.10.0`（CPU 版即可）、`torchvision==0.25.0`、`transformers==4.57.1`，另需 `onnx onnxruntime-gpu==1.30.0 einops addict easydict safetensors pillow matplotlib`；`parity` 子命令可与 PyTorch 模型逐 token 对比。默认导出的 int8 专家只能在 CUDA 上运行（worker 需以 `--features cuda` 构建）。在 RTX 4090 上单页约 145 tokens/s，显存约 6.6 GB；论文 14 页 PDF 平均 6.8 秒/页，同卡上官方 transformers 实现为 35 秒/页。
+
 ### 5. Agent 如何使用
 
 推荐只向 Agent 配置推理 MCP：
@@ -174,7 +186,7 @@ curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
 
 如果 `LOCAL_MCP_INFER_TOKENS` 为空，可以删除 `headers`。需要管理工具时，另建一个 MCP Server 配置，将 URL 改为 `/mcp/admin`，并使用 `LOCAL_ADMIN_TOKEN`，不要与推理 token 混用。
 
-接入后，Agent 可以直接调用 `object_detect`、`asr_transcribe`、`tts_synthesize`、`text_embed` 和 `text_rerank`。对于 Agent 无法直接访问的图片或音频，使用 `create_task` → 上传到返回的签名 URL → `start_task` → `wait_task`，不需要与 worker 共享宿主机文件路径。
+接入后，Agent 可以直接调用 `object_detect`、`ocr_recognize`、`asr_transcribe`、`tts_synthesize`、`text_embed` 和 `text_rerank`。对于 Agent 无法直接访问的图片或音频，使用 `create_task` → 上传到返回的签名 URL → `start_task` → `wait_task`，不需要与 worker 共享宿主机文件路径。
 
 所有会返回推理结果的 MCP tools 都接受 `with_url_result`：
 
@@ -200,6 +212,8 @@ python -m scripts.local.smoke --tests mcp \
 
 `mcp` 测试需要当前 Python 环境安装官方 `mcp` SDK。release 验证可先运行 `cargo build --release --bins`，再为 smoke harness 增加 `--skip-build --release`。
 
+`rpc` 与 `mcp` 都包含 OCR（`--tests ocr` 可单独运行）：没有本地导出的 `unlimited-ocr-onnx` 或 worker 没有可用 CUDA 时会标记为跳过。要实际覆盖 OCR，先用 `cargo build --release --bins -p local-cli --features cuda` 构建，再运行 `python -m scripts.local.smoke --skip-build --release --tests ocr --workdir ./workdir --model-dir ./workdir/models --request-timeout 300`。
+
 ## 参考资料
 
 ### 模型仓库
@@ -217,6 +231,7 @@ python -m scripts.local.smoke --tests mcp \
 | IndexTTS 中文前端（WeText + g2pW） | [ModaLeap/zh-tts-frontend](https://huggingface.co/ModaLeap/zh-tts-frontend) | `ba6b85aeb17ebc58d2d3d73121096f9495ee710e` |
 | multilingual-e5-small | [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) | `614241f622f53c4eeff9890bdc4f31cfecc418b3` |
 | mMARCO MiniLM reranker | [cross-encoder/mmarco-mMiniLMv2-L12-H384-v1](https://huggingface.co/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1) | `1427fd652930e4ba29e8149678df786c240d8825` |
+| Unlimited-OCR（本地导出 ONNX 的源模型） | [baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-OCR) | `07dea832e22aefee32ad281d4b80551282e1c168` |
 | Qwen3-4B-Instruct-2507（本地导出 INT4 的源模型） | [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) | `cdbee75f17c01a7cc42f958dc650907174af0554` |
 | Silero VAD v6.2.3 | [snakers4/silero-vad](https://github.com/snakers4/silero-vad) | `5cd7945676eb32225748052e2e6a0580e4686a08` |
 
@@ -227,6 +242,7 @@ python -m scripts.local.smoke --tests mcp \
 - [modelscope/FunASR](https://github.com/modelscope/FunASR)：SenseVoice ONNX 前处理、推理与 FSMN-VAD 管线参考；
 - [FunAudioLLM/SenseVoice](https://github.com/FunAudioLLM/SenseVoice)：SenseVoice 模型与官方实现；
 - [ultralytics/ultralytics](https://github.com/ultralytics/ultralytics)：YOLO 预处理、输出解码与 COCO 标签来源；
+- [baidu/Unlimited-OCR](https://github.com/baidu/Unlimited-OCR)：Unlimited-OCR 模型与官方实现（预处理、提示词、R-SWA 与防重复采样）；
 - [index-tts/index-tts](https://github.com/index-tts/index-tts)：IndexTTS 官方实现；
 - [DakeQQ/Text-to-Speech-TTS-ONNX](https://github.com/DakeQQ/Text-to-Speech-TTS-ONNX)：IndexTTS ONNX 导出与推理参考；
 - [snakers4/silero-vad](https://github.com/snakers4/silero-vad)：实时语音的 Silero VAD 模型；

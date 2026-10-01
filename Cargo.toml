@@ -71,4 +71,5 @@ local-adapter-qwen3-chat = { path = "crates/adapters/chat/qwen3" }
 local-adapter-e5-embedding = { path = "crates/adapters/embedding/e5" }
 local-adapter-mmarco-reranker = { path = "crates/adapters/rerank/mmarco" }
 local-adapter-yolo = { path = "crates/adapters/detect/yolo" }
+local-adapter-unlimited-ocr = { path = "crates/adapters/ocr/unlimited-ocr" }
 local-adapter-silero-vad = { path = "crates/adapters/vad/silero" }

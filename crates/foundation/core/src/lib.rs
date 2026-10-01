@@ -20,13 +20,14 @@ pub enum AdapterKind {
     E5Embedding,
     MmarcoReranker,
     Qwen3Chat,
+    UnlimitedOcr,
     /// Pseudo-realtime voice (VAD, ASR, chat and TTS models of the worker),
     /// served over `/v1/realtime` only.
     VoiceCascade,
 }
 
 impl AdapterKind {
-    pub const ALL: [AdapterKind; 8] = [
+    pub const ALL: [AdapterKind; 9] = [
         AdapterKind::Yolo,
         AdapterKind::SenseVoiceAsr,
         AdapterKind::IndexTts,
@@ -34,6 +35,7 @@ impl AdapterKind {
         AdapterKind::E5Embedding,
         AdapterKind::MmarcoReranker,
         AdapterKind::Qwen3Chat,
+        AdapterKind::UnlimitedOcr,
         AdapterKind::VoiceCascade,
     ];
 
@@ -46,6 +48,7 @@ impl AdapterKind {
             AdapterKind::E5Embedding => ModelCategory::Embedding,
             AdapterKind::MmarcoReranker => ModelCategory::Rerank,
             AdapterKind::Qwen3Chat => ModelCategory::Chat,
+            AdapterKind::UnlimitedOcr => ModelCategory::Ocr,
             AdapterKind::VoiceCascade => ModelCategory::Realtime,
         }
     }
@@ -62,18 +65,20 @@ pub enum ModelCategory {
     Embedding,
     Rerank,
     Detect,
+    Ocr,
     /// Realtime voice pipelines (their VAD included).
     Realtime,
 }
 
 impl ModelCategory {
-    pub const ALL: [ModelCategory; 7] = [
+    pub const ALL: [ModelCategory; 8] = [
         ModelCategory::Asr,
         ModelCategory::Tts,
         ModelCategory::Chat,
         ModelCategory::Embedding,
         ModelCategory::Rerank,
         ModelCategory::Detect,
+        ModelCategory::Ocr,
         ModelCategory::Realtime,
     ];
 
@@ -86,6 +91,7 @@ impl ModelCategory {
             ModelCategory::Embedding => "embedding",
             ModelCategory::Rerank => "rerank",
             ModelCategory::Detect => "detect",
+            ModelCategory::Ocr => "ocr",
             ModelCategory::Realtime => "realtime",
         }
     }
@@ -111,6 +117,8 @@ pub enum TaskKind {
     TextRerank,
     #[serde(rename = "chat.complete")]
     ChatComplete,
+    #[serde(rename = "ocr.recognize")]
+    OcrRecognize,
     #[serde(rename = "voice.realtime")]
     VoiceRealtime,
 }
@@ -620,6 +628,9 @@ pub enum InferenceInput {
         #[serde(default)]
         options: ChatOptions,
     },
+    OcrRecognize {
+        image: FileRef,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -660,6 +671,9 @@ pub enum InferenceOutput {
         usage: ChatUsage,
         #[serde(default)]
         timings: ChatTimings,
+    },
+    OcrText {
+        text: String,
     },
     Accepted {
         job_id: String,

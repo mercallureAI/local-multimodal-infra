@@ -222,6 +222,14 @@ fn task_from_method(method: &str, params: &Value) -> Result<InferenceTask> {
                 InferenceInput::ObjectDetect { image },
             ))
         }
+        "ocr_recognize" => {
+            let image = file_ref(params.get("image").unwrap_or(params))?;
+            Ok(InferenceTask::new(
+                TaskKind::OcrRecognize,
+                model_id,
+                InferenceInput::OcrRecognize { image },
+            ))
+        }
         "tts_synthesize" => {
             let text = params
                 .get("text")
@@ -395,6 +403,9 @@ mod tests {
                     results: Vec::new(),
                     total_tokens: 1,
                 },
+                TaskKind::OcrRecognize => InferenceOutput::OcrText {
+                    text: "ok".to_string(),
+                },
                 TaskKind::ChatComplete | TaskKind::VoiceRealtime => InferenceOutput::Accepted {
                     job_id: "unsupported-test".to_string(),
                 },
@@ -485,6 +496,51 @@ mod tests {
                     Some(std::path::Path::new("./image.jpg"))
                 );
                 assert_eq!(image.mime.as_deref(), Some("image/jpeg"));
+            }
+            other => panic!("unexpected input: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ocr_recognize_rpc_route_dispatches_controller_task() {
+        let service = Arc::new(RecordingApi::default());
+        let app = router(InferenceApiState {
+            service: service.clone(),
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/rpc/infer")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"ocr_recognize","params":{"model":"unlimited-ocr-onnx","image":{"path":"./page.png","mime":"image/png"}}}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: Value = serde_json::from_slice(&body).expect("json response");
+        assert!(payload.get("error").is_none(), "{payload:?}");
+        assert_eq!(payload["result"]["type"], "ocr_text");
+
+        let tasks = service.tasks.lock().expect("tasks lock");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].kind, TaskKind::OcrRecognize);
+        assert_eq!(tasks[0].model_id.as_deref(), Some("unlimited-ocr-onnx"));
+        match &tasks[0].input {
+            InferenceInput::OcrRecognize { image } => {
+                assert_eq!(
+                    image.path.as_deref(),
+                    Some(std::path::Path::new("./page.png"))
+                );
+                assert_eq!(image.mime.as_deref(), Some("image/png"));
             }
             other => panic!("unexpected input: {other:?}"),
         }

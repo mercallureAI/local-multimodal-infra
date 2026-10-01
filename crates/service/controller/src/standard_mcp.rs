@@ -231,8 +231,8 @@ impl StandardMcpServer {
                     InferenceApi::sign_assets(&self.state, request).await?
                 ))
             }
-            "asr_transcribe" | "object_detect" | "tts_synthesize" | "text_embed"
-            | "text_rerank" => {
+            "asr_transcribe" | "object_detect" | "ocr_recognize" | "tts_synthesize"
+            | "text_embed" | "text_rerank" => {
                 let task = task_from_method(name, &arguments)?;
                 Ok(json!(InferenceApi::dispatch(&self.state, task).await?))
             }
@@ -335,6 +335,7 @@ fn is_inference_result_tool(name: &str) -> bool {
             | "run_task"
             | "asr_transcribe"
             | "object_detect"
+            | "ocr_recognize"
             | "tts_synthesize"
             | "text_embed"
             | "text_rerank"
@@ -385,6 +386,7 @@ impl McpAccess {
                     | "sign_asset_urls"
                     | "asr_transcribe"
                     | "object_detect"
+                    | "ocr_recognize"
                     | "tts_synthesize"
                     | "text_embed"
                     | "text_rerank"
@@ -441,6 +443,14 @@ fn task_from_method(method: &str, params: &Value) -> Result<InferenceTask> {
                 local_core::TaskKind::ObjectDetect,
                 model_id,
                 InferenceInput::ObjectDetect { image },
+            ))
+        }
+        "ocr_recognize" => {
+            let image = direct_file_ref(params, "image", "image_path", "ocr_recognize")?;
+            Ok(InferenceTask::new(
+                local_core::TaskKind::OcrRecognize,
+                model_id,
+                InferenceInput::OcrRecognize { image },
             ))
         }
         "tts_synthesize" => {
@@ -682,6 +692,17 @@ fn tool_definitions(access: McpAccess) -> Vec<Tool> {
         tool(
             "object_detect",
             "Run direct object detection using model/model_id and an image FileRef.",
+            object_schema(&[
+                ("model", string_schema()),
+                ("model_id", string_schema()),
+                ("image", file_ref_schema()),
+                ("image_path", string_schema()),
+                ("with_url_result", with_url_result_schema()),
+            ]),
+        ),
+        tool(
+            "ocr_recognize",
+            "Run document OCR on one page image (FileRef or image_path); returns the page text with layout tags.",
             object_schema(&[
                 ("model", string_schema()),
                 ("model_id", string_schema()),
@@ -1062,6 +1083,37 @@ mod tests {
             rerank.input,
             InferenceInput::TextRerank { top_n: Some(1), .. }
         ));
+    }
+
+    #[test]
+    fn ocr_tool_builds_an_ocr_task_from_an_image_path() {
+        let tool = tool_definitions(McpAccess::Infer)
+            .into_iter()
+            .find(|tool| tool.name.as_ref() == "ocr_recognize")
+            .expect("OCR tool");
+        let schema = serde_json::to_value(tool).expect("serialize tool");
+        for name in ["image", "image_path", "model", "with_url_result"] {
+            assert!(
+                schema["inputSchema"]["properties"].get(name).is_some(),
+                "missing {name}: {schema}"
+            );
+        }
+        let task = task_from_method(
+            "ocr_recognize",
+            &json!({"model": "unlimited-ocr-onnx", "image_path": "./page.png"}),
+        )
+        .expect("OCR task");
+        assert_eq!(task.kind, TaskKind::OcrRecognize);
+        assert_eq!(task.model_id.as_deref(), Some("unlimited-ocr-onnx"));
+        match task.input {
+            InferenceInput::OcrRecognize { image } => {
+                assert_eq!(
+                    image.path.as_deref(),
+                    Some(std::path::Path::new("./page.png"))
+                );
+            }
+            other => panic!("unexpected input: {other:?}"),
+        }
     }
 
     #[test]

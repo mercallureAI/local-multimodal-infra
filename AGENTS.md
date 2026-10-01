@@ -15,7 +15,7 @@ Repo-specific instructions for future OpenCode agents. Higher-priority user inst
 
 ## Config, routes, and storage
 
-- Default configs: `configs/controller.yaml`, `configs/worker.yaml`; model specs: `configs/providers/<category>/*.yaml` (`asr tts chat embedding rerank detect realtime`; a spec must sit under its adapter's category). Each category is also a cargo feature of the `cli` bins (all on by default); an audio-only worker is `cargo build --bins --no-default-features --features audio`.
+- Default configs: `configs/controller.yaml`, `configs/worker.yaml`; model specs: `configs/providers/<category>/*.yaml` (`asr tts chat embedding rerank detect ocr realtime`; a spec must sit under its adapter's category). Each category is also a cargo feature of the `cli` bins (all on by default); an audio-only worker is `cargo build --bins --no-default-features --features audio`.
 - Default addresses: controller HTTP API and legacy JSON-RPC `127.0.0.1:17890`, worker `127.0.0.1:17891`, standard MCP admin `127.0.0.1:17892/mcp/admin`, standard MCP inference `127.0.0.1:17892/mcp/infer`.
 - Admin MCP/RPC requires `LOCAL_ADMIN_TOKEN`; MCP, RPC, and OpenAI-compatible inference routes share the optional comma-separated `LOCAL_MCP_INFER_TOKENS` list. Keep the host publish loopback-only by default.
 - Start services with explicit storage args: `--workdir ./workdir --model-dir ./workdir/models`.
@@ -37,6 +37,7 @@ Repo-specific instructions for future OpenCode agents. Higher-priority user inst
   - `python -m scripts.local.smoke --tests all --workdir ./workdir --model-dir ./workdir/models` (both groups; skip flags still apply)
   - `python -m scripts.local.smoke --tests assets,yolo,sensevoice-asr,indextts --workdir ./workdir --model-dir ./workdir/models`
   - `python -m scripts.local.smoke --tests indextts_asr --indextts-frontend auto --workdir ./workdir --model-dir ./workdir/models`
+  - `python -m scripts.local.smoke --skip-build --release --tests ocr --workdir ./workdir --model-dir ./workdir/models --request-timeout 300` (Unlimited-OCR: generic task flow plus direct `ocr_recognize` on `scripts/assets/ocr-input.png`; build first with `cargo build --release --bins -p local-cli --features cuda`, the int8 package runs only on CUDA)
   - `python scripts/smoke_api_mcp.py --tests yolo,sensevoice-asr --workdir ./workdir --model-dir ./workdir/models`
   - `python -m scripts.local.smoke --tests mcp_standard --workdir ./workdir --model-dir ./workdir/models`
 - Use `--skip-build` only when existing `target/debug/controller(.exe)` and `target/debug/worker(.exe)` are valid.
@@ -56,11 +57,13 @@ Repo-specific instructions for future OpenCode agents. Higher-priority user inst
 
 - ONNX Runtime 1.30 is loaded at run time (ort `load-dynamic`): run `python -m scripts.local.fetch_onnxruntime` (add `--pypi-mirror https://pypi.tuna.tsinghua.edu.cn` if PyPI is unreachable) to put the pinned libraries beside `target/{release,debug}` binaries; tests that create ORT sessions also need `ORT_DYLIB_PATH=<that onnxruntime.dll/.so>` because test binaries run from `target/<profile>/deps`. On Windows never let it fall back to `System32\onnxruntime.dll`.
 - Cheap/default Rust checks: `cargo check --workspace --all-targets`, `cargo build --bins`, `cargo test --workspace`.
+- Opt-in real Unlimited-OCR tests (CUDA): `LOCAL_UNLIMITED_OCR_MODEL_DIR=workdir/models/unlimited-ocr-onnx cargo test --release -p local-adapter-unlimited-ocr --features cuda real_model_smoke_if_env_set -- --nocapture`; add `LOCAL_UNLIMITED_OCR_PAGES_DIR=<dir of page images>` and run `pages_dir_if_env_set` for a warm multi-page timing run.
 - Opt-in real FunASR pipeline test: `LOCAL_SENSEVOICE_ASR_MODEL_DIR=workdir/models/sensevoice-small-onnx cargo test -p local-adapter-sensevoice-asr real_model_smoke_if_env_set -- --nocapture` (add `--features cuda` to require the CUDA provider; do not use PowerShell if the user forbids it).
 
 ## Script entrypoints
 
-- Help: `python -m scripts.local.fetch_onnxruntime --help`, `python -m scripts.local.smoke --help`, `python -m scripts.local.indextts_export --help`, `python scripts/indextts_export.py --help`.
+- Help: `python -m scripts.local.fetch_onnxruntime --help`, `python -m scripts.local.smoke --help`, `python -m scripts.local.indextts_export --help`, `python scripts/indextts_export.py --help`, `python -m scripts.local.unlimited_ocr_export --help`.
+- Unlimited-OCR package: `python -m scripts.local.unlimited_ocr_export export --source <baidu/Unlimited-OCR checkout> --out workdir/models/unlimited-ocr-onnx` (from the PyTorch checkpoint; Python 3.11 with the upstream pins `torch==2.10.0`, `torchvision==0.25.0`, `transformers==4.57.1`, plus `onnx onnxruntime-gpu==1.30.0 einops addict easydict safetensors pillow matplotlib`). `parity` compares a package with the PyTorch model token by token.
 - Standard MCP validation client: `python -m scripts.local.mcp_standard_client --admin-token <token> --full` (requires the official Python `mcp` SDK in that interpreter).
 - IndexTTS export top-level entrypoint `scripts/indextts_export.py` delegates to `scripts.local.indextts_export`; do not use old `tools/indextts` paths.
 

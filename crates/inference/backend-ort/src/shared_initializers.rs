@@ -72,16 +72,27 @@ impl OrtBackend {
         ranges: &[InitializerRange],
     ) -> Result<SharedInitializers> {
         let cuda_device = self.preferred_cuda_device();
-        let mut file = File::open(data_file)
-            .map_err(|e| InfraError::io(Some(data_file.to_path_buf()), e))?;
+        let mut file =
+            File::open(data_file).map_err(|e| InfraError::io(Some(data_file.to_path_buf()), e))?;
         let mut values = Vec::with_capacity(ranges.len());
         let mut owners = Vec::new();
         let mut bytes = 0u64;
         let mut buffer = Vec::new();
-        for range in ranges {
+        // Each copy stages the host tensor in a temporary device buffer of the
+        // copy session's arena, which keeps the memory. Largest first, every
+        // later staging buffer fits in the first one, so the arena retains one
+        // tensor's worth instead of a growing set of buffers.
+        let mut order = (0..ranges.len()).collect::<Vec<_>>();
+        order.sort_by_key(|&i| std::cmp::Reverse(ranges[i].length));
+        let mut uploaded = Vec::with_capacity(ranges.len());
+        for range in order.into_iter().map(|i| (i, &ranges[i])) {
+            let (index, range) = range;
             let expected = element_size(range.element)
                 .and_then(|size| {
-                    range.shape.iter().try_fold(size, |acc, dim| acc.checked_mul(*dim))
+                    range
+                        .shape
+                        .iter()
+                        .try_fold(size, |acc, dim| acc.checked_mul(*dim))
                 })
                 .ok_or_else(|| {
                     InfraError::Backend(format!(
@@ -110,9 +121,11 @@ impl OrtBackend {
                 // Host tensors are built over Rust-owned memory already.
                 None => host,
             };
-            values.push((range.name.clone(), Arc::new(value)));
+            uploaded.push((index, (range.name.clone(), Arc::new(value))));
             bytes += range.length;
         }
+        uploaded.sort_by_key(|(index, _)| *index);
+        values.extend(uploaded.into_iter().map(|(_, value)| value));
         Ok(SharedInitializers {
             values: Arc::new(values),
             _owners: Arc::new(owners),
@@ -122,12 +135,12 @@ impl OrtBackend {
     }
 }
 
-fn element_size(element: TensorElement) -> Option<usize> {
+pub(crate) fn element_size(element: TensorElement) -> Option<usize> {
     Some(match element {
         TensorElement::F32 | TensorElement::I32 => 4,
         TensorElement::F16 | TensorElement::I16 => 2,
         TensorElement::I64 => 8,
-        TensorElement::I8 | TensorElement::Bool => 1,
+        TensorElement::I8 | TensorElement::U8 | TensorElement::Bool => 1,
         TensorElement::Other => return None,
     })
 }
@@ -153,6 +166,7 @@ fn host_value(range: &InitializerRange, bytes: &[u8]) -> Result<DynValue> {
         TensorElement::I32 => build(shape, le_values(bytes, i32::from_le_bytes)),
         TensorElement::I16 => build(shape, le_values(bytes, i16::from_le_bytes)),
         TensorElement::I8 => build(shape, bytes.iter().map(|byte| *byte as i8).collect()),
+        TensorElement::U8 => build(shape, bytes.to_vec()),
         TensorElement::Bool => build(shape, bytes.iter().map(|byte| *byte != 0).collect()),
         TensorElement::Other => Err(InfraError::Backend(format!(
             "shared initializer `{}` has an unsupported element type",
@@ -184,21 +198,31 @@ fn to_cuda(host: DynValue, device: i32, name: &str) -> Result<DynValue> {
 
 /// A value over `owner`'s memory that does not own it.
 fn borrowed_view(owner: &DynValue, range: &InitializerRange) -> Result<DynValue> {
+    device_view(owner, &range.shape, range.length as usize, &range.name)
+}
+
+/// A value of `shape` over the first `bytes` of `owner`'s buffer that does not
+/// own the memory: the caller keeps `owner` alive for as long as the view.
+pub(crate) fn device_view(
+    owner: &DynValue,
+    shape: &[usize],
+    bytes: usize,
+    what: &str,
+) -> Result<DynValue> {
     let tensor = owner
         .downcast_ref::<ort::value::DynTensorValueType>()
         .map_err(map_ort_err)?;
     let element: ort::value::TensorElementType = *tensor.data_type();
-    let shape = range.shape.iter().map(|dim| *dim as i64).collect::<Vec<_>>();
+    let shape = shape.iter().map(|dim| *dim as i64).collect::<Vec<_>>();
     let api = ort::api();
     let mut out: *mut ort::sys::OrtValue = std::ptr::null_mut();
     // SAFETY: the pointer, byte length, shape and element type all describe
-    // `owner`'s live device buffer; `SharedInitializers` keeps `owner` alive
-    // alongside the view.
+    // `owner`'s live buffer, which the caller keeps alive alongside the view.
     let status = unsafe {
         (api.CreateTensorWithDataAsOrtValue)(
             tensor.memory_info().ptr(),
             tensor.data_ptr() as *mut _,
-            range.length as usize,
+            bytes,
             shape.as_ptr(),
             shape.len(),
             element.into(),
@@ -214,14 +238,10 @@ fn borrowed_view(owner: &DynValue, range: &InitializerRange) -> Result<DynValue>
             (api.ReleaseStatus)(status.0);
             text
         };
-        return Err(InfraError::Backend(format!(
-            "wrap shared initializer `{}`: {message}",
-            range.name
-        )));
+        return Err(InfraError::Backend(format!("wrap `{what}`: {message}")));
     }
-    let out = std::ptr::NonNull::new(out).ok_or_else(|| {
-        InfraError::Backend(format!("wrap shared initializer `{}` returned null", range.name))
-    })?;
+    let out = std::ptr::NonNull::new(out)
+        .ok_or_else(|| InfraError::Backend(format!("wrap `{what}` returned null")))?;
     // SAFETY: `out` is a fresh OrtValue owned by the returned Value.
     Ok(unsafe { DynValue::from_ptr(out, None) })
 }

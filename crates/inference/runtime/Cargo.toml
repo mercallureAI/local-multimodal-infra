@@ -7,13 +7,14 @@ publish.workspace = true
 [features]
 # One feature per model category (see `ModelCategory`); a worker built without
 # one does not offer its models.
-default = ["asr", "tts", "chat", "embedding", "rerank", "detect"]
+default = ["asr", "tts", "chat", "embedding", "rerank", "detect", "ocr"]
 asr = ["dep:local-adapter-sensevoice-asr"]
 tts = ["dep:local-adapter-index-tts", "dep:local-adapter-index-tts2"]
 chat = ["dep:local-adapter-qwen3-chat"]
 embedding = ["dep:local-adapter-e5-embedding"]
 rerank = ["dep:local-adapter-mmarco-reranker"]
 detect = ["dep:local-adapter-yolo"]
+ocr = ["dep:local-adapter-unlimited-ocr"]
 cuda = [
     "local-adapter-e5-embedding?/cuda",
     "local-adapter-index-tts?/cuda",
@@ -21,6 +22,7 @@ cuda = [
     "local-adapter-mmarco-reranker?/cuda",
     "local-adapter-qwen3-chat?/cuda",
     "local-adapter-sensevoice-asr?/cuda",
+    "local-adapter-unlimited-ocr?/cuda",
     "local-adapter-yolo?/cuda",
 ]
 directml = [
@@ -30,6 +32,7 @@ directml = [
     "local-adapter-mmarco-reranker?/directml",
     "local-adapter-qwen3-chat?/directml",
     "local-adapter-sensevoice-asr?/directml",
+    "local-adapter-unlimited-ocr?/directml",
     "local-adapter-yolo?/directml",
 ]
 tensorrt = [
@@ -39,6 +42,7 @@ tensorrt = [
     "local-adapter-mmarco-reranker?/tensorrt",
     "local-adapter-qwen3-chat?/tensorrt",
     "local-adapter-sensevoice-asr?/tensorrt",
+    "local-adapter-unlimited-ocr?/tensorrt",
     "local-adapter-yolo?/tensorrt",
 ]
 
@@ -49,6 +53,7 @@ local-adapter-index-tts2 = { workspace = true, optional = true }
 local-adapter-mmarco-reranker = { workspace = true, optional = true }
 local-adapter-qwen3-chat = { workspace = true, optional = true }
 local-adapter-sensevoice-asr = { workspace = true, optional = true }
+local-adapter-unlimited-ocr = { workspace = true, optional = true }
 local-adapter-yolo = { workspace = true, optional = true }
 local-backend-ort.workspace = true
 local-core.workspace = true

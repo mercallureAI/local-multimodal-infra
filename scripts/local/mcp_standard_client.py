@@ -20,6 +20,20 @@ DEFAULT_INFER_URL = "http://127.0.0.1:17892/mcp/infer"
 YOLO_MODEL_ID = "yolo11n.onnx"
 SENSEVOICE_ASR_MODEL_ID = "sensevoice-small-onnx"
 INDEXTTS_MODEL_ID = "indextts-1.5-onnx"
+OCR_MODEL_ID = "unlimited-ocr-onnx"
+# Text of scripts/assets/ocr-input.png that the OCR result must contain.
+OCR_EXPECTED_TEXT = ("Local Multimodal Infra", "OCR smoke test", "2026-0042", "1,280.50")
+# Errors that mean OCR cannot run here rather than that it is broken: an int8
+# package on a worker without a usable CUDA device and, with
+# --ocr-worker-optional (binaries built elsewhere), no worker with the `ocr`
+# feature. Otherwise a missing OCR worker means broken wiring and fails.
+OCR_NEEDS_CUDA = "packed for CUDA"
+OCR_NO_WORKER = "no registered worker can serve the requested model"
+OCR_WORKER_OPTIONAL = False
+
+
+def ocr_unavailable(text: str) -> bool:
+    return OCR_NEEDS_CUDA in text or (OCR_WORKER_OPTIONAL and OCR_NO_WORKER in text)
 INFER_TOOLS = {
     "create_task",
     "start_task",
@@ -30,6 +44,7 @@ INFER_TOOLS = {
     "sign_asset_urls",
     "asr_transcribe",
     "object_detect",
+    "ocr_recognize",
     "tts_synthesize",
     "text_embed",
     "text_rerank",
@@ -63,6 +78,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Run standard MCP admin/catalog/assets plus generic and direct inference coverage where local resources are available.",
     )
     parser.add_argument("--sample-image", type=Path, default=None, help="JPEG/PNG sample for MCP object detection generic/direct coverage.")
+    parser.add_argument("--ocr-image", type=Path, default=None, help="Document image for MCP OCR generic/direct coverage (expects scripts/assets/ocr-input.png text).")
+    parser.add_argument(
+        "--ocr-worker-optional",
+        action="store_true",
+        help="Report OCR as skipped when no worker serves the OCR model (worker built without the ocr feature).",
+    )
     parser.add_argument("--sample-audio", type=Path, default=None, help="WAV sample for MCP ASR direct coverage.")
     parser.add_argument("--reference-audio", type=Path, default=None, help="WAV reference sample for MCP TTS direct coverage.")
     parser.add_argument("--text", default="你好，这是本地 IndexTTS 冒烟测试。", help="Text for MCP TTS direct coverage.")
@@ -73,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--timeout", type=float, default=1800.0, help="Task wait/upload timeout seconds.")
     args = parser.parse_args(argv)
+    global OCR_WORKER_OPTIONAL
+    OCR_WORKER_OPTIONAL = args.ocr_worker_optional
     try:
         summary = asyncio.run(
             run(
@@ -83,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.timeout,
                 full=args.full,
                 sample_image=args.sample_image,
+                ocr_image=args.ocr_image,
                 sample_audio=args.sample_audio,
                 reference_audio=args.reference_audio,
                 text=args.text,
@@ -123,6 +147,7 @@ async def run(
     infer_token: str | None = None,
     full: bool = False,
     sample_image: Path | None = None,
+    ocr_image: Path | None = None,
     sample_audio: Path | None = None,
     reference_audio: Path | None = None,
     text: str = "你好，这是本地 IndexTTS 冒烟测试。",
@@ -214,6 +239,7 @@ async def run(
                                 summary["generic_tasks"] = await run_generic_smoke(
                                     infer_session,
                                     sample_image,
+                                    ocr_image,
                                     sample_audio,
                                     reference_audio,
                                     text,
@@ -225,6 +251,7 @@ async def run(
                                     admin_session,
                                     infer_session,
                                     sample_image,
+                                    ocr_image,
                                     sample_audio,
                                     reference_audio,
                                     text,
@@ -332,6 +359,7 @@ async def run_url_result_smoke(session: Any, timeout: float) -> dict[str, Any]:
 async def run_generic_smoke(
     session: Any,
     sample_image: Path | None,
+    ocr_image: Path | None,
     sample_audio: Path | None,
     reference_audio: Path | None,
     text: str,
@@ -342,6 +370,7 @@ async def run_generic_smoke(
 ) -> dict[str, Any]:
     return {
         "object_detect": await generic_object_detect(session, sample_image, timeout, models),
+        "ocr_recognize": await generic_ocr_recognize(session, ocr_image, timeout, models),
         "asr_transcribe": await generic_asr_transcribe(session, sample_audio, timeout, models),
         "tts_synthesize": await generic_tts_synthesize(
             session,
@@ -380,6 +409,51 @@ async def generic_object_detect(session: Any, sample_image: Path | None, timeout
     validate_task_output(wait, "object_detections", "MCP generic object.detect")
     object_count, car_count = object_detection_counts(wait.get("output"), "MCP generic object.detect")
     return {"status": "passed", "input_image": str(sample_image), "object_count": object_count, "car_count": car_count, "create_task": create, "start_task": start, "wait_task": wait, "get_task": get}
+
+
+async def generic_ocr_recognize(session: Any, image: Path | None, timeout: float, models: list[Any]) -> dict[str, Any]:
+    if image is None:
+        return skipped("no --ocr-image supplied for generic OCR task")
+    if not image.exists():
+        return skipped(f"OCR image does not exist: {image}")
+    if not model_enabled(models, OCR_MODEL_ID):
+        return skipped(f"{OCR_MODEL_ID} is not enabled")
+    create = await call_tool_checked(
+        session,
+        "create_task",
+        {
+            "task_kind": "ocr.recognize",
+            "model": OCR_MODEL_ID,
+            "files": [{"name": image.name, "mime": image_mime(image), "role": "image", "required": True}],
+            "params": {},
+        },
+    )
+    upload_file(first_upload(create, "image")["upload_url"], image, image_mime(image), timeout)
+    task_id = require_task_id(create, "MCP generic ocr.recognize")
+    try:
+        start = await call_tool_checked(session, "start_task", {"task_id": task_id, "wait": False})
+        wait = await call_tool_checked(session, "wait_task", {"task_id": task_id, "timeout_sec": int(timeout)})
+        get = await call_tool_checked(session, "get_task", {"task_id": task_id})
+    except RuntimeError as exc:
+        if ocr_unavailable(str(exc)):
+            return skipped(f"OCR cannot run on this worker: {exc}")
+        raise
+    if isinstance(wait, dict) and wait.get("state") == "failed" and ocr_unavailable(json.dumps(wait)):
+        return skipped(f"OCR cannot run on this worker: {wait.get('error')}")
+    validate_task_output(wait, "ocr_text", "MCP generic ocr.recognize")
+    text = ocr_text(wait.get("output"), "MCP generic ocr.recognize")
+    return {"status": "passed", "input_image": str(image), "text": text, "create_task": create, "start_task": start, "wait_task": wait, "get_task": get}
+
+
+def ocr_text(payload: Any, label: str) -> str:
+    validate_direct_output(payload, "ocr_text", label)
+    text = payload.get("text")
+    if not isinstance(text, str):
+        raise RuntimeError(f"{label} output has no text: {payload}")
+    missing = [expected for expected in OCR_EXPECTED_TEXT if expected not in text]
+    if missing:
+        raise RuntimeError(f"{label} text misses {missing!r}: {text!r}")
+    return text
 
 
 async def generic_asr_transcribe(session: Any, sample_audio: Path | None, timeout: float, models: list[Any]) -> dict[str, Any]:
@@ -452,6 +526,7 @@ async def run_direct_smoke(
     admin_session: Any,
     infer_session: Any,
     sample_image: Path | None,
+    ocr_image: Path | None,
     sample_audio: Path | None,
     reference_audio: Path | None,
     text: str,
@@ -462,6 +537,7 @@ async def run_direct_smoke(
 ) -> dict[str, Any]:
     results: dict[str, Any] = {}
     results["object_detect"] = await direct_object_detect(infer_session, sample_image, models)
+    results["ocr_recognize"] = await direct_ocr_recognize(infer_session, ocr_image, models)
     results["asr_transcribe"] = await direct_asr_transcribe(infer_session, sample_audio, models)
     results["tts_synthesize"] = await direct_tts_synthesize(
         admin_session,
@@ -474,6 +550,27 @@ async def run_direct_smoke(
         asr_enabled=model_enabled(models, SENSEVOICE_ASR_MODEL_ID),
     )
     return results
+
+
+async def direct_ocr_recognize(session: Any, image: Path | None, models: list[Any]) -> dict[str, Any]:
+    if image is None:
+        return skipped("no --ocr-image supplied")
+    if not image.exists():
+        return skipped(f"OCR image does not exist: {image}")
+    if not model_enabled(models, OCR_MODEL_ID):
+        return skipped(f"{OCR_MODEL_ID} is not enabled")
+    try:
+        payload = await call_tool_checked(
+            session,
+            "ocr_recognize",
+            {"model": OCR_MODEL_ID, "image": {"path": str(image), "mime": image_mime(image)}},
+        )
+    except RuntimeError as exc:
+        if ocr_unavailable(str(exc)):
+            return skipped(f"OCR cannot run on this worker: {exc}")
+        raise
+    text = ocr_text(payload, "MCP direct ocr_recognize")
+    return {"status": "passed", "input_image": str(image), "text": text, "result": payload}
 
 
 async def direct_object_detect(session: Any, image: Path | None, models: list[Any]) -> dict[str, Any]:

@@ -30,6 +30,21 @@ pub use shared_initializers::{InitializerRange, SharedInitializers};
 struct SessionExtras<'a> {
     config_entries: &'a [(String, String)],
     initializers: &'a [(String, std::sync::Arc<DynValue>)],
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    cuda_memory: Option<CudaMemoryOptions>,
+}
+
+/// CUDA allocator settings for models whose activations dwarf what they keep
+/// between runs (vision encoders, long prefills). ORT's defaults (the arena
+/// grows by powers of two; cuDNN may take its largest workspace) are kept
+/// unless a backend opts in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CudaMemoryOptions {
+    /// Grow the CUDA arena by the requested amount instead of doubling; also
+    /// what lets [`OrtSession::run_tensors_releasing_memory`] give memory back.
+    pub arena_same_as_requested: bool,
+    /// Let cuDNN pick convolution algorithms that need its largest workspace.
+    pub conv_max_workspace: bool,
 }
 pub use io_binding::{
     PinnedCudaF32IoBinding, PinnedCudaIoBinding, ResidentBindingOutputs, ResidentCudaTensor,
@@ -310,6 +325,7 @@ pub enum TensorElement {
     F16,
     Bool,
     I8,
+    U8,
     I16,
     I32,
     I64,
@@ -417,6 +433,7 @@ pub struct OrtBackend {
     selection: ProviderSelection,
     cpu_session_options: Option<CpuSessionOptions>,
     config_entries: Vec<(String, String)>,
+    cuda_memory: Option<CudaMemoryOptions>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -431,7 +448,14 @@ impl OrtBackend {
             selection,
             cpu_session_options: None,
             config_entries: Vec::new(),
+            cuda_memory: None,
         }
+    }
+
+    /// CUDA allocator settings for every CUDA session this backend loads.
+    pub fn with_cuda_memory_options(mut self, options: CudaMemoryOptions) -> Self {
+        self.cuda_memory = Some(options);
+        self
     }
 
     /// Adds an ORT session config entry (for example
@@ -475,6 +499,7 @@ impl OrtBackend {
         let extras = SessionExtras {
             config_entries: &self.config_entries,
             initializers,
+            cuda_memory: self.cuda_memory,
         };
         OrtSession::load_with_provider_loaders(
             model_path,
@@ -681,14 +706,31 @@ impl OrtSession {
             .map(OrtTensorInput::from)
             .collect::<Vec<_>>();
         self.real
-            .run_tensors(&typed_inputs)?
+            .run_tensors(&typed_inputs, None)?
             .into_iter()
             .map(OrtOutput::try_from)
             .collect()
     }
 
     pub fn run_tensors(&mut self, inputs: &[OrtTensorInput]) -> Result<Vec<OrtTensorOutput>> {
-        self.real.run_tensors(inputs)
+        self.real.run_tensors(inputs, None)
+    }
+
+    /// [`Self::run_tensors`], then shrinks this session's device arena so the
+    /// activations of the run are returned to the driver (effective with
+    /// [`CudaMemoryOptions::arena_same_as_requested`]). For sessions that run
+    /// rarely and have large activations, such as a vision encoder.
+    pub fn run_tensors_releasing_memory(
+        &mut self,
+        inputs: &[OrtTensorInput],
+    ) -> Result<Vec<OrtTensorOutput>> {
+        let shrink = match (self.provider, self.device_id) {
+            (ProviderKind::Cuda, Some(device)) if !self.whole_session_cpu_fallback_used() => {
+                Some(format!("gpu:{device}"))
+            }
+            _ => None,
+        };
+        self.real.run_tensors(inputs, shrink.as_deref())
     }
 }
 
@@ -761,6 +803,13 @@ impl RealSession {
             let mut cuda = cuda;
             if let Some(device_id) = provider.device_id {
                 cuda = cuda.with_device_id(device_id as i32);
+            }
+            if let Some(memory) = extras.cuda_memory {
+                if memory.arena_same_as_requested {
+                    cuda = cuda
+                        .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested);
+                }
+                cuda = cuda.with_conv_max_workspace(memory.conv_max_workspace);
             }
             let builder = Session::builder()
                 .map_err(map_ort_err)?
@@ -868,7 +917,11 @@ impl RealSession {
         &self.metadata
     }
 
-    fn run_tensors(&mut self, inputs: &[OrtTensorInput]) -> Result<Vec<OrtTensorOutput>> {
+    fn run_tensors(
+        &mut self,
+        inputs: &[OrtTensorInput],
+        shrink_arenas: Option<&str>,
+    ) -> Result<Vec<OrtTensorOutput>> {
         self.validate_inputs(inputs)?;
 
         let mut values = Vec::<(Cow<'_, str>, DynTensor)>::with_capacity(inputs.len());
@@ -942,10 +995,25 @@ impl RealSession {
             values.push((Cow::Owned(input.name.clone()), tensor));
         }
 
-        let outputs = self.session.run(values).map_err(map_ort_err)?;
+        let outputs_meta = &self.metadata.outputs;
+        let Some(arenas) = shrink_arenas else {
+            let outputs = self.session.run(values).map_err(map_ort_err)?;
+            return outputs
+                .into_iter()
+                .map(|(name, value)| host_tensor_output(name, &value, outputs_meta))
+                .collect();
+        };
+        let mut options = ort::session::RunOptions::new().map_err(map_ort_err)?;
+        options
+            .add_config_entry("memory.enable_memory_arena_shrinkage", arenas)
+            .map_err(map_ort_err)?;
+        let outputs = self
+            .session
+            .run_with_options(values, &options)
+            .map_err(map_ort_err)?;
         outputs
             .into_iter()
-            .map(|(name, value)| host_tensor_output(name, &value, &self.metadata.outputs))
+            .map(|(name, value)| host_tensor_output(name, &value, outputs_meta))
             .collect()
     }
 
@@ -1081,6 +1149,7 @@ fn tensor_element(element: TensorElementType) -> TensorElement {
         TensorElementType::Float16 => TensorElement::F16,
         TensorElementType::Bool => TensorElement::Bool,
         TensorElementType::Int8 => TensorElement::I8,
+        TensorElementType::Uint8 => TensorElement::U8,
         TensorElementType::Int16 => TensorElement::I16,
         TensorElementType::Int32 => TensorElement::I32,
         TensorElementType::Int64 => TensorElement::I64,

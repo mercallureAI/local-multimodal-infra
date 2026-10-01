@@ -378,7 +378,7 @@ pub(crate) fn attention_mask_input(
             data: OrtTensorData::Bool(data.into_iter().map(|value| value != 0).collect()),
         },
         TensorElement::I32 => tensor_i32("attention_mask", shape, data),
-        TensorElement::I64 | TensorElement::Other => tensor_i64(
+        TensorElement::I64 | TensorElement::U8 | TensorElement::Other => tensor_i64(
             "attention_mask",
             shape,
             data.into_iter().map(i64::from).collect(),

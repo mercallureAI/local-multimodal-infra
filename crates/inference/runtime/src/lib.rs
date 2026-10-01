@@ -6,7 +6,8 @@
         feature = "chat",
         feature = "embedding",
         feature = "rerank",
-        feature = "detect"
+        feature = "detect",
+        feature = "ocr"
     )),
     allow(unused_imports, unused_variables, unreachable_code)
 )]
@@ -23,6 +24,8 @@ use local_adapter_mmarco_reranker::MmarcoRerankerAdapter;
 use local_adapter_qwen3_chat::Qwen3ChatAdapter;
 #[cfg(feature = "asr")]
 use local_adapter_sensevoice_asr::SenseVoiceAsrAdapter;
+#[cfg(feature = "ocr")]
+use local_adapter_unlimited_ocr::UnlimitedOcrAdapter;
 #[cfg(feature = "detect")]
 use local_adapter_yolo::YoloAdapter;
 use local_backend_ort::probe_runtime_execution_provider_availability;
@@ -56,6 +59,7 @@ pub fn compiled_adapters() -> Vec<AdapterKind> {
             AdapterKind::E5Embedding => cfg!(feature = "embedding"),
             AdapterKind::MmarcoReranker => cfg!(feature = "rerank"),
             AdapterKind::Qwen3Chat => cfg!(feature = "chat"),
+            AdapterKind::UnlimitedOcr => cfg!(feature = "ocr"),
             AdapterKind::VoiceCascade => false,
         })
         .collect()
@@ -528,6 +532,10 @@ impl LoadedEntry {
             AdapterKind::Qwen3Chat => {
                 LoadedModel::Qwen3Chat(Box::new(Qwen3ChatAdapter::load(&spec)?))
             }
+            #[cfg(feature = "ocr")]
+            AdapterKind::UnlimitedOcr => {
+                LoadedModel::UnlimitedOcr(Box::new(UnlimitedOcrAdapter::load(&spec)?))
+            }
             AdapterKind::VoiceCascade => {
                 return Err(InfraError::Unsupported(format!(
                     "model `{}` is a realtime voice pipeline, served over /v1/realtime",
@@ -680,6 +688,8 @@ enum LoadedModel {
     MmarcoReranker(MmarcoRerankerAdapter),
     #[cfg(feature = "chat")]
     Qwen3Chat(Box<Qwen3ChatAdapter>),
+    #[cfg(feature = "ocr")]
+    UnlimitedOcr(Box<UnlimitedOcrAdapter>),
     #[cfg(test)]
     Test {
         cache_releases: Arc<std::sync::atomic::AtomicUsize>,
@@ -712,6 +722,12 @@ impl LoadedModel {
                 TaskKind::ObjectDetect,
                 InferenceInput::ObjectDetect { image },
             ) => adapter.object_detect(image),
+            #[cfg(feature = "ocr")]
+            (
+                LoadedModel::UnlimitedOcr(adapter),
+                TaskKind::OcrRecognize,
+                InferenceInput::OcrRecognize { image },
+            ) => adapter.ocr_recognize(image),
             #[cfg(feature = "asr")]
             (
                 LoadedModel::SenseVoiceAsr(adapter),
@@ -1361,6 +1377,7 @@ mod tests {
             AdapterKind::E5Embedding => vec![TaskKind::TextEmbed],
             AdapterKind::MmarcoReranker => vec![TaskKind::TextRerank],
             AdapterKind::Qwen3Chat => vec![TaskKind::ChatComplete],
+            AdapterKind::UnlimitedOcr => vec![TaskKind::OcrRecognize],
             AdapterKind::VoiceCascade => vec![TaskKind::VoiceRealtime],
         };
         ModelSpec {

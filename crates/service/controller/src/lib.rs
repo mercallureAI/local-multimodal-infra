@@ -1137,6 +1137,14 @@ impl ControllerState {
                     })
                     .and_then(to_ref)?,
             },
+            local_core::TaskKind::OcrRecognize => InferenceInput::OcrRecognize {
+                image: uploaded("image")
+                    .or_else(first_file)
+                    .ok_or_else(|| {
+                        InfraError::BadRequest("ocr.recognize requires an image upload".to_string())
+                    })
+                    .and_then(to_ref)?,
+            },
             local_core::TaskKind::AsrTranscribe => InferenceInput::AsrTranscribe {
                 audio: uploaded("audio")
                     .or_else(first_file)
