@@ -158,9 +158,12 @@ impl RuntimeManager {
     /// Whether `model_id` speaks text as it is written
     /// ([`Self::infer_streaming_text`]) rather than once it has ended.
     pub fn streams_text(&self, model_id: &str) -> bool {
-        self.specs
-            .get(model_id)
-            .is_some_and(|spec| spec.adapter == AdapterKind::Qwen3Tts)
+        self.adapter(model_id) == Some(AdapterKind::Qwen3Tts)
+    }
+
+    /// The adapter a configured model runs on.
+    pub fn adapter(&self, model_id: &str) -> Option<AdapterKind> {
+        self.specs.get(model_id).map(|spec| spec.adapter)
     }
 
     /// Like [`Self::infer_streaming`] for a TTS task whose text is still

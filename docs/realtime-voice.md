@@ -27,7 +27,8 @@ server does the rest:
    The server sends the audio at real-time pace (0.3 s ahead).
    Chunks are whole sentences (only the first may end at a comma, so speech
    starts early), merged until each is about twice as long as the one before
-   it, up to 60 characters; only a sentence longer than 120 is cut at a comma.
+   it, up to 60 characters; only a sentence longer than 120 is cut, at a comma
+   (a first chunk, which may be speaking already, at a word).
 
 Talking over the bot stops it: one to one after `barge_in_ms` of speech (or
 an utterance that is more than a backchannel; an utterance that stopped the

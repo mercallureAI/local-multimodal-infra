@@ -178,6 +178,9 @@ impl OrtSession {
                 .bind_output_to_device(name, &host_memory)
                 .map_err(map_ort_err)?;
         }
+        // Binding a host input copies it to the device now (and clearing frees
+        // the copies): under the gate, like the run.
+        let gate = crate::gpu_shared();
         binding.binding.clear_inputs();
         let bound = (|| {
             for (name, value) in &host_values {
@@ -199,16 +202,15 @@ impl OrtSession {
             return Err(err);
         }
 
+        let outputs = self
+            .real
+            .session
+            .run_binding(&binding.binding)
+            .map_err(map_ort_err);
+        // The tensors made below take the gate again when they drop.
+        drop(gate);
         let result = (|| {
-            let outputs = {
-                // The run only: the tensors made below take the gate again
-                // when they drop.
-                let _gate = crate::gpu_shared();
-                self.real
-                    .session
-                    .run_binding(&binding.binding)
-                    .map_err(map_ort_err)?
-            };
+            let outputs = outputs?;
             let mut collected = DeviceBindingOutputs::default();
             for (name, value) in outputs {
                 if binding
@@ -231,6 +233,7 @@ impl OrtSession {
         })();
         // Returned values own their memory; release the consumer references
         // so producers from a previous run can be dropped by the caller.
+        let _gate = crate::gpu_shared();
         binding.binding.clear_inputs();
         result
     }

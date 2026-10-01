@@ -310,6 +310,9 @@ impl OrtSession {
                 )));
             }
         }
+        // Binding a host input copies it to the device now (and clearing frees
+        // the copies): under the gate, like the run.
+        let _gate = crate::gpu_shared();
         for input in host_inputs {
             let name = input.name.clone();
             let value = owned_tensor(input)?;
@@ -326,7 +329,6 @@ impl OrtSession {
             .binding
             .bind_output_to_device(&binding.logits_output, &host_output_memory()?)
             .map_err(map_ort_err)?;
-        let _gate = crate::gpu_shared();
         let outputs = match shrink_arenas {
             None => self
                 .real

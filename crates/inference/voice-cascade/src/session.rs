@@ -20,8 +20,8 @@ use crate::{
 use base64::Engine;
 use local_adapter_silero_vad::{SileroVad, VadEvent, VadIterator, WINDOW};
 use local_core::{
-    ArtifactKind, ChatMessage, ChatOptions, ChatToolCall, FileRef, InferenceEvent, InferenceInput,
-    InferenceOutput, InferenceTask, ModelSpec, TaskKind, TextPiece,
+    AdapterKind, ArtifactKind, ChatMessage, ChatOptions, ChatToolCall, FileRef, InferenceEvent,
+    InferenceInput, InferenceOutput, InferenceTask, ModelSpec, TaskKind, TextPiece,
 };
 use local_error::{InfraError, Result};
 use local_runtime::RuntimeManager;
@@ -122,8 +122,8 @@ pub struct CascadeModels {
     pub default_reference_audio: Option<PathBuf>,
     /// What `default_reference_audio` says (Qwen3-TTS in-context cloning).
     pub default_reference_text: Option<String>,
-    /// The language TTS speaks (`tts_language`; the model's own default
-    /// when unset).
+    /// The language TTS speaks (`tts_language`, Qwen3-TTS only; the model's
+    /// own default when unset).
     pub tts_language: Option<String>,
     /// Speak the first clause of a reply while the chat model is still
     /// writing it (`tts_stream_text`, on unless false; only with a TTS model
@@ -362,17 +362,21 @@ async fn converse(
         emotion.insert("tts_emotion_strength".to_string(), Value::from(strength));
     }
     let mut tts_params = tts_params(&emotion).map_err(InfraError::BadRequest)?;
-    if let Some(text) = ref_text.filter(|text| !text.trim().is_empty()) {
-        tts_params.insert("reference_text".to_string(), Value::from(text));
-    }
-    if let Some(language) = config.tts_language.clone().or(models.tts_language.clone()) {
-        tts_params.insert("language".to_string(), Value::from(language));
+    let tts_model = config.tts_model.clone().unwrap_or(models.tts_model);
+    // The transcript and language names are Qwen3-TTS's (IndexTTS takes
+    // neither: it would read "chinese" as a language code).
+    if runtime.adapter(&tts_model) == Some(AdapterKind::Qwen3Tts) {
+        if let Some(text) = ref_text.filter(|text| !text.trim().is_empty()) {
+            tts_params.insert("reference_text".to_string(), Value::from(text));
+        }
+        if let Some(language) = config.tts_language.clone().or(models.tts_language.clone()) {
+            tts_params.insert("language".to_string(), Value::from(language));
+        }
     }
     let vad_path = models.vad_model.clone();
     let vad = blocking(move || SileroVad::load(&vad_path)).await?;
     let (speech_tx, speech_rx) = mpsc::unbounded_channel();
     let audio = config.mode == SessionMode::Audio;
-    let tts_model = config.tts_model.clone().unwrap_or(models.tts_model);
     let tts_stream_text = models.tts_stream_text && runtime.streams_text(&tts_model);
     let shared = Arc::new(Shared {
         audio,

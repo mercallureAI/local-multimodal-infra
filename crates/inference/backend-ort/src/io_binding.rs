@@ -276,6 +276,9 @@ impl OrtSession {
             )));
         }
         target.copy_from_slice(source);
+        // Binding a host input copies it to the device now (and clearing frees
+        // the copies): under the gate, like the run.
+        let _gate = crate::gpu_shared();
         binding.binding.clear_inputs();
         // A fresh output allocation each run: ORT 1.30 fails the copy into a
         // pinned output kept bound from an earlier run (source == target).
@@ -291,7 +294,6 @@ impl OrtSession {
             .binding
             .bind_input(binding.input_name.clone(), &binding.input)
             .map_err(map_ort_err)?;
-        let _gate = crate::gpu_shared();
         let outputs = self
             .real
             .session
@@ -431,6 +433,9 @@ impl OrtSession {
             ));
         }
         self.real.validate_inputs(inputs)?;
+        // Binding a host input copies it to the device now (and clearing frees
+        // the copies): under the gate, like the run.
+        let _gate = crate::gpu_shared();
         binding.binding.clear_inputs();
         for (name, tensor) in &mut binding.inputs {
             let input = inputs
@@ -479,7 +484,6 @@ impl OrtSession {
                 .map_err(map_ort_err)?;
         }
 
-        let _gate = crate::gpu_shared();
         let outputs = self
             .real
             .session
@@ -629,6 +633,9 @@ impl OrtSession {
                 .bind_output_to_device(name, &binding.cpu_memory)
                 .map_err(map_ort_err)?;
         }
+        // Binding a host input copies it to the device now (and clearing frees
+        // the copies): under the gate, like the run.
+        let gate = crate::gpu_shared();
         binding.binding.clear_inputs();
         for (name, value) in host_values {
             if let Err(err) = binding.binding.bind_input(name, &value) {
@@ -643,16 +650,15 @@ impl OrtSession {
             }
         }
 
+        let outputs = self
+            .real
+            .session
+            .run_binding(&binding.binding)
+            .map_err(map_ort_err);
+        // The tensors made below take the gate again when they drop.
+        drop(gate);
         let result = (|| {
-            let outputs = {
-                // The run only: the tensors made below take the gate again
-                // when they drop.
-                let _gate = crate::gpu_shared();
-                self.real
-                    .session
-                    .run_binding(&binding.binding)
-                    .map_err(map_ort_err)?
-            };
+            let outputs = outputs?;
             let expected_names = binding
                 .cuda_outputs
                 .iter()
@@ -683,6 +689,7 @@ impl OrtSession {
         // Once returned values have been detached into owned Arc-backed values,
         // release all consumer references. A binding is not run again until its
         // old producer values have also been dropped by the adapter ping-pong.
+        let _gate = crate::gpu_shared();
         binding.binding.clear_inputs();
         result
     }

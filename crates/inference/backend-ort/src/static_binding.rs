@@ -190,6 +190,8 @@ impl StaticIoBinding {
     pub fn bind_constant(&mut self, input: OrtTensorInput) -> Result<()> {
         let name = input.name.clone();
         let value = owned_tensor(input)?;
+        // Binding copies it to the device.
+        let _gate = crate::gpu_shared();
         self.binding.bind_input(name, &value).map_err(map_ort_err)?;
         self.constants.push(value);
         Ok(())
@@ -417,6 +419,10 @@ impl OrtSession {
             .iter()
             .map(|input| input.name.clone())
             .collect::<Vec<_>>();
+        let options = binding.options(graph_id)?;
+        // Binding a host input copies it to the device now (and clearing frees
+        // the copies): under the gate, like the run.
+        let _gate = binding.gate(graph_id);
         // From here the fixed inputs are no longer (all) bound, even if a
         // bind below fails.
         binding.fixed_bound = false;
@@ -442,8 +448,6 @@ impl OrtSession {
                 .bind_output_to_device(*name, &host_memory)
                 .map_err(map_ort_err)?;
         }
-        let options = binding.options(graph_id)?;
-        let _gate = binding.gate(graph_id);
         let outputs = match &options {
             Some(options) => self
                 .real
