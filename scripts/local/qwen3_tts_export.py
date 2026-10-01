@@ -44,6 +44,7 @@ TOP_K = 50
 # codec EOS may be sampled.
 CODEC_SIZE = 2048
 NEG = -1.0e9
+TALKER_WEIGHTS = ("int8", "fp16", "int4-int8")
 # Code predictor layers whose MLP down projection overflows FP16: the
 # calibration maxima (FP32 reference, Chinese/English, x-vector and ICL) are
 # 1.8e5 at its input and 6.1e4 at its output for layer 2, and the residual
@@ -58,6 +59,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--source-model-dir", required=True, type=Path, help="Qwen/Qwen3-TTS-12Hz-0.6B-Base snapshot")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--work-dir", type=Path, help="intermediate files (default: a temp dir)")
+    parser.add_argument(
+        "--talker-weights",
+        choices=TALKER_WEIGHTS,
+        default="int8",
+        help="talker.onnx matmul weights: int8 (weight-only, the default: no measurable quality loss, "
+        "27%% faster decode, 40%% smaller), fp16, or int4 for the 28 talker layers with an int8 code predictor",
+    )
     parser.add_argument(
         "--builder-python",
         type=Path,
@@ -89,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
         return model
 
     if "talker" in args.parts:
-        export_talker(load(), work, out, args.builder_python)
+        export_talker(load(), work, out, args.builder_python, args.talker_weights)
     if "vocoder" in args.parts:
         export_vocoder(load(), work, out)
     if "speaker" in args.parts:
@@ -97,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     if "codec_encoder" in args.parts:
         export_codec_encoder(load(), out)
     if "package" in args.parts:
-        write_package(source, out)
+        write_package(source, out, args.talker_weights)
     return 0
 
 
@@ -116,13 +124,14 @@ def load_model(source: Path):
 # --------------------------------------------------------------------------
 
 
-def export_talker(model, work: Path, out: Path, builder_python: Path) -> None:
+def export_talker(model, work: Path, out: Path, builder_python: Path, weights: str = "int8") -> None:
     """Builder talker body, wrapped by a torch front (embeddings) and back
-    (sampling + code predictor), merged into one graph."""
+    (sampling + code predictor), merged into one graph; matmul weights
+    quantized per `weights`."""
     import onnx
 
     body = build_talker_body(model, work, builder_python)
-    merged = assemble_frame_graph(body, model)
+    merged = quantize_talker(assemble_frame_graph(body, model), weights)
     target = out / "talker.onnx"
     for stale in (target, out / "talker.onnx.data"):
         stale.unlink(missing_ok=True)
@@ -135,6 +144,42 @@ def export_talker(model, work: Path, out: Path, builder_python: Path) -> None:
         size_threshold=1024,
     )
     print(f"[talker] wrote {target}")
+
+
+def quantize_talker(model, weights: str):
+    """Weight-only MatMulNBits (symmetric RTN) for the matmuls with constant
+    weights: the 28 talker layers and the code predictor with its heads
+    (`/back/`). Embedding tables, norms and sampling stay as they are.
+
+    A/B (scripts/local/qwen3_tts_eval.py, 14 sentences x 2 seeds x 2 modes):
+    INT8 everywhere matches FP16 in CER, speaker similarity and DNSMOS; an INT4
+    code predictor changes greedy codes from the first frame and lowers
+    similarity slightly, so the code predictor stays INT8."""
+    from onnxruntime.quantization.matmul_nbits_quantizer import (
+        DefaultWeightOnlyQuantConfig,
+        MatMulNBitsQuantizer,
+    )
+
+    if weights == "fp16":
+        return model
+    inits = {init.name for init in model.graph.initializer}
+    matmuls = [n.name for n in model.graph.node if n.op_type == "MatMul" and n.input[1] in inits]
+    back = [name for name in matmuls if name.startswith("/back/")]
+    body = [name for name in matmuls if not name.startswith(("/back/", "/front/"))]
+    plan = [(back, 8, 128), (body, 4 if weights == "int4-int8" else 8, 32 if weights == "int4-int8" else 128)]
+    for names, bits, block in plan:
+        chosen = set(names)
+        # `nodes_to_include` is OR-ed with the op type and does not restrict:
+        # exclude every other MatMul instead.
+        others = [n.name for n in model.graph.node if n.op_type == "MatMul" and n.name not in chosen]
+        config = DefaultWeightOnlyQuantConfig(block_size=block, is_symmetric=True, bits=bits)
+        quantizer = MatMulNBitsQuantizer(
+            model, bits=bits, block_size=block, is_symmetric=True, nodes_to_exclude=others, algo_config=config
+        )
+        quantizer.process()
+        model = quantizer.model.model
+        print(f"[talker] {len(names)} matmuls -> int{bits} (block {block})")
+    return model
 
 
 def build_talker_body(model, work: Path, builder_python: Path):
@@ -905,7 +950,7 @@ def export_codec_encoder(model, out: Path) -> None:
     print(f"[codec_encoder] wrote {target}")
 
 
-def write_package(source: Path, out: Path) -> None:
+def write_package(source: Path, out: Path, talker_weights: str = "int8") -> None:
     """config.json (dimensions, special tokens, languages, sampling defaults)
     and a fast-tokenizer tokenizer.json for the text."""
     from transformers import AutoTokenizer
@@ -952,6 +997,7 @@ def write_package(source: Path, out: Path) -> None:
             "codec_encoder": "codec_encoder.onnx",
         },
         "precision": "fp16",
+        "talker_weights": talker_weights,
         "vocoder": {
             "layers": d["num_hidden_layers"],
             "kv_heads": d["num_key_value_heads"],
