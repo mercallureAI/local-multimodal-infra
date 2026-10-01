@@ -70,6 +70,41 @@ pub fn build_prompt(
     }
     let ids = ids.iter().map(|id| *id as i64).collect::<Vec<_>>();
     let (role, body) = (&ids[..3], &ids[3..ids.len() - 5]);
+    build_prompt_parts(tokens, role, body, true, language, speaker, reference)
+}
+
+/// Text tokens a prompt needs before it can be built while the text is
+/// still coming: the first (x-vector), or enough to cover the reference
+/// codes the text runs under (in-context). Fewer are fine once the text has
+/// ended.
+pub fn tokens_needed(reference: Option<Reference<'_>>) -> usize {
+    match reference {
+        Some(reference) => (reference.codes.len() + 1)
+            .saturating_sub(reference.ids.len().saturating_sub(5))
+            .max(1),
+        None => 1,
+    }
+}
+
+/// The prompt for `role` tokens (`<|im_start|>assistant\n`) and the text's
+/// `body` tokens so far. With `ended` false the text goes on: no `tts_eos`
+/// yet, and `body` must hold [`tokens_needed`] tokens; the rest of the text
+/// trails, one token per generated frame, as the official streaming mode
+/// feeds it.
+pub fn build_prompt_parts(
+    tokens: &SpecialTokens,
+    role: &[i64],
+    body: &[i64],
+    ended: bool,
+    language: Option<i64>,
+    speaker: bool,
+    reference: Option<Reference<'_>>,
+) -> Result<Prompt> {
+    if body.is_empty() || body.len() < if ended { 1 } else { tokens_needed(reference) } {
+        return Err(InfraError::BadRequest(
+            "Qwen3-TTS text is empty".to_string(),
+        ));
+    }
     let mut prompt = Prompt {
         text_ids: Vec::new(),
         codec_ids: Vec::new(),
@@ -124,7 +159,9 @@ pub fn build_prompt(
             let ref_body = &reference.ids[3..reference.ids.len() - 2];
             let mut text = ref_body.iter().map(|id| *id as i64).collect::<Vec<_>>();
             text.extend_from_slice(body);
-            text.push(tokens.tts_eos);
+            if ended {
+                text.push(tokens.tts_eos);
+            }
             let mut codec = vec![first(tokens.codec_bos)];
             codec.extend_from_slice(reference.codes);
             if text.len() > codec.len() {
@@ -139,7 +176,9 @@ pub fn build_prompt(
         None => {
             prompt.push(body[0], first(tokens.codec_bos));
             prompt.trailing = body[1..].to_vec();
-            prompt.trailing.push(tokens.tts_eos);
+            if ended {
+                prompt.trailing.push(tokens.tts_eos);
+            }
         }
     }
     Ok(prompt)
@@ -186,6 +225,30 @@ mod tests {
         assert_eq!(prompt.speaker_position, Some(7));
         assert_eq!(prompt.trailing.len(), IDS.len() - 3 - 5 - 1 + 1);
         assert_eq!(*prompt.trailing.last().unwrap(), t.tts_eos);
+    }
+
+    #[test]
+    fn a_streamed_prompt_holds_back_the_end() {
+        let t = tokens();
+        let ids = IDS.iter().map(|id| *id as i64).collect::<Vec<_>>();
+        let (role, body) = (&ids[..3], &ids[3..ids.len() - 5]);
+        let whole = build_prompt_parts(&t, role, body, true, Some(2055), true, None).unwrap();
+        let start =
+            build_prompt_parts(&t, role, &body[..1], false, Some(2055), true, None).unwrap();
+        // Same prompt; the text trails without an end yet.
+        assert_eq!(start.text_ids, whole.text_ids);
+        assert!(start.trailing.is_empty());
+        let ref_ids = [151644, 77091, 198, 1, 2, 3, 151645, 198];
+        let codes = vec![[7i64; GROUPS]; 20];
+        let reference = Reference {
+            ids: &ref_ids,
+            codes: &codes,
+        };
+        // 3 reference tokens under bos + 20 frames: 18 text tokens first.
+        assert_eq!(tokens_needed(Some(reference)), 18);
+        assert!(
+            build_prompt_parts(&t, role, &body[..10], false, None, true, Some(reference)).is_err()
+        );
     }
 
     #[test]

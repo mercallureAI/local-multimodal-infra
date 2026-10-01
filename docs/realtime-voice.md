@@ -21,7 +21,9 @@ server does the rest:
    prompt prefix; turns that must speak are steered with logit biases.
 4. **Qwen3-TTS** (or IndexTTS) speaks the answer clause by clause while it is
    still being generated; Qwen3-TTS streams each clause too, so a clause
-   starts playing about 50 ms after it is asked for (see `docs/qwen3-tts.md`).
+   starts playing about 50 ms after it is asked for, and it speaks a reply's
+   first clause while the chat model is still writing it (`tts_stream_text`;
+   see `docs/qwen3-tts.md`).
    The server sends the audio at real-time pace (0.3 s ahead).
    Chunks are whole sentences (only the first may end at a comma, so speech
    starts early), merged until each is about twice as long as the one before

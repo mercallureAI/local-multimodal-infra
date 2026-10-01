@@ -33,7 +33,7 @@ use local_adapter_yolo::YoloAdapter;
 use local_backend_ort::probe_runtime_execution_provider_availability;
 use local_core::{
     AdapterKind, InferenceEvent, InferenceInput, InferenceOutput, InferenceTask, ModelSpec,
-    ModelState, TaskKind,
+    ModelState, TaskKind, TextPiece,
 };
 use local_error::{InfraError, Result};
 use std::{
@@ -141,7 +141,7 @@ impl RuntimeManager {
     }
 
     pub async fn infer(&self, task: InferenceTask) -> Result<InferenceOutput> {
-        self.infer_with_events(task, None).await
+        self.infer_with_events(task, None, None).await
     }
 
     /// Like [`Self::infer`], and incremental results (chat tokens) go to
@@ -152,13 +152,27 @@ impl RuntimeManager {
         task: InferenceTask,
         events: mpsc::Sender<InferenceEvent>,
     ) -> Result<InferenceOutput> {
-        self.infer_with_events(task, Some(events)).await
+        self.infer_with_events(task, Some(events), None).await
+    }
+
+    /// Like [`Self::infer_streaming`] for a TTS task whose text is still
+    /// being written: `text` brings it piece by piece (the task's own text is
+    /// ignored). A model that streams text (Qwen3-TTS) speaks it as it comes;
+    /// any other gets the whole text once it has ended.
+    pub async fn infer_streaming_text(
+        &self,
+        task: InferenceTask,
+        text: std::sync::mpsc::Receiver<TextPiece>,
+        events: mpsc::Sender<InferenceEvent>,
+    ) -> Result<InferenceOutput> {
+        self.infer_with_events(task, Some(events), Some(text)).await
     }
 
     async fn infer_with_events(
         &self,
         task: InferenceTask,
         events: Option<mpsc::Sender<InferenceEvent>>,
+        text: Option<std::sync::mpsc::Receiver<TextPiece>>,
     ) -> Result<InferenceOutput> {
         let total_started = Instant::now();
         let spec = self.resolve_spec(&task)?;
@@ -210,7 +224,7 @@ impl RuntimeManager {
                     .is_none_or(|events| events.blocking_send(event).is_ok())
             };
             let (result, panicked) =
-                infer_model_catching_panic(loaded, &task, &model_id, &mut sink);
+                infer_model_catching_panic(loaded, &task, &model_id, &mut sink, text);
             let execution = infer_started.elapsed();
             tracing::info!(
                 request_id = %request_id,
@@ -409,8 +423,9 @@ fn infer_model_catching_panic(
     task: &InferenceTask,
     model_id: &str,
     sink: &mut dyn FnMut(InferenceEvent) -> bool,
+    text: Option<std::sync::mpsc::Receiver<TextPiece>>,
 ) -> (Result<InferenceOutput>, bool) {
-    match catch_unwind(AssertUnwindSafe(|| loaded.model.infer(task, sink))) {
+    match catch_unwind(AssertUnwindSafe(|| loaded.model.infer(task, sink, text))) {
         Ok(result) => {
             loaded.last_used = Instant::now();
             loaded.last_cache_released_at = None;
@@ -714,7 +729,40 @@ impl LoadedModel {
         &mut self,
         task: &InferenceTask,
         sink: &mut dyn FnMut(InferenceEvent) -> bool,
+        text: Option<std::sync::mpsc::Receiver<TextPiece>>,
     ) -> Result<InferenceOutput> {
+        if let Some(text) = text {
+            #[cfg(feature = "tts")]
+            if let (
+                LoadedModel::Qwen3Tts(adapter),
+                TaskKind::TtsSynthesize,
+                InferenceInput::TtsSynthesize {
+                    reference_audio, ..
+                },
+            ) = (&mut *self, task.kind, &task.input)
+            {
+                return adapter.synthesize_text_stream_with_events(
+                    task.id,
+                    text,
+                    reference_audio.as_ref(),
+                    &task.params,
+                    sink,
+                );
+            }
+            // A model that takes whole texts: wait for the end.
+            let mut whole = String::new();
+            for piece in text {
+                match piece {
+                    TextPiece::Text(piece) => whole.push_str(&piece),
+                    TextPiece::End => break,
+                }
+            }
+            let mut task = task.clone();
+            if let InferenceInput::TtsSynthesize { text, .. } = &mut task.input {
+                *text = whole;
+            }
+            return self.infer(&task, sink, None);
+        }
         #[cfg(test)]
         #[allow(irrefutable_let_patterns)] // a build without model categories
         if let LoadedModel::Test { panic_on_infer, .. } = self {
@@ -1144,7 +1192,7 @@ mod tests {
         );
 
         let (result, panicked) =
-            infer_model_catching_panic(&mut entry, &task, "test", &mut |_| true);
+            infer_model_catching_panic(&mut entry, &task, "test", &mut |_| true, None);
         assert!(panicked);
         assert!(result
             .expect_err("typed panic error")

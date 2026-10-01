@@ -40,6 +40,9 @@ metadata:
   default_reference_text: ""
   # The language Qwen3-TTS speaks (chinese, english, ...; empty: it decides).
   tts_language: chinese
+  # Speak a reply's first clause while the chat model is still writing it
+  # (Qwen3-TTS takes streamed text; other TTS models wait for the clause).
+  tts_stream_text: true
   # The emotion the bot speaks with (IndexTTS-2.5; 1.5 ignores it): happy,
   # angry, sad, afraid, disgusted, melancholic, surprised, calm, or none for
   # the reference voice's own. Strength 0 to 1; the reference makes up the

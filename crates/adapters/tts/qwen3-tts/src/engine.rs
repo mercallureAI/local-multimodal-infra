@@ -7,20 +7,21 @@ use crate::{
     artifacts::{self, Qwen3TtsArtifacts},
     audio,
     params::SynthesisParams,
-    prompt::{build_prompt, Codes, Reference, GROUPS},
+    prompt::{build_prompt, build_prompt_parts, tokens_needed, Codes, Reference, GROUPS},
     talker::{Sampling, Talker},
     vocoder::Vocoder,
     voice::{Voice, VoiceEncoder},
     Qwen3TtsProviderReport, SynthesisStats,
 };
 use local_backend_ort::{CudaSessionOptions, OrtBackend, ProviderSelection};
-use local_core::ModelSpec;
+use local_core::{ModelSpec, TextPiece};
 use local_error::{InfraError, Result};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    sync::mpsc,
     time::{Instant, SystemTime},
 };
 use tokenizers::Tokenizer;
@@ -197,7 +198,7 @@ impl Engine {
     /// stops the synthesis.
     pub(crate) fn synthesize_stream(
         &mut self,
-        text: &str,
+        text: TextSource<'_>,
         reference_audio: Option<&Path>,
         params: &BTreeMap<String, Value>,
         on_audio: &mut dyn FnMut(&[f32]) -> bool,
@@ -215,12 +216,14 @@ impl Engine {
         self.ensure_voice(reference_path, max_samples)?;
         let cached = self.cached_voice.as_ref().expect("voice just cached");
         let voice_key = format!("{:?}", cached.key);
-        let voice = &cached.voice;
+        let voice = cached.voice.clone();
         let voice_ms = voice_started.elapsed().as_millis() as u64;
 
-        let ids = self.encode(&format!(
-            "<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n"
-        ))?;
+        let role = self
+            .encode("<|im_start|>assistant\n")?
+            .into_iter()
+            .map(i64::from)
+            .collect::<Vec<_>>();
         let ref_ids = match &params.reference_text {
             Some(reference) => {
                 Some(self.encode(&format!("<|im_start|>assistant\n{reference}<|im_end|>\n"))?)
@@ -232,30 +235,48 @@ impl Engine {
             ids,
             codes: &voice.codes,
         });
-        let prompt = build_prompt(&config.tokens, &ids, language, true, reference)?;
-        let max_frames = params
-            .max_frames
-            .min(self.talker.capacity().saturating_sub(prompt.len() + 1));
-        let speaker = voice.speaker.clone();
-        let icl_codes = reference.map(|reference| reference.codes.to_vec());
 
-        let mut stats = SynthesisStats {
-            prompt_positions: prompt.len(),
-            voice_ms,
-            ..SynthesisStats::default()
-        };
         // The vocoder continues the reference audio in ICL mode, as upstream
         // decodes reference and generated codes together (primed once per
-        // voice).
+        // voice). Done before the text is waited for.
         let vocoder_started = Instant::now();
-        match &icl_codes {
-            Some(codes) => self.vocoder.prime(&voice_key, codes)?,
+        match reference {
+            Some(reference) => self.vocoder.prime(&voice_key, reference.codes)?,
             None => self.vocoder.reset()?,
         }
         let chunk = self.vocoder.chunk();
         let mut vocoder_time = vocoder_started.elapsed();
         let mut talker_time = std::time::Duration::ZERO;
 
+        // The text's tokens, as far as they are known (all at once, or as a
+        // stream writes them).
+        let mut feed = TextFeed::new(text, &self.tokenizer, &role);
+        feed.wait_for(tokens_needed(reference))?;
+        let text_at = Instant::now();
+        let known = feed.committed().len();
+        let prompt = build_prompt_parts(
+            &config.tokens,
+            &role,
+            feed.committed(),
+            feed.ended(),
+            language,
+            true,
+            reference,
+        )?;
+        // Text still to feed, one token per generated frame: what the prompt
+        // left over, then whatever the stream adds, then `tts_eos`.
+        let mut queue = prompt.trailing.clone();
+        let mut fed = known;
+        let mut eos_fed = feed.ended();
+        let max_frames = params
+            .max_frames
+            .min(self.talker.capacity().saturating_sub(prompt.len() + 1));
+
+        let mut stats = SynthesisStats {
+            prompt_positions: prompt.len(),
+            voice_ms,
+            ..SynthesisStats::default()
+        };
         let mut rng = Rng::new(params.seed);
         let mut seen = vec![0.0f32; config.talker_vocab_size];
         let mut noise = vec![0.0f32; GROUPS * config.top_k];
@@ -283,9 +304,9 @@ impl Engine {
 
         let talker_started = Instant::now();
         fill_noise(&mut noise);
-        let mut codes = self
-            .talker
-            .prefill(&prompt, Some(&speaker), &seen, &noise, sampling(0))?;
+        let mut codes =
+            self.talker
+                .prefill(&prompt, Some(&voice.speaker), &seen, &noise, sampling(0))?;
         talker_time += talker_started.elapsed();
         for frame in 0..max_frames {
             if codes[0] == eos {
@@ -300,6 +321,7 @@ impl Engine {
                 pending.clear();
                 if first_chunk {
                     stats.first_audio_ms = started.elapsed().as_millis() as u64;
+                    stats.first_audio_after_text_ms = text_at.elapsed().as_millis() as u64;
                     first_chunk = false;
                 }
                 stats.samples += samples.len();
@@ -311,9 +333,25 @@ impl Engine {
             if frame + 1 == max_frames {
                 break;
             }
+            // The next frame's text token; a stream that is behind is
+            // waited for (the frames so far do not depend on it).
+            let waited = Instant::now();
+            loop {
+                feed.poll(frame >= queue.len() && !eos_fed)?;
+                queue.extend_from_slice(&feed.committed()[fed..]);
+                fed = feed.committed().len();
+                if feed.ended() && !eos_fed {
+                    queue.push(config.tokens.tts_eos);
+                    eos_fed = true;
+                }
+                if frame < queue.len() || eos_fed {
+                    break;
+                }
+            }
+            stats.text_wait_ms += waited.elapsed().as_millis() as u64;
             let step_started = Instant::now();
             seen[codes[0] as usize] = 1.0;
-            let text_id = prompt.trailing.get(frame).copied().unwrap_or(pad);
+            let text_id = queue.get(frame).copied().unwrap_or(pad);
             fill_noise(&mut noise);
             codes = self
                 .talker
@@ -326,6 +364,7 @@ impl Engine {
             vocoder_time += decode_started.elapsed();
             if first_chunk {
                 stats.first_audio_ms = started.elapsed().as_millis() as u64;
+                stats.first_audio_after_text_ms = text_at.elapsed().as_millis() as u64;
             }
             stats.samples += samples.len();
             stats.stopped = !on_audio(&samples);
@@ -333,6 +372,7 @@ impl Engine {
         stats.talker_ms = talker_time.as_millis() as u64;
         stats.vocoder_ms = vocoder_time.as_millis() as u64;
         stats.total_ms = started.elapsed().as_millis() as u64;
+        stats.text_tokens = fed;
         Ok(stats)
     }
 
@@ -370,6 +410,126 @@ impl Engine {
         );
         self.cached_voice = Some(CachedVoice { key, voice });
         Ok(())
+    }
+}
+
+/// Where a synthesis gets its text.
+pub(crate) enum TextSource<'a> {
+    Whole(&'a str),
+    /// Written while it is spoken.
+    Stream(&'a mpsc::Receiver<TextPiece>),
+}
+
+/// Tokens of the trailing text a stream may still change: BPE can merge the
+/// last tokens with text to come, and fed tokens cannot be taken back.
+const HELD_BACK_TOKENS: usize = 2;
+
+/// The text's tokens, committed as they become final.
+struct TextFeed<'a> {
+    source: TextSource<'a>,
+    tokenizer: &'a Tokenizer,
+    role_len: usize,
+    text: String,
+    ended: bool,
+    committed: Vec<i64>,
+}
+
+impl<'a> TextFeed<'a> {
+    fn new(source: TextSource<'a>, tokenizer: &'a Tokenizer, role: &[i64]) -> Self {
+        let mut feed = Self {
+            source,
+            tokenizer,
+            role_len: role.len(),
+            text: String::new(),
+            ended: false,
+            committed: Vec::new(),
+        };
+        if let TextSource::Whole(text) = feed.source {
+            feed.text = text.to_string();
+            feed.ended = true;
+            feed.commit();
+        }
+        feed
+    }
+
+    fn committed(&self) -> &[i64] {
+        &self.committed
+    }
+
+    fn ended(&self) -> bool {
+        self.ended
+    }
+
+    /// Waits until `count` tokens are final or the text has ended.
+    fn wait_for(&mut self, count: usize) -> Result<()> {
+        while self.committed.len() < count && !self.ended {
+            self.poll(true)?;
+        }
+        Ok(())
+    }
+
+    /// Takes what the stream has written (waiting for a piece if `block`).
+    fn poll(&mut self, block: bool) -> Result<()> {
+        let TextSource::Stream(pieces) = self.source else {
+            return Ok(());
+        };
+        if self.ended {
+            return Ok(());
+        }
+        if block {
+            match pieces.recv() {
+                Ok(piece) => self.take(piece),
+                Err(_) => self.ended = true,
+            }
+        }
+        while !self.ended {
+            match pieces.try_recv() {
+                Ok(piece) => self.take(piece),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => self.ended = true,
+            }
+        }
+        self.commit();
+        Ok(())
+    }
+
+    fn take(&mut self, piece: TextPiece) {
+        match piece {
+            TextPiece::Text(text) => self.text.push_str(&text),
+            TextPiece::End => self.ended = true,
+        }
+    }
+
+    fn commit(&mut self) {
+        // Tokenized as in the prompt template, so the text's first token
+        // matches a whole-text request.
+        let Ok(encoding) = self
+            .tokenizer
+            .encode(format!("<|im_start|>assistant\n{}", self.text), false)
+        else {
+            return;
+        };
+        let ids = &encoding.get_ids()[self.role_len.min(encoding.get_ids().len())..];
+        let stable = if self.ended {
+            ids.len()
+        } else {
+            ids.len().saturating_sub(HELD_BACK_TOKENS)
+        };
+        let fed = self.committed.len();
+        if stable > fed {
+            if ids[..fed]
+                .iter()
+                .zip(&self.committed)
+                .any(|(a, b)| i64::from(*a) != *b)
+            {
+                tracing::debug!(
+                    text = self.text,
+                    "Qwen3-TTS text tokenized differently once more of it came"
+                );
+            }
+            self.committed
+                .extend(ids[fed..stable].iter().map(|id| i64::from(*id)));
+        }
     }
 }
 

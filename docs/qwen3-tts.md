@@ -11,12 +11,13 @@ for it. Adapter `qwen3_tts` (`crates/adapters/tts/qwen3-tts`), spec
 
 | | [sivasub987/…-ONNX-INT8](https://huggingface.co/sivasub987/Qwen3-TTS-0.6B-ONNX-INT8) | [wavekat/…-Base-ONNX](https://huggingface.co/wavekat/Qwen3-TTS-0.6B-Base-ONNX) | this export |
 | --- | --- | --- | --- |
-| precision | dynamic INT8 (`MatMulInteger`/`ConvInteger`) | FP32 / INT4 RTN | FP16 (FP32 where needed) |
+| precision | dynamic INT8 (`MatMulInteger`/`ConvInteger`) | FP32 / INT4 RTN | INT8 weights, FP16 activations (FP32 where needed) |
 | attention / KV | per-step KV concat | per-step KV concat, copied every step | `GroupQueryAttention`, KV shared in place |
 | code predictor | one run per codebook | 15 runs per frame | 15 steps unrolled in the frame graph |
 | sampling | host | host | in graph (Gumbel-max) |
 | vocoder | whole utterance | whole utterance (reference prepended) | exact streaming, 4-frame chunks |
-| reported speed | none | T4 INT4 RTF 0.8–1.06 | 4090: RTF 0.12, first audio 50 ms |
+| text input | whole | whole | whole or streamed (spoken as it is written) |
+| reported speed | none | T4 INT4 RTF 0.8–1.06 | 4090: RTF 0.09, first audio 42 ms |
 
 Neither streams audio, and both spend most of a frame on per-run overhead.
 
@@ -54,6 +55,50 @@ vocoder 47–50 dB SNR against a whole-utterance FP32 decode (the FP16 floor is
 transcribes every output exactly; x-vector similarity to the reference 0.99
 (PyTorch bf16: 0.985–0.988).
 
+## INT8 weights
+
+`--talker-weights int8` (the default) quantizes the talker's and the code
+predictor's matmuls to INT8 weight-only `MatMulNBits` (symmetric RTN, block
+128). `scripts/local/qwen3_tts_eval.py` (14 Chinese/English sentences x 2
+seeds x x-vector/ICL; SenseVoice CER, ECAPA similarity, DNSMOS):
+
+| talker weights | CER x-vec / ICL | similarity | DNSMOS ovrl / sig | ms/frame (Rust, 4090) | talker.onnx |
+| --- | --- | --- | --- | --- | --- |
+| FP16 | 0.9% / 2.1% | 0.988 / 0.987 | 3.23 / 3.48 | 7.7 | 1.50 GB |
+| INT8 code predictor only | 1.4% / 1.1% | 0.987 / 0.989 | 3.29 / 3.53 | (Python 8.1 vs 9.9) | 1.32 GB |
+| **INT8 (default)** | 0.9% / 2.5% | 0.988 / 0.988 | 3.29 / 3.53 | **5.6** | **0.95 GB** |
+| INT4 talker + INT8 code predictor | 1.4% / 2.2% | 0.986 / 0.988 | 3.25 / 3.52 | 5.4 | 0.72 GB |
+| INT8 talker + INT4 code predictor | 2.8% / 1.5% | 0.986 / 0.988 | 3.28 / 3.54 | (Python 7.8) | 0.86 GB |
+| INT4 everywhere | 0.9% / 1.6% | 0.985 / 0.986 | 3.24 / 3.52 | (Python 7.0) | 0.67 GB |
+
+INT8 is within the noise of FP16 (28 samples per cell). An INT4 code predictor
+changes greedy codes from the first frame, lowers similarity a little and
+produced the only misread ("哈哈" -> "哼哼"): the code predictor stays INT8.
+On an RTX 3060 the decode is bandwidth-bound, so INT8 should gain more than
+on the 4090 (1.6 instead of 3.3 GB read per frame).
+
+## Streamed text
+
+`synthesize_text_stream` / `RuntimeManager::infer_streaming_text` take the
+text as it is written (`TextPiece`s). Speech starts once the first tokens are
+there; the rest is fed one token per 80 ms frame, which is how the official
+streaming mode feeds text, and a frame whose token has not come yet waits
+(the frames before do not depend on it), so the result is the whole-text
+result (checked: identical up to the GPU's run-to-run noise, 5e-4). The last
+2 tokens of unfinished text are held back: BPE may still merge them with what
+comes (with 1 held back, 13 of 19 test sentences would have fed a token the
+final tokenization does not have; with 2, 3 of 283 tokens differ).
+In-context cloning puts the text under the reference codes, so it starts only
+once the text covers them (about 70 tokens for a 7 s reference): no gain there.
+
+The cascade speaks a reply's first clause while the chat model writes it
+(`tts_stream_text`, on by default); later clauses are ready before the first
+has played. The first audio chunk needs about 4 text tokens (plus 2 held
+back), so the gain is for first clauses longer than that: on the 4090
+(Qwen3-4B INT4 writes ~8 ms per token) a 9-token first clause starts speaking
+30–50 ms sooner; on a 3060 (~25 ms per token) it should be 100–150 ms. A
+first clause that is a bare "好的，" was already spoken at once.
+
 ## Runtime
 
 The adapter owns one thread: ORT's CUDA EP keeps CUDA graphs per thread, and
@@ -78,9 +123,9 @@ Streaming: `InferenceEvent::AudioChunk` per vocoder chunk
 
 | | x-vector | ICL (6.8 s reference, 96-position prompt) |
 | --- | --- | --- |
-| talker per frame | 7–10 ms | 7–10 ms |
-| first audio | 50–65 ms | 47–65 ms |
-| RTF | 0.12–0.16 | 0.12–0.16 |
+| talker per frame (FP16 / INT8) | 7.7 / 5.6 ms | 7.7 / 5.6 ms |
+| first audio | 40–50 ms | 41–50 ms |
+| RTF (FP16 / INT8) | 0.12 / 0.09 | 0.12 / 0.09 |
 
 Realtime cascade (`scripts.local.realtime_e2e`, everything on one GPU):
 first audio 0.93–1.05 s after the speaker's audio ends, of which 0.6 s is the
@@ -88,10 +133,11 @@ VAD's end-of-speech silence; server side 0.3–0.5 s (ASR ~160 ms, first clause
 20–150 ms, TTS 50–150 ms). PyTorch (`qwen-tts`, bf16, HF `generate`): RTF
 2.2–3.1 on the same GPU.
 
-RTX 3060 12 GB (not measured): a decode frame reads the talker's 0.9 GB and
-the code predictor's 157 MB 15 times, 3.3 GB per frame, so about 9 ms of
-360 GB/s bandwidth plus launch overhead: expect 13–16 ms per frame (RTF
-about 0.2) and first audio around 100 ms. VRAM: about 2 GB weights plus KV.
+RTX 3060 12 GB (not measured): an FP16 decode frame reads the talker's 0.9 GB
+and the code predictor's 157 MB 15 times, 3.3 GB per frame (INT8: 1.6 GB), so
+about 9 (INT8: 4.5) ms of 360 GB/s bandwidth plus launch overhead: expect
+roughly 9–12 ms per frame with INT8 (RTF about 0.15) and first audio around
+80–100 ms. VRAM: about 1.4 GB weights (INT8) plus KV.
 
 ## Export and check
 
@@ -116,10 +162,12 @@ python -m scripts.local.realtime_e2e --audio-dir <r00.wav ...> --model-dir workd
 ## Open
 
 * Measure on the RTX 3060 server (Linux: lower launch overhead than WDDM).
-* The code predictor dominates bandwidth (2.4 GB per frame): INT8 weight-only
-  `MatMulNBits` for it would halve that; needs an A/B on quality.
 * The vocoder graph keeps shape arithmetic on the CPU, so it cannot replay as
   a CUDA graph; a static-shape export (fixed 4 frames) would fold it away.
 * Publish the package (e.g. a `ModaLeap/qwen3-tts-0.6b-onnx` repo) and pin it
   in the spec like the IndexTTS packages.
 * Long texts are one prompt (up to `max_context`); the cascade sends clauses.
+* Audio mode (client-written replies) still speaks whole clauses: its
+  `response.done` accounting needs each clause's text when it is queued.
+* The chat model and Qwen3-TTS share a tokenizer: feeding the chat model's
+  tokens directly would need no held-back tokens.

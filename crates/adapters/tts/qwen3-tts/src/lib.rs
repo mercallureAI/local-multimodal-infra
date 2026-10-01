@@ -27,7 +27,7 @@ pub use voice::Voice;
 
 use engine::Engine;
 use local_backend_ort::SessionProviderReport;
-use local_core::{FileRef, InferenceEvent, InferenceOutput, ModelSpec};
+use local_core::{FileRef, InferenceEvent, InferenceOutput, ModelSpec, TextPiece};
 use local_error::{InfraError, Result};
 use serde_json::Value;
 use std::{collections::BTreeMap, env, fs, path::PathBuf, sync::mpsc, thread::JoinHandle};
@@ -57,11 +57,22 @@ pub struct SynthesisStats {
     pub total_ms: u64,
     /// The consumer asked to stop before the end.
     pub stopped: bool,
+    /// From the moment the prompt's text was there (the first token of a
+    /// stream) to the first audio.
+    pub first_audio_after_text_ms: u64,
+    /// Time spent waiting for a stream's text mid-speech.
+    pub text_wait_ms: u64,
+    pub text_tokens: usize,
+}
+
+enum JobText {
+    Whole(String),
+    Stream(mpsc::Receiver<TextPiece>),
 }
 
 enum Job {
     Synthesize {
-        text: String,
+        text: JobText,
         reference: Option<PathBuf>,
         params: BTreeMap<String, Value>,
         chunks: mpsc::SyncSender<Chunk>,
@@ -120,8 +131,12 @@ impl Qwen3TtsAdapter {
                     chunks,
                 }) = jobs_rx.recv()
                 {
+                    let source = match &text {
+                        JobText::Whole(text) => engine::TextSource::Whole(text),
+                        JobText::Stream(pieces) => engine::TextSource::Stream(pieces),
+                    };
                     let result = engine.synthesize_stream(
-                        &text,
+                        source,
                         reference.as_deref(),
                         &params,
                         &mut |samples| chunks.send(Chunk::Audio(samples.to_vec())).is_ok(),
@@ -176,9 +191,49 @@ impl Qwen3TtsAdapter {
         params: &BTreeMap<String, Value>,
         sink: &mut dyn FnMut(InferenceEvent) -> bool,
     ) -> Result<InferenceOutput> {
+        self.synthesize_job_with_events(
+            request_id,
+            JobText::Whole(text.to_string()),
+            reference_audio,
+            params,
+            sink,
+        )
+    }
+
+    /// Like [`Self::synthesize_with_events`] for text still being written:
+    /// speech starts once its first tokens are there (in-context cloning
+    /// needs as many as the reference audio's frames, minus its transcript)
+    /// and the rest is fed as it comes, one token per 80 ms frame, the way
+    /// the official streaming mode feeds text; generation waits for a
+    /// stream that falls behind.
+    pub fn synthesize_text_stream_with_events(
+        &mut self,
+        request_id: Uuid,
+        text: mpsc::Receiver<TextPiece>,
+        reference_audio: Option<&FileRef>,
+        params: &BTreeMap<String, Value>,
+        sink: &mut dyn FnMut(InferenceEvent) -> bool,
+    ) -> Result<InferenceOutput> {
+        self.synthesize_job_with_events(
+            request_id,
+            JobText::Stream(text),
+            reference_audio,
+            params,
+            sink,
+        )
+    }
+
+    fn synthesize_job_with_events(
+        &mut self,
+        request_id: Uuid,
+        text: JobText,
+        reference_audio: Option<&FileRef>,
+        params: &BTreeMap<String, Value>,
+        sink: &mut dyn FnMut(InferenceEvent) -> bool,
+    ) -> Result<InferenceOutput> {
         let sample_rate = self.sample_rate;
         let mut samples = Vec::new();
-        let stats = self.synthesize_stream(text, reference_audio, params, &mut |chunk| {
+        let stats = self.synthesize_job(text, reference_audio, params, &mut |chunk| {
             samples.extend_from_slice(chunk);
             sink(InferenceEvent::AudioChunk {
                 sample_rate,
@@ -194,12 +249,14 @@ impl Qwen3TtsAdapter {
         tracing::info!(
             request_id = %request_id,
             model_id = self.model_id,
-            chars = text.chars().count(),
+            text_tokens = stats.text_tokens,
             prompt = stats.prompt_positions,
             frames = stats.frames,
             audio_ms = stats.samples as u64 * 1000 / sample_rate as u64,
             voice_ms = stats.voice_ms,
             first_audio_ms = stats.first_audio_ms,
+            first_audio_after_text_ms = stats.first_audio_after_text_ms,
+            text_wait_ms = stats.text_wait_ms,
             talker_ms = stats.talker_ms,
             vocoder_ms = stats.vocoder_ms,
             total_ms = stats.total_ms,
@@ -221,13 +278,40 @@ impl Qwen3TtsAdapter {
         params: &BTreeMap<String, Value>,
         on_audio: &mut dyn FnMut(&[f32]) -> bool,
     ) -> Result<SynthesisStats> {
+        self.synthesize_job(
+            JobText::Whole(text.to_string()),
+            reference_audio,
+            params,
+            on_audio,
+        )
+    }
+
+    /// [`Self::synthesize_stream`] for text still being written (see
+    /// [`Self::synthesize_text_stream_with_events`]).
+    pub fn synthesize_text_stream(
+        &mut self,
+        text: mpsc::Receiver<TextPiece>,
+        reference_audio: Option<&FileRef>,
+        params: &BTreeMap<String, Value>,
+        on_audio: &mut dyn FnMut(&[f32]) -> bool,
+    ) -> Result<SynthesisStats> {
+        self.synthesize_job(JobText::Stream(text), reference_audio, params, on_audio)
+    }
+
+    fn synthesize_job(
+        &mut self,
+        text: JobText,
+        reference_audio: Option<&FileRef>,
+        params: &BTreeMap<String, Value>,
+        on_audio: &mut dyn FnMut(&[f32]) -> bool,
+    ) -> Result<SynthesisStats> {
         let reference = reference_audio.map(local_files::local_path).transpose()?;
         let (chunks_tx, chunks) = mpsc::sync_channel(16);
         self.jobs
             .as_ref()
             .ok_or_else(|| InfraError::Adapter("the Qwen3-TTS thread is gone".to_string()))?
             .send(Job::Synthesize {
-                text: text.to_string(),
+                text,
                 reference,
                 params: params.clone(),
                 chunks: chunks_tx,

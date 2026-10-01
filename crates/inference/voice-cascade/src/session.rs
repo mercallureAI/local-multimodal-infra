@@ -21,7 +21,7 @@ use base64::Engine;
 use local_adapter_silero_vad::{SileroVad, VadEvent, VadIterator, WINDOW};
 use local_core::{
     ArtifactKind, ChatMessage, ChatOptions, ChatToolCall, FileRef, InferenceEvent, InferenceInput,
-    InferenceOutput, InferenceTask, ModelSpec, TaskKind,
+    InferenceOutput, InferenceTask, ModelSpec, TaskKind, TextPiece,
 };
 use local_error::{InfraError, Result};
 use local_runtime::RuntimeManager;
@@ -125,6 +125,10 @@ pub struct CascadeModels {
     /// The language TTS speaks (`tts_language`; the model's own default
     /// when unset).
     pub tts_language: Option<String>,
+    /// Speak the first clause of a reply while the chat model is still
+    /// writing it (`tts_stream_text`, on unless false; for TTS models that
+    /// take streamed text, Qwen3-TTS).
+    pub tts_stream_text: bool,
     /// The spec's emotion settings (`tts_emotion`, `tts_emotion_strength`).
     pub tts_emotion: BTreeMap<String, Value>,
     /// Where a conversation keeps its short-lived audio files.
@@ -182,6 +186,11 @@ impl CascadeModels {
                 .and_then(Value::as_str)
                 .filter(|language| !language.is_empty())
                 .map(str::to_string),
+            tts_stream_text: spec
+                .metadata
+                .get("tts_stream_text")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
             tts_emotion: {
                 let emotion: BTreeMap<String, Value> = spec
                     .metadata
@@ -372,6 +381,7 @@ async fn converse(
         asr_model: config.asr_model.clone().unwrap_or(models.asr_model),
         tts_model: config.tts_model.clone().unwrap_or(models.tts_model),
         tts_params,
+        tts_stream_text: models.tts_stream_text,
         ref_audio,
         temp_dir: models.temp_dir,
         tool_filler: config.tool_filler.clone().unwrap_or_default(),
@@ -920,6 +930,9 @@ async fn reply(shared: Arc<Shared>, steer: Steer, utterance: Option<(u64, String
     let mut splitter = ClauseSplitter::default();
     let mut spoken = String::new();
     let mut cut = false;
+    // The reply's first clause is spoken as it is written.
+    let mut live: Option<LiveClause> = None;
+    let mut first = shared.tts_stream_text;
     while let Some(event) = events.recv().await {
         if shared.current_epoch() != epoch {
             cut = true;
@@ -927,9 +940,20 @@ async fn reply(shared: Arc<Shared>, steer: Steer, utterance: Option<(u64, String
         }
         if let InferenceEvent::ChatDelta { content } = event {
             for clause in splitter.feed(&content) {
-                if shared.speak(epoch, &clause, None) {
+                let said = match live.take() {
+                    Some(live) => shared.finish_live(live, &clause),
+                    None => shared.speak(epoch, &clause, None),
+                };
+                if said {
                     spoken.push_str(&clause);
                 }
+                first = false;
+            }
+            if first && live.is_none() && !speakable(splitter.partial()).is_empty() {
+                live = shared.speak_live(epoch);
+            }
+            if let Some(live) = &mut live {
+                live.write(splitter.partial());
             }
         }
     }
@@ -962,11 +986,17 @@ async fn reply(shared: Arc<Shared>, steer: Steer, utterance: Option<(u64, String
     };
     if completion.is_some() {
         if let Some(rest) = splitter.flush() {
-            if shared.speak(epoch, &rest, None) {
+            let said = match live.take() {
+                Some(live) => shared.finish_live(live, &rest),
+                None => shared.speak(epoch, &rest, None),
+            };
+            if said {
                 spoken.push_str(&rest);
             }
         }
     }
+    // A live clause left (cut, or nothing came after it) ends here.
+    drop(live);
     let assistant = |content: String, tool_calls: Vec<ChatToolCall>| ChatMessage {
         role: "assistant".to_string(),
         content: Some(content),
@@ -1033,6 +1063,8 @@ struct Shared {
     asr_model: String,
     tts_model: String,
     tts_params: BTreeMap<String, Value>,
+    /// See [`CascadeModels::tts_stream_text`].
+    tts_stream_text: bool,
     ref_audio: PathBuf,
     temp_dir: PathBuf,
     tool_filler: String,
@@ -1144,6 +1176,41 @@ impl Shared {
         }
     }
 
+    /// Starts speaking a clause that is still being written (cascade): TTS
+    /// gets its text through the returned [`LiveClause`].
+    fn speak_live(&self, epoch: u64) -> Option<LiveClause> {
+        if epoch != self.current_epoch() {
+            return None;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.clauses.fetch_add(1, Ordering::SeqCst);
+        let _ = self.speech.send(Clause {
+            epoch,
+            text: String::new(),
+            response: None,
+            stream: Some(rx),
+        });
+        Some(LiveClause {
+            text: tx,
+            sent: String::new(),
+        })
+    }
+
+    /// Ends a live clause with its whole text; false when nothing of it is
+    /// to be said.
+    fn finish_live(&self, mut live: LiveClause, clause: &str) -> bool {
+        live.write(clause);
+        let _ = live.text.send(TextPiece::End);
+        if live.sent.is_empty() {
+            return false;
+        }
+        self.emit(ServerEvent::ResponseText {
+            text: live.sent.clone(),
+            response_id: None,
+        });
+        true
+    }
+
     /// Queues `clause` to be spoken (as part of `response`, in audio mode);
     /// false when it is not (nothing to say, or cut).
     fn speak(&self, epoch: u64, clause: &str, response: Option<&str>) -> bool {
@@ -1160,6 +1227,7 @@ impl Shared {
             epoch,
             text,
             response: response.map(str::to_string),
+            stream: None,
         });
         true
     }
@@ -1410,9 +1478,16 @@ impl Shared {
     /// Speaks `text`: its audio goes to `on_audio` (at `OUTPUT_RATE`) chunk
     /// by chunk as a streaming TTS model makes it, else all at once.
     /// `on_audio` returning false stops the synthesis.
-    async fn synthesize(
+    async fn synthesize(&self, text: &str, on_audio: impl FnMut(Vec<f32>) -> bool) -> Result<()> {
+        self.synthesize_text(text, None, on_audio).await
+    }
+
+    /// [`Self::synthesize`] for `text`, or for the text `stream` brings as
+    /// it is written.
+    async fn synthesize_text(
         &self,
         text: &str,
+        stream: Option<std::sync::mpsc::Receiver<TextPiece>>,
         mut on_audio: impl FnMut(Vec<f32>) -> bool,
     ) -> Result<()> {
         let mut task = InferenceTask::new(
@@ -1429,9 +1504,15 @@ impl Shared {
         // In a task of its own: the audio file goes even when the caller is
         // aborted.
         let inference = tokio::spawn(async move {
-            let InferenceOutput::TtsAudio { audio } =
-                runtime.infer_streaming(task, events_tx).await?
-            else {
+            let output = match stream {
+                Some(stream) => {
+                    runtime
+                        .infer_streaming_text(task, stream, events_tx)
+                        .await?
+                }
+                None => runtime.infer_streaming(task, events_tx).await?,
+            };
+            let InferenceOutput::TtsAudio { audio } = output else {
                 return Err(InfraError::Runtime("TTS returned no audio".to_string()));
             };
             Ok(TempFile(audio.path.ok_or_else(|| {
@@ -1500,9 +1581,35 @@ async fn recognize_utterances(
 struct Clause {
     /// The conversation's epoch when it was asked for: a cut since drops it.
     epoch: u64,
+    /// Empty for a clause whose text is `stream`ed.
     text: String,
     /// Audio: the response it belongs to.
     response: Option<String>,
+    /// The clause's text as the chat model writes it (see [`LiveClause`]).
+    stream: Option<std::sync::mpsc::Receiver<TextPiece>>,
+}
+
+/// A clause spoken while it is still being written: the first of a reply,
+/// so speech starts after its first words rather than after the clause.
+struct LiveClause {
+    text: std::sync::mpsc::Sender<TextPiece>,
+    /// What TTS has been given (speakable text).
+    sent: String,
+}
+
+impl LiveClause {
+    /// Gives TTS what `partial` (the clause so far) adds.
+    fn write(&mut self, partial: &str) {
+        let speakable = speakable(partial);
+        // Only extensions: a later character can change how earlier text
+        // reads (a URL, markup), and what was sent stays sent.
+        if speakable.len() > self.sent.len() && speakable.starts_with(&self.sent) {
+            let _ = self
+                .text
+                .send(TextPiece::Text(speakable[self.sent.len()..].to_string()));
+            self.sent = speakable;
+        }
+    }
 }
 
 async fn synthesize_clauses(shared: Arc<Shared>, mut clauses: mpsc::UnboundedReceiver<Clause>) {
@@ -1510,6 +1617,7 @@ async fn synthesize_clauses(shared: Arc<Shared>, mut clauses: mpsc::UnboundedRec
         epoch,
         text,
         response,
+        stream,
     }) = clauses.recv().await
     {
         let mut queued = false;
@@ -1518,7 +1626,7 @@ async fn synthesize_clauses(shared: Arc<Shared>, mut clauses: mpsc::UnboundedRec
             // segment grows with them.
             let segment = response.clone().map(|response| (response, text.clone()));
             let result = shared
-                .synthesize(&text, |samples| {
+                .synthesize_text(&text, stream, |samples| {
                     let current = || epoch == shared.current_epoch();
                     let pushed = if queued {
                         shared
@@ -2010,6 +2118,7 @@ mod tests {
             asr_model: String::new(),
             tts_model: String::new(),
             tts_params: BTreeMap::new(),
+            tts_stream_text: false,
             ref_audio: PathBuf::new(),
             temp_dir: PathBuf::new(),
             tool_filler: String::new(),

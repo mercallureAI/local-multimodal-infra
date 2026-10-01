@@ -223,6 +223,12 @@ impl ClauseSplitter {
         clauses
     }
 
+    /// The text after the last clause handed out (what the next one starts
+    /// with).
+    pub fn partial(&self) -> &str {
+        &self.text
+    }
+
     pub fn flush(&mut self) -> Option<String> {
         let rest = std::mem::take(&mut self.text);
         let rest = rest.trim();

@@ -765,6 +765,15 @@ pub struct ChatTimings {
     pub decode_ms: u64,
 }
 
+/// Text handed to a TTS model while it is still being written (a chat
+/// model's reply, say): pieces in order, then `End`. A dropped sender ends
+/// the text too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextPiece {
+    Text(String),
+    End,
+}
+
 /// Incremental results of a streaming inference, in order; the last event is
 /// `output` (the complete result) or `error`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
