@@ -34,6 +34,15 @@ const DEFAULT_MAX_CONTEXT: usize = 2048;
 /// Frames per vocoder run (and before the first audio) unless the metadata
 /// sets `vocoder_chunk_frames`: 4 frames = 320 ms of audio.
 const DEFAULT_VOCODER_CHUNK: usize = 4;
+/// Speech takes 2 to 5 frames per text token (most of a 2-token clause's are
+/// its pause), about 3 per Chinese character and up to 4 per spelled-out
+/// letter ("HTTPS" is 1 token): once all the text is in, frames past this
+/// many per token, or per letter or character (plus [`RUNAWAY_SLACK_FRAMES`])
+/// mean the model lost its way (it repeats, or never ends), and synthesis
+/// stops.
+const MAX_FRAMES_PER_TEXT_TOKEN: usize = 6;
+const MAX_FRAMES_PER_LETTER: usize = 5;
+const RUNAWAY_SLACK_FRAMES: usize = 25;
 
 #[derive(Debug)]
 struct CachedVoice {
@@ -344,9 +353,21 @@ impl Engine {
             self.talker
                 .prefill(&prompt, Some(&voice.speaker), &seen, &noise, sampling(0))?;
         talker_time += talker_started.elapsed();
+        let mut runaway_limit = None;
         for frame in 0..max_frames {
             if codes[0] == eos {
                 break;
+            }
+            if eos_fed {
+                let limit = *runaway_limit.get_or_insert_with(|| {
+                    let letters = feed.text.chars().filter(|c| c.is_alphanumeric()).count();
+                    (fed * MAX_FRAMES_PER_TEXT_TOKEN).max(letters * MAX_FRAMES_PER_LETTER)
+                        + RUNAWAY_SLACK_FRAMES
+                });
+                if frame >= limit {
+                    stats.runaway = Some(feed.text.clone());
+                    break;
+                }
             }
             stats.frames += 1;
             pending.push(codes);
@@ -589,11 +610,21 @@ impl<'a> TextFeed<'a> {
     }
 
     fn commit(&mut self) {
+        // Units written out (`units`): of unfinished text, only up to a word
+        // that may still be growing (ASCII without a space), so what is
+        // committed reads the same once the rest comes.
+        let text = if self.ended {
+            self.text.as_str()
+        } else {
+            self.text
+                .trim_end_matches(|c: char| c.is_ascii() && !c.is_ascii_whitespace())
+        };
+        let text = crate::units::read_units(text);
         // Tokenized as in the prompt template, so the text's first token
         // matches a whole-text request.
         let Ok(encoding) = self
             .tokenizer
-            .encode(format!("<|im_start|>assistant\n{}", self.text), false)
+            .encode(format!("<|im_start|>assistant\n{text}"), false)
         else {
             return;
         };

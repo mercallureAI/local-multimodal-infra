@@ -91,6 +91,13 @@ final tokenization does not have; with 2, 3 of 283 tokens differ).
 In-context cloning puts the text under the reference codes, so it starts only
 once the text covers them (about 70 tokens for a 7 s reference): no gain there.
 
+Units the model misreads after a number in Chinese text (35ms as 毫米, 5L as
+毫升, 20kHz and 1Gbps as noise, 256MB as MG) are written out before the text
+is tokenized (`src/units.rs`: 毫秒, 升, 千赫兹, G比特每秒, 兆字节...); it decides by
+the text before the number, and of a stream only text up to a word that may
+still grow is read, so streamed and whole text read the same. Units it reads
+well (km, ℃, %, V) are left, and a bare A or B (3A games, 7B models).
+
 The cascade speaks a reply's first clause while the chat model writes it
 (audio mode: a response's first clause while the client streams it;
 `tts_stream_text`, on by default, a session may turn it off; only with a TTS

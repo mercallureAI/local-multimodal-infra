@@ -17,6 +17,7 @@ mod engine;
 mod params;
 mod prompt;
 mod talker;
+mod units;
 mod vocoder;
 mod voice;
 
@@ -55,7 +56,7 @@ pub struct Qwen3TtsProviderReport {
 }
 
 /// What one synthesis took.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct SynthesisStats {
     pub prompt_positions: usize,
     pub frames: usize,
@@ -73,6 +74,9 @@ pub struct SynthesisStats {
     /// Time spent waiting for a stream's text mid-speech.
     pub text_wait_ms: u64,
     pub text_tokens: usize,
+    /// Cut short, with its text: far more speech than the text needs (see
+    /// `MAX_FRAMES_PER_TEXT_TOKEN`).
+    pub runaway: Option<String>,
 }
 
 enum JobText {
@@ -296,6 +300,15 @@ impl Qwen3TtsAdapter {
             stopped = stats.stopped,
             "Qwen3-TTS synthesized"
         );
+        if let Some(text) = &stats.runaway {
+            tracing::warn!(
+                request_id = %request_id,
+                text,
+                frames = stats.frames,
+                text_tokens = stats.text_tokens,
+                "Qwen3-TTS kept speaking far past its text; cut short"
+            );
+        }
         let mut file = FileRef::local(path);
         file.mime = Some("audio/wav".to_string());
         Ok(InferenceOutput::TtsAudio { audio: file })
