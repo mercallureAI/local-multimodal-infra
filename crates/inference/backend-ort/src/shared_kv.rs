@@ -321,6 +321,7 @@ impl OrtSession {
             .binding
             .bind_output_to_device(&binding.logits_output, &host_output_memory()?)
             .map_err(map_ort_err)?;
+        let _gate = crate::gpu_shared();
         let outputs = match shrink_arenas {
             None => self
                 .real

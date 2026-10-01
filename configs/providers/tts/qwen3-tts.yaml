@@ -1,0 +1,42 @@
+id: qwen3-tts-0.6b-onnx
+name: Qwen3-TTS-12Hz 0.6B Base ONNX FP16 (streaming voice clone)
+enabled: true
+task_kinds:
+  - tts.synthesize
+adapter: qwen3_tts
+backend: ort
+artifacts:
+  # Local export (path omitted: <model_dir>/qwen3-tts-0.6b-onnx):
+  #   hf download Qwen/Qwen3-TTS-12Hz-0.6B-Base --revision 5d83992436eae1d760afd27aff78a71d676296fc --local-dir <src>
+  #   python -m scripts.local.qwen3_tts_export --source-model-dir <src> --output-dir <dir> \
+  #     --builder-python <python with onnxruntime-genai>
+  # The directory holds talker.onnx(.data), vocoder.onnx(.data),
+  # speaker_encoder.onnx, codec_encoder.onnx, tokenizer.json and config.json.
+  - type: local
+runtime:
+  # FP16 GroupQueryAttention graphs for NVIDIA GPUs; CPU is a slow fallback.
+  provider_order: [cuda, cpu]
+  max_concurrency: 1
+  idle_ttl_sec: 600
+resources:
+  min_ram_mb: 4096
+  min_vram_mb: 3072
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  runtime: onnxruntime
+  model_family: qwen3_tts
+  task: text-to-speech
+  precision: fp16
+  sample_rate: 24000
+  source: Qwen/Qwen3-TTS-12Hz-0.6B-Base
+  huggingface_revision: 5d83992436eae1d760afd27aff78a71d676296fc
+  # Talker KV positions, allocated once (~112 KB each): prompt + frames
+  # (12.5 per second of speech).
+  max_context: 2048
+  # Frames per vocoder run (80 ms each), also the first audio's delay.
+  vocoder_chunk_frames: 4
+  # Replay each decode frame as a CUDA graph.
+  cuda_graph: true

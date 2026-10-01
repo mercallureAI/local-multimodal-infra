@@ -280,6 +280,7 @@ impl OrtSession {
             .binding
             .bind_input(binding.input_name.clone(), &binding.input)
             .map_err(map_ort_err)?;
+        let _gate = crate::gpu_shared();
         let outputs = self
             .real
             .session
@@ -464,6 +465,7 @@ impl OrtSession {
                 .map_err(map_ort_err)?;
         }
 
+        let _gate = crate::gpu_shared();
         let outputs = self
             .real
             .session
@@ -627,6 +629,7 @@ impl OrtSession {
         }
 
         let result = (|| {
+            let _gate = crate::gpu_shared();
             let outputs = self
                 .real
                 .session

@@ -770,10 +770,24 @@ pub struct ChatTimings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InferenceEvent {
-    ChatDelta { content: String },
-    ChatToolCall { index: usize, call: ChatToolCall },
-    Output { output: InferenceOutput },
-    Error { message: String },
+    ChatDelta {
+        content: String,
+    },
+    ChatToolCall {
+        index: usize,
+        call: ChatToolCall,
+    },
+    /// Synthesized speech so far (mono), from TTS models that stream.
+    AudioChunk {
+        sample_rate: u32,
+        samples: Vec<f32>,
+    },
+    Output {
+        output: InferenceOutput,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

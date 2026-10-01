@@ -195,6 +195,7 @@ impl OrtSession {
         }
 
         let result = (|| {
+            let _gate = crate::gpu_shared();
             let outputs = self
                 .real
                 .session

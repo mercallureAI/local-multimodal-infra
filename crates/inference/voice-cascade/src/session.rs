@@ -120,6 +120,11 @@ pub struct CascadeModels {
     pub asr_model: String,
     pub tts_model: String,
     pub default_reference_audio: Option<PathBuf>,
+    /// What `default_reference_audio` says (Qwen3-TTS in-context cloning).
+    pub default_reference_text: Option<String>,
+    /// The language TTS speaks (`tts_language`; the model's own default
+    /// when unset).
+    pub tts_language: Option<String>,
     /// The spec's emotion settings (`tts_emotion`, `tts_emotion_strength`).
     pub tts_emotion: BTreeMap<String, Value>,
     /// Where a conversation keeps its short-lived audio files.
@@ -165,6 +170,18 @@ impl CascadeModels {
                 .and_then(Value::as_str)
                 .filter(|path| !path.is_empty())
                 .map(PathBuf::from),
+            default_reference_text: spec
+                .metadata
+                .get("default_reference_text")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_string),
+            tts_language: spec
+                .metadata
+                .get("tts_language")
+                .and_then(Value::as_str)
+                .filter(|language| !language.is_empty())
+                .map(str::to_string),
             tts_emotion: {
                 let emotion: BTreeMap<String, Value> = spec
                     .metadata
@@ -302,15 +319,19 @@ pub async fn run(
         Ok(Some(TempFile(path)))
     })
     .await?;
-    let ref_audio = match &own_ref {
-        Some(file) => file.0.clone(),
-        None => models.default_reference_audio.clone().ok_or_else(|| {
-            InfraError::BadRequest(
-                "ref_audio is required (the model has no default_reference_audio)".to_string(),
-            )
-        })?,
+    // The transcript belongs to the audio it came with.
+    let (ref_audio, ref_text) = match &own_ref {
+        Some(file) => (file.0.clone(), config.ref_text.clone()),
+        None => (
+            models.default_reference_audio.clone().ok_or_else(|| {
+                InfraError::BadRequest(
+                    "ref_audio is required (the model has no default_reference_audio)".to_string(),
+                )
+            })?,
+            models.default_reference_text.clone(),
+        ),
     };
-    converse(runtime, models, config, ref_audio, inbound, out).await
+    converse(runtime, models, config, ref_audio, ref_text, inbound, out).await
 }
 
 async fn converse(
@@ -318,6 +339,7 @@ async fn converse(
     models: CascadeModels,
     config: SessionConfig,
     ref_audio: PathBuf,
+    ref_text: Option<String>,
     mut inbound: mpsc::Receiver<Inbound>,
     out: mpsc::UnboundedSender<Outbound>,
 ) -> Result<()> {
@@ -329,7 +351,13 @@ async fn converse(
     if let Some(strength) = config.tts_emotion_strength {
         emotion.insert("tts_emotion_strength".to_string(), Value::from(strength));
     }
-    let tts_params = tts_params(&emotion).map_err(InfraError::BadRequest)?;
+    let mut tts_params = tts_params(&emotion).map_err(InfraError::BadRequest)?;
+    if let Some(text) = ref_text.filter(|text| !text.trim().is_empty()) {
+        tts_params.insert("reference_text".to_string(), Value::from(text));
+    }
+    if let Some(language) = config.tts_language.clone().or(models.tts_language.clone()) {
+        tts_params.insert("language".to_string(), Value::from(language));
+    }
     let vad_path = models.vad_model.clone();
     let vad = blocking(move || SileroVad::load(&vad_path)).await?;
     let (speech_tx, speech_rx) = mpsc::unbounded_channel();
@@ -378,7 +406,7 @@ async fn converse(
             let task = shared.chat_task(vec![user_message("你好".to_string())], Steer::Free, 1);
             shared.runtime.infer(task).await.map(|_| ())
         };
-        let (asr, chat, tts) = tokio::join!(asr, chat, shared.synthesize("你好。"));
+        let (asr, chat, tts) = tokio::join!(asr, chat, shared.synthesize("你好。", |_| true));
         asr?;
         chat?;
         tts.map(|_| ())
@@ -1379,7 +1407,14 @@ impl Shared {
         }
     }
 
-    async fn synthesize(&self, text: &str) -> Result<Vec<f32>> {
+    /// Speaks `text`: its audio goes to `on_audio` (at `OUTPUT_RATE`) chunk
+    /// by chunk as a streaming TTS model makes it, else all at once.
+    /// `on_audio` returning false stops the synthesis.
+    async fn synthesize(
+        &self,
+        text: &str,
+        mut on_audio: impl FnMut(Vec<f32>) -> bool,
+    ) -> Result<()> {
         let mut task = InferenceTask::new(
             TaskKind::TtsSynthesize,
             Some(self.tts_model.clone()),
@@ -1390,21 +1425,41 @@ impl Shared {
         );
         task.params.extend(self.tts_params.clone());
         let runtime = self.runtime.clone();
+        let (events_tx, mut events) = mpsc::channel(64);
         // In a task of its own: the audio file goes even when the caller is
         // aborted.
-        tokio::spawn(async move {
-            let InferenceOutput::TtsAudio { audio } = runtime.infer(task).await? else {
+        let inference = tokio::spawn(async move {
+            let InferenceOutput::TtsAudio { audio } =
+                runtime.infer_streaming(task, events_tx).await?
+            else {
                 return Err(InfraError::Runtime("TTS returned no audio".to_string()));
             };
-            let file = TempFile(
-                audio
-                    .path
-                    .ok_or_else(|| InfraError::Runtime("TTS audio has no path".to_string()))?,
-            );
-            blocking(move || read_wav(&file.0)).await
-        })
-        .await
-        .map_err(|e| InfraError::Runtime(format!("TTS task failed: {e}")))?
+            Ok(TempFile(audio.path.ok_or_else(|| {
+                InfraError::Runtime("TTS audio has no path".to_string())
+            })?))
+        });
+        let mut streamed = false;
+        while let Some(event) = events.recv().await {
+            if let InferenceEvent::AudioChunk {
+                sample_rate,
+                samples,
+            } = event
+            {
+                streamed = true;
+                if !on_audio(resample(samples, sample_rate)) {
+                    // Closing the channel stops the model.
+                    break;
+                }
+            }
+        }
+        drop(events);
+        let file = inference
+            .await
+            .map_err(|e| InfraError::Runtime(format!("TTS task failed: {e}")))??;
+        if !streamed {
+            on_audio(blocking(move || read_wav(&file.0)).await?);
+        }
+        Ok(())
     }
 }
 
@@ -1459,15 +1514,25 @@ async fn synthesize_clauses(shared: Arc<Shared>, mut clauses: mpsc::UnboundedRec
     {
         let mut queued = false;
         if epoch == shared.current_epoch() {
-            match shared.synthesize(&text).await {
-                Ok(samples) => {
-                    let segment = response.clone().map(|response| (response, text.clone()));
-                    queued = shared.player.push_if(
-                        &samples,
-                        || epoch == shared.current_epoch(),
-                        segment,
-                    );
-                }
+            // Each chunk plays as soon as it is synthesized; the clause's
+            // segment grows with them.
+            let segment = response.clone().map(|response| (response, text.clone()));
+            let result = shared
+                .synthesize(&text, |samples| {
+                    let current = || epoch == shared.current_epoch();
+                    let pushed = if queued {
+                        shared
+                            .player
+                            .push_more_if(&samples, current, segment.is_some())
+                    } else {
+                        shared.player.push_if(&samples, current, segment.clone())
+                    };
+                    queued |= pushed;
+                    pushed
+                })
+                .await;
+            match result {
+                Ok(()) => {}
                 Err(err) => {
                     tracing::warn!(error = %err, text, "voice cascade TTS failed");
                     if response.is_some() {
@@ -1643,6 +1708,30 @@ impl Player {
         true
     }
 
+    /// Queues more of the clause [`Self::push_if`] started (extending its
+    /// segment when it has one), if `current()` holds.
+    fn push_more_if(&self, samples: &[f32], current: impl FnOnce() -> bool, segment: bool) -> bool {
+        if self.is_closed() {
+            return false;
+        }
+        {
+            let mut state = self.state.lock().unwrap();
+            if !current() {
+                return false;
+            }
+            state.queue.extend(samples);
+            state.pushed += samples.len() as u64;
+            if segment {
+                let pushed = state.pushed;
+                if let Some(last) = state.segments.back_mut() {
+                    last.end = pushed;
+                }
+            }
+        }
+        self.arrived.notify_one();
+        true
+    }
+
     /// Drops what is queued; `then` runs under the queue lock, first.
     fn clear_with(&self, then: impl FnOnce(&PlayerState)) {
         let mut state = self.state.lock().unwrap();
@@ -1747,6 +1836,24 @@ fn write_wav(path: &Path, samples: &[f32]) -> Result<()> {
     writer
         .finalize()
         .map_err(|e| InfraError::Runtime(format!("write {}: {e}", path.display())))
+}
+
+/// `samples` at `OUTPUT_RATE` (linear interpolation).
+fn resample(samples: Vec<f32>, sample_rate: u32) -> Vec<f32> {
+    if sample_rate == OUTPUT_RATE || samples.is_empty() {
+        return samples;
+    }
+    let ratio = sample_rate as f64 / OUTPUT_RATE as f64;
+    let len = (samples.len() as f64 / ratio) as usize;
+    (0..len)
+        .map(|i| {
+            let position = i as f64 * ratio;
+            let index = position as usize;
+            let next = samples[(index + 1).min(samples.len() - 1)];
+            let fraction = (position - index as f64) as f32;
+            samples[index] * (1.0 - fraction) + next * fraction
+        })
+        .collect()
 }
 
 /// Mono samples of a WAV file at `OUTPUT_RATE`.

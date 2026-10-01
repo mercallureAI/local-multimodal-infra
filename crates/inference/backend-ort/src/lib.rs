@@ -19,6 +19,8 @@ use std::{
 };
 
 mod device_binding;
+mod gpu_gate;
+pub(crate) use gpu_gate::{gpu_exclusive, gpu_shared};
 mod io_binding;
 mod shared_initializers;
 mod shared_kv;
@@ -65,7 +67,6 @@ pub use io_binding::{
 };
 pub use shared_kv::{SharedKvBinding, SharedKvPair};
 pub use static_binding::{FixedTensorSpec, StaticIoBinding};
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -932,6 +933,7 @@ impl RealSession {
         builder: ort::session::builder::SessionBuilder,
         model_path: &Path,
     ) -> Result<Self> {
+        let _gate = gpu_shared();
         let session = builder
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(map_ort_err)?
@@ -1026,6 +1028,7 @@ impl RealSession {
             values.push((Cow::Owned(input.name.clone()), tensor));
         }
 
+        let _gate = gpu_shared();
         let outputs_meta = &self.metadata.outputs;
         let Some(arenas) = shrink_arenas else {
             let outputs = self.session.run(values).map_err(map_ort_err)?;

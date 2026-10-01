@@ -333,6 +333,8 @@ impl StreamState {
                 );
                 self.push(chunk);
             }
+            // Speech: not part of a chat stream.
+            InferenceEvent::AudioChunk { .. } => {}
             InferenceEvent::Output { output } => {
                 if let InferenceOutput::ChatCompletion {
                     finish_reason,

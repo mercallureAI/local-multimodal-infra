@@ -1,5 +1,5 @@
 id: voice-cascade
-name: Realtime voice cascade (Silero VAD, SenseVoice, Qwen3 chat, IndexTTS)
+name: Realtime voice cascade (Silero VAD, SenseVoice, Qwen3 chat, Qwen3-TTS)
 enabled: true
 task_kinds:
   - voice.realtime
@@ -29,9 +29,17 @@ metadata:
   task: realtime-voice
   chat_model: qwen3-4b-instruct-2507-int4-onnx
   asr_model: sensevoice-small-onnx
-  tts_model: indextts-1.5-onnx
+  # Qwen3-TTS streams: a clause starts playing ~0.1 s after it is asked
+  # for. IndexTTS (indextts-1.5-onnx, indextts-2.5-onnx) speaks clause by
+  # clause.
+  tts_model: qwen3-tts-0.6b-onnx
   # A WAV path the worker reads, used when a session sends no ref_audio.
   default_reference_audio: ""
+  # What default_reference_audio says: Qwen3-TTS then clones the voice in
+  # context (closer) rather than from its x-vector alone.
+  default_reference_text: ""
+  # The language Qwen3-TTS speaks (chinese, english, ...; empty: it decides).
+  tts_language: chinese
   # The emotion the bot speaks with (IndexTTS-2.5; 1.5 ignores it): happy,
   # angry, sad, afraid, disgusted, melancholic, surprised, calm, or none for
   # the reference voice's own. Strength 0 to 1; the reference makes up the

@@ -24,6 +24,10 @@ use ort::{
 };
 use std::sync::Arc;
 
+/// Runs of a CUDA graph that may warm up or capture it (ORT captures after
+/// one or two regular runs); a margin above.
+const CAPTURE_RUNS: usize = 4;
+
 /// A device buffer bound at a fixed address.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixedTensorSpec {
@@ -101,6 +105,8 @@ pub struct StaticIoBinding {
     /// Whether the fixed inputs are the ones currently bound.
     fixed_bound: bool,
     graph_options: Vec<GraphRunOptions>,
+    /// Runs per CUDA graph id so far: the first ones warm up and capture.
+    graph_runs: Vec<(i64, usize)>,
     // Bound values reference this allocator's memory: dropped last.
     _allocator: Allocator,
 }
@@ -130,6 +136,7 @@ impl StaticIoBinding {
             )));
         };
         fill_staging(&mut slot.staging, &slot.spec, data)?;
+        let _gate = crate::gpu_shared();
         slot.staging.copy_into(device).map_err(map_ort_err)
     }
 
@@ -144,7 +151,10 @@ impl StaticIoBinding {
             DeviceTensor::Input(tensor) => tensor,
             DeviceTensor::Output(view) => view,
         };
-        source.copy_into(staging).map_err(map_ort_err)?;
+        {
+            let _gate = crate::gpu_shared();
+            source.copy_into(staging).map_err(map_ort_err)?;
+        }
         read_staging(&slot.staging, &slot.spec)
     }
 
@@ -170,6 +180,7 @@ impl StaticIoBinding {
                 "fixed tensor `{to}` is an output"
             )));
         };
+        let _gate = crate::gpu_shared();
         a.device().copy_into(device).map_err(map_ort_err)
     }
 
@@ -184,6 +195,7 @@ impl StaticIoBinding {
 
     /// Saves a device copy of the whole KV cache under `key`.
     pub fn save_kv(&mut self, key: &str) -> Result<()> {
+        let _gate = crate::gpu_shared();
         let mut copies = Vec::with_capacity(self.kv_views.len());
         for view in &self.kv_views {
             let source: &DynTensor = view;
@@ -210,6 +222,7 @@ impl StaticIoBinding {
         else {
             return Ok(false);
         };
+        let _gate = crate::gpu_shared();
         for (copy, view) in copies.iter().zip(self.kv_views.iter_mut()) {
             let target: &mut DynTensor = view;
             copy.copy_into(target).map_err(map_ort_err)?;
@@ -220,6 +233,34 @@ impl StaticIoBinding {
     /// Drops every saved KV cache.
     pub fn clear_kv_snapshots(&mut self) {
         self.kv_snapshots.clear();
+    }
+
+    /// The GPU gate for a run: exclusive while CUDA graph `graph_id` may be
+    /// warming up or capturing (ORT captures in global mode, which fails any
+    /// other thread's synchronizing CUDA call meanwhile), shared otherwise.
+    fn gate(&mut self, graph_id: Option<i64>) -> crate::gpu_gate::GpuGate {
+        match graph_id {
+            Some(id) if id >= 0 => {
+                let runs = match self
+                    .graph_runs
+                    .iter_mut()
+                    .find(|(existing, _)| *existing == id)
+                {
+                    Some((_, runs)) => runs,
+                    None => {
+                        self.graph_runs.push((id, 0));
+                        &mut self.graph_runs.last_mut().expect("just pushed").1
+                    }
+                };
+                *runs += 1;
+                if *runs <= CAPTURE_RUNS {
+                    crate::gpu_gate::GpuGate::Exclusive(crate::gpu_exclusive())
+                } else {
+                    crate::gpu_gate::GpuGate::Shared(crate::gpu_shared())
+                }
+            }
+            _ => crate::gpu_gate::GpuGate::Shared(crate::gpu_shared()),
+        }
     }
 
     fn options(&mut self, graph_id: Option<i64>) -> Result<Option<Arc<RunOptions>>> {
@@ -333,6 +374,7 @@ impl OrtSession {
             constants: Vec::new(),
             fixed_bound: false,
             graph_options: Vec::new(),
+            graph_runs: Vec::new(),
             _allocator: allocator,
         })
     }
@@ -393,6 +435,7 @@ impl OrtSession {
                 .map_err(map_ort_err)?;
         }
         let options = binding.options(graph_id)?;
+        let _gate = binding.gate(graph_id);
         let outputs = match &options {
             Some(options) => self
                 .real
@@ -429,6 +472,7 @@ impl OrtSession {
             binding.fixed_bound = true;
         }
         let options = binding.options(graph_id)?;
+        let _gate = binding.gate(graph_id);
         match &options {
             Some(options) => self
                 .real

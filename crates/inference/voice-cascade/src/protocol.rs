@@ -82,6 +82,14 @@ pub struct SessionConfig {
     /// `default_reference_audio` is used.
     #[serde(default)]
     pub ref_audio: Option<String>,
+    /// What `ref_audio` says: Qwen3-TTS then clones the voice in context
+    /// (closer), else from its x-vector alone.
+    #[serde(default)]
+    pub ref_text: Option<String>,
+    /// The language the bot speaks (Qwen3-TTS: chinese, english, ...).
+    /// Without it, the model's `tts_language`.
+    #[serde(default)]
+    pub tts_language: Option<String>,
     /// Said right away when a task is handed off (empty: nothing; cascade).
     #[serde(default)]
     pub tool_filler: Option<String>,

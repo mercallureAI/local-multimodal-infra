@@ -248,14 +248,18 @@ class VoiceEncoder:
 
 
 class Vocoder:
-    """Streaming codec decoder: state on the device, shared KV."""
+    """Streaming codec decoder with its state on the device (shared KV).
 
-    def __init__(self, package: Path, capacity: int = 4096):
+    Every run decodes `chunk` frames (the last chunk padded): ORT re-plans the
+    cuDNN convolutions whenever an input shape changes."""
+
+    def __init__(self, package: Path, chunk: int = 4, capacity: int = 4096):
         import onnxruntime as ort
 
         self.ort = ort
         self.sess = ort.InferenceSession(str(package / "vocoder.onnx"), providers=[("CUDAExecutionProvider", {"device_id": 0})])
         self.capacity = capacity
+        self.chunk = chunk
         self.layers = sum(1 for i in self.sess.get_inputs() if i.name.startswith("past_key."))
         shape = (1, 16, capacity, 64)
         self.kv = [(ort.OrtValue.ortvalue_from_shape_and_type(shape, np.float16, "cuda", 0),
@@ -264,18 +268,29 @@ class Vocoder:
 
     def reset(self):
         self.pre = np.zeros((1, 512, 2), np.float16)
-        self.conv = np.zeros((1, 1024, 0), np.float16)
+        self.conv = np.zeros((1, 1024, 4), np.float16)
+        self.valid = 0.0
         self.length = 0
+
+    def prime(self, codes: np.ndarray) -> None:
+        """Continues a reference voice (whole chunks: the oldest frames go)."""
+        self.reset()
+        skip = len(codes) % self.chunk
+        for i in range(skip, len(codes), self.chunk):
+            self.run(codes[i:i + self.chunk])
 
     def run(self, codes: np.ndarray) -> np.ndarray:
         n = codes.shape[0]
-        if self.length + n > self.capacity:
-            raise RuntimeError("vocoder KV cache full")
+        if n > self.chunk or self.length + self.chunk > self.capacity:
+            raise RuntimeError("vocoder chunk too long or KV cache full")
+        if n < self.chunk:
+            codes = np.concatenate([codes, np.repeat(codes[-1:], self.chunk - n, 0)])
         b = self.sess.io_binding()
         b.bind_cpu_input("codes", np.ascontiguousarray(codes.T[None].astype(np.int64)))
         b.bind_cpu_input("pre_ctx", self.pre)
         b.bind_cpu_input("conv_ctx", self.conv)
-        b.bind_cpu_input("seqlens_k", np.array([self.length + n - 1], np.int32))
+        b.bind_cpu_input("context_valid", np.array([self.valid], np.float32))
+        b.bind_cpu_input("seqlens_k", np.array([self.length + self.chunk - 1], np.int32))
         b.bind_cpu_input("total_sequence_length", np.array(self.capacity, np.int32))
         for i, (k, v) in enumerate(self.kv):
             b.bind_ortvalue_input(f"past_key.{i}", k)
@@ -286,8 +301,9 @@ class Vocoder:
             b.bind_output(name, "cpu")
         self.sess.run_with_iobinding(b)
         audio, self.pre, self.conv = (o.numpy() for o in b.get_outputs()[-3:])
-        self.length += n
-        return audio[0]
+        self.valid = 1.0
+        self.length += self.chunk
+        return audio[0][: n * 1920]
 
 
 def main() -> int:
@@ -299,8 +315,7 @@ def main() -> int:
     ap.add_argument("--ref-text", help="transcript of --ref-audio: ICL mode (else x-vector only)")
     ap.add_argument("--greedy", action="store_true")
     ap.add_argument("--no-cuda-graph", action="store_true")
-    ap.add_argument("--first-chunk", type=int, default=3, help="frames in the first vocoder chunk")
-    ap.add_argument("--chunk", type=int, default=6, help="frames in later vocoder chunks")
+    ap.add_argument("--chunk", type=int, default=4, help="frames per vocoder run")
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--out-dir", type=Path)
     args = ap.parse_args()
@@ -320,7 +335,7 @@ def main() -> int:
         spk, ref_codes = VoiceEncoder(args.package).encode(y)
         print(f"voice: {len(y) / 24000:.2f}s ref -> {len(ref_codes)} frames ({(time.perf_counter() - t0) * 1000:.0f}ms incl. load)")
     talker = Talker(args.package / "talker.onnx", cfg, cuda_graph=not args.no_cuda_graph)
-    vocoder = Vocoder(args.package)
+    vocoder = Vocoder(args.package, chunk=args.chunk)
     icl = ref_codes is not None and bool(args.ref_text)
     if args.out_dir:
         args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -331,7 +346,7 @@ def main() -> int:
             vocoder.reset()
             t0 = time.perf_counter()
             if icl:
-                vocoder.run(ref_codes)  # left context: the reference voice
+                vocoder.prime(ref_codes)  # left context: the reference voice
             t_prime = time.perf_counter() - t0
             pending, audio, marks = [], [], {}
             voc_time = [0.0]
@@ -346,8 +361,7 @@ def main() -> int:
 
             def on_frame(codes):
                 pending.append(codes)
-                want = args.first_chunk if not audio else args.chunk
-                if len(pending) >= want:
+                if len(pending) >= args.chunk:
                     flush()
 
             frames = generate_codes(talker, prompt, cfg, args.greedy, seed=rep, on_frame=on_frame)

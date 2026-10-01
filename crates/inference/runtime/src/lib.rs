@@ -708,8 +708,8 @@ enum LoadedModel {
 }
 
 impl LoadedModel {
-    // Only chat models stream (`sink`).
-    #[cfg_attr(not(feature = "chat"), allow(unused_variables))]
+    // Chat models and Qwen3-TTS stream (`sink`).
+    #[cfg_attr(not(any(feature = "chat", feature = "tts")), allow(unused_variables))]
     fn infer(
         &mut self,
         task: &InferenceTask,
@@ -775,7 +775,13 @@ impl LoadedModel {
                     text,
                     reference_audio,
                 },
-            ) => adapter.synthesize(task.id, text, reference_audio.as_ref(), &task.params),
+            ) => adapter.synthesize_with_events(
+                task.id,
+                text,
+                reference_audio.as_ref(),
+                &task.params,
+                sink,
+            ),
             #[cfg(feature = "embedding")]
             (
                 LoadedModel::E5Embedding(adapter),

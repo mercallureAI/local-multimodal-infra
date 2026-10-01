@@ -188,6 +188,7 @@ fn to_cuda(host: DynValue, device: i32, name: &str) -> Result<DynValue> {
     let tensor = host
         .downcast::<ort::value::DynTensorValueType>()
         .map_err(map_ort_err)?;
+    let _gate = crate::gpu_shared();
     tensor
         .to(AllocationDevice::CUDA, device)
         .map(|tensor| tensor.into_dyn())
