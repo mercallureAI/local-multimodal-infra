@@ -1,0 +1,29 @@
+[package]
+name = "local-adapter-index-tts"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+cuda = ["local-backend-ort/cuda"]
+directml = ["local-backend-ort/directml"]
+tensorrt = ["local-backend-ort/tensorrt"]
+
+[dependencies]
+hound.workspace = true
+local-backend-ort.workspace = true
+local-core.workspace = true
+local-error.workspace = true
+local-files.workspace = true
+local-zh-tts-frontend.workspace = true
+pinyin = { version = "0.11.0", default-features = false, features = ["with_tone_num_end"] }
+sentencepiece-rs = "0.2.2"
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

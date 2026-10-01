@@ -1,4 +1,4 @@
-"""Assemble the zh-tts-frontend asset directory for crates/zh-tts-frontend.
+"""Assemble the zh-tts-frontend asset directory for crates/text/zh-tts-frontend.
 
 The Rust crate ports PaddleSpeech's Mandarin frontend (`zh_frontend.py` with
 `g2p_model="g2pW"`, `tone_sandhi.py`, `polyphonic.yaml`) and loads everything

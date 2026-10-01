@@ -1,4 +1,4 @@
-"""Reference outputs for crates/zh-tts-frontend (PaddleSpeech Mandarin G2P).
+"""Reference outputs for crates/text/zh-tts-frontend (PaddleSpeech Mandarin G2P).
 
 Replays PaddleSpeech `zh_frontend.Frontend._g2p` with `g2p_model="g2pW"` on
 the exported asset directory, without importing paddle:

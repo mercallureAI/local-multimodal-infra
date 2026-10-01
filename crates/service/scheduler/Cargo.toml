@@ -1,0 +1,9 @@
+[package]
+name = "local-scheduler"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+chrono.workspace = true
+local-core.workspace = true

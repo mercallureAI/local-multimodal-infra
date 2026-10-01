@@ -1,0 +1,46 @@
+[package]
+name = "local-cli"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[features]
+# Model categories the worker is built with (all by default). An audio-only
+# worker: `--no-default-features --features audio`.
+default = ["asr", "tts", "chat", "embedding", "rerank", "detect", "realtime"]
+audio = ["asr", "tts", "realtime"]
+asr = ["local-worker/asr"]
+tts = ["local-worker/tts"]
+chat = ["local-worker/chat"]
+embedding = ["local-worker/embedding"]
+rerank = ["local-worker/rerank"]
+detect = ["local-worker/detect"]
+realtime = ["local-worker/realtime"]
+cuda = ["local-runtime/cuda"]
+directml = ["local-runtime/directml"]
+tensorrt = ["local-runtime/tensorrt"]
+
+[dependencies]
+axum.workspace = true
+local-config.workspace = true
+local-controller.workspace = true
+local-error.workspace = true
+local-model-store.workspace = true
+local-registry.workspace = true
+local-runtime.workspace = true
+local-telemetry.workspace = true
+local-worker.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[[bin]]
+name = "controller"
+path = "src/bin/controller.rs"
+
+[[bin]]
+name = "worker"
+path = "src/bin/worker.rs"
+
+[[bin]]
+name = "local-multimodal-infra"
+path = "src/main.rs"

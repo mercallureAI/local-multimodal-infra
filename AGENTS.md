@@ -4,9 +4,10 @@ Repo-specific instructions for future OpenCode agents. Higher-priority user inst
 
 ## Architecture boundaries
 
-- Rust Cargo workspace. Service bins `controller` and `worker` live in `crates/cli`; the `local-multimodal-infra` main only prints a hint.
-- `crates/controller` may depend on API/files/model-store/registry/scheduler, but must not depend on runtime/backend-ort/adapters. It schedules/forwards and does not load models.
-- `crates/worker` registers, heartbeats, and exposes protected `/internal/infer`.
+- Crate layout under `crates/`: `foundation/` (core, error, config, telemetry, hardware, files), `service/` (cli, controller, worker, scheduler, registry, model-store), `api/`, `inference/` (runtime, backend-ort, voice-cascade), `text/` (jieba, wetext, zh-tts-frontend), and `adapters/<category>/<model>` with the categories of `configs/providers/` plus `vad`. Directory names drop the `adapter-`/`api-` prefix; package names keep it (`local-adapter-yolo` lives in `adapters/detect/yolo`). Internal crates are declared once in the root `[workspace.dependencies]` and used as `local-x.workspace = true`.
+- Rust Cargo workspace. Service bins `controller` and `worker` live in `crates/service/cli`; the `local-multimodal-infra` main only prints a hint.
+- `crates/service/controller` may depend on API/files/model-store/registry/scheduler, but must not depend on runtime/backend-ort/adapters. It schedules/forwards and does not load models.
+- `crates/service/worker` registers, heartbeats, and exposes protected `/internal/infer`.
 
 ## Naming rules
 

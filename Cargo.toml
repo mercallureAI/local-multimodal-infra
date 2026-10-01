@@ -1,35 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/core",
-    "crates/config",
-    "crates/error",
-    "crates/controller",
-    "crates/worker",
-    "crates/scheduler",
-    "crates/runtime",
-    "crates/registry",
-    "crates/model-store",
-    "crates/hardware",
-    "crates/files",
-    "crates/api-mcp-infer",
-    "crates/api-mcp-admin",
-    "crates/api-openai",
-    "crates/backend-ort",
-    "crates/adapter-index-tts",
-    "crates/adapter-index-tts2",
-    "crates/jieba",
-    "crates/wetext",
-    "crates/zh-tts-frontend",
-    "crates/adapter-yolo",
-    "crates/adapter-sensevoice-asr",
-    "crates/adapter-e5-embedding",
-    "crates/adapter-mmarco-reranker",
-    "crates/adapter-qwen3-chat",
-    "crates/adapter-silero-vad",
-    "crates/voice-cascade",
-    "crates/telemetry",
-    "crates/cli",
+    "crates/foundation/*",
+    "crates/service/*",
+    "crates/api/*",
+    "crates/inference/*",
+    "crates/text/*",
+    "crates/adapters/*/*",
 ]
 
 [workspace.package]
@@ -64,3 +41,34 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 walkdir = "2"
+
+# Workspace crates
+local-core = { path = "crates/foundation/core" }
+local-error = { path = "crates/foundation/error" }
+local-config = { path = "crates/foundation/config" }
+local-telemetry = { path = "crates/foundation/telemetry" }
+local-hardware = { path = "crates/foundation/hardware" }
+local-files = { path = "crates/foundation/files" }
+local-cli = { path = "crates/service/cli" }
+local-controller = { path = "crates/service/controller" }
+local-worker = { path = "crates/service/worker", default-features = false }
+local-scheduler = { path = "crates/service/scheduler" }
+local-registry = { path = "crates/service/registry" }
+local-model-store = { path = "crates/service/model-store" }
+local-api-openai = { path = "crates/api/openai" }
+local-api-mcp-infer = { path = "crates/api/mcp-infer" }
+local-api-mcp-admin = { path = "crates/api/mcp-admin" }
+local-runtime = { path = "crates/inference/runtime", default-features = false }
+local-backend-ort = { path = "crates/inference/backend-ort" }
+local-voice-cascade = { path = "crates/inference/voice-cascade" }
+local-jieba = { path = "crates/text/jieba" }
+local-wetext = { path = "crates/text/wetext" }
+local-zh-tts-frontend = { path = "crates/text/zh-tts-frontend" }
+local-adapter-sensevoice-asr = { path = "crates/adapters/asr/sensevoice" }
+local-adapter-index-tts = { path = "crates/adapters/tts/index-tts" }
+local-adapter-index-tts2 = { path = "crates/adapters/tts/index-tts2" }
+local-adapter-qwen3-chat = { path = "crates/adapters/chat/qwen3" }
+local-adapter-e5-embedding = { path = "crates/adapters/embedding/e5" }
+local-adapter-mmarco-reranker = { path = "crates/adapters/rerank/mmarco" }
+local-adapter-yolo = { path = "crates/adapters/detect/yolo" }
+local-adapter-silero-vad = { path = "crates/adapters/vad/silero" }

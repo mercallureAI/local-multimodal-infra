@@ -1,0 +1,11 @@
+[package]
+name = "local-config"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+local-core.workspace = true
+local-error.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true

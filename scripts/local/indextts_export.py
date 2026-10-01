@@ -5,7 +5,7 @@ providing two preparation paths:
 
 * package an already-exported IndexTTS_A.onnx ... IndexTTS_F.onnx layout; or
 * export the official local IndexTTS-1.5 PyTorch checkpoint into the A-F graph
-  contract consumed by ``crates/adapter-index-tts``.
+  contract consumed by ``crates/adapters/tts/index-tts``.
 
 The A-F split is project-local code. It follows the adapter contract and the
 official IndexTTS model APIs, but does not vendor or copy third-party exporter

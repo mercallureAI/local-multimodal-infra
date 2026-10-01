@@ -8,7 +8,7 @@ exporter, which is driven here as an external checkout (not vendored):
 * ``optimize`` runs the upstream optimizer with this project's precision plan
   (``fp16`` for NVIDIA GPUs, ``fp32`` as the numerical reference);
 * ``package``  writes the ``tokenizer.json`` / ``manifest.json`` contract read by
-  ``crates/adapter-index-tts2`` next to an optimized package.
+  ``crates/adapters/tts/index-tts2`` next to an optimized package.
 
 All three must run in a Python 3.11 environment built from the official
 index-tts ``uv.lock`` plus ``onnx onnxruntime-gpu onnxslim pydub soundfile``.

@@ -1,8 +1,8 @@
-"""Build the WeText TN parity reference for crates/wetext.
+"""Build the WeText TN parity reference for crates/text/wetext.
 
 Runs the Python `wetext` package IndexTTS uses on Windows/macOS (0.1.0,
 `Normalizer(lang=..., operator="tn")`) over WeTextProcessing's TN test inputs
-plus TTS-oriented cases, and writes `crates/wetext/tests/data/tn_reference.jsonl`
+plus TTS-oriented cases, and writes `crates/text/wetext/tests/data/tn_reference.jsonl`
 ({"lang", "text", "expected"}). Run in the IndexTTS export environment:
 
     python scripts/local/wetext_parity.py --wetextprocessing <checkout> [--fst-dir-out <dir>]
@@ -70,7 +70,7 @@ def load_wetextprocessing_inputs(root: Path) -> dict[str, list[str]]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--wetextprocessing", required=True, type=Path)
-    parser.add_argument("--out", type=Path, default=Path(__file__).resolve().parents[2] / "crates/wetext/tests/data/tn_reference.jsonl")
+    parser.add_argument("--out", type=Path, default=Path(__file__).resolve().parents[2] / "crates/text/wetext/tests/data/tn_reference.jsonl")
     parser.add_argument("--fst-dir-out", type=Path)
     args = parser.parse_args()
 
