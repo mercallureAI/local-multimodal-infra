@@ -48,7 +48,7 @@ Document OCR uses [baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-O
 
 Text lines in pictures (scene text, UI labels, name tags) use PaddleOCR's PP-OCRv5 mobile detection and recognition models (Chinese, English, Japanese and more in one model; the two ONNX files are about 21 MB), returning each line with its pixel box, top to bottom then left to right. For frame-by-frame use, `POST /v1/ocr/lines[?model=ppocrv5-mobile-onnx]` takes the image (PNG/JPEG/BMP) as the body and answers at once with `{"lines": [{"text", "confidence", "bbox"}]}`, behind the inference token; the generic `ocr.lines` task (upload `image`) works too. Object detection has the same frame-by-frame form, `POST /v1/detect/objects[?model=yolo11n.onnx]`, answering `{"objects": [{"label", "confidence", "bbox"}]}`.
 
-Monocular metric depth uses Depth Anything V2 Metric Indoor Small (ViT-S fine-tuned on indoor Hypersim, up to 20 m, Apache-2.0), exported from a pinned revision to a fixed-input-size ONNX (~99 MB) by `python -m scripts.local.depth_anything_export --size 308x546 --output-dir <models>/depth-anything-v2-metric-indoor-small-onnx`. The frame-by-frame `POST /v1/depth[?model=&cols=&rows=]` (default 64x36) answers `{"cols", "rows", "max_depth", "depth": [metres, row by row from the top]}`, each cell the mean depth of its area; the generic `depth.estimate` task (upload `image`, `params.cols/rows`) works too. A 1280x720 frame takes ~30 ms on an RTX 4090 (decoding included).
+Monocular metric depth uses Depth Anything V2 Metric Indoor Small (ViT-S fine-tuned on indoor Hypersim, up to 20 m, Apache-2.0), exported from a pinned revision to a fixed-input-size ONNX (~99 MB) by `python -m scripts.local.depth_anything_export --size 308x546 --output-dir <models>/depth-anything-v2-metric-indoor-small-onnx`. Images are stretched to that size, so the export suits 16:9 frames (1280x720 game frames); other aspect ratios come out distorted, their depth biased: export for theirs (`--size`). The frame-by-frame `POST /v1/depth[?model=&cols=&rows=]` (default 64x36) answers `{"cols", "rows", "max_depth", "depth": [metres, row by row from the top]}`, each cell the mean depth of its area; the generic `depth.estimate` task (upload `image`, `params.cols/rows`) works too. A 1280x720 frame takes ~30 ms on an RTX 4090 (decoding included).
 
 Low-latency speech recognition `sensevoice-small-fp16-onnx` is the same SenseVoiceSmall as `sensevoice-small-onnx`: the latter's int8 graph has 281 `DynamicQuantizeLinear` nodes that fall back to the CPU under the CUDA provider, each layer going back and forth, ~200-350 ms per utterance; the float16 graph runs on the GPU throughout, ~40-90 ms, the same transcripts. `python -m scripts.local.sensevoice_fp16_export --base-dir <models>/sensevoice-small-onnx --output-dir <models>/sensevoice-small-fp16-onnx` exports it from a pinned revision (~470 MB), the other files taken from `sensevoice-small-onnx`; the metadata `asr_model_file` names the graph in `asr/`. The realtime voice cascade picks it in `voice-cascade.yaml`'s `asr_model`.
 
@@ -153,11 +153,14 @@ curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
 Other default model IDs:
 
 - `yolo11n.onnx`
+- `ppocrv5-mobile-onnx`
 - `multilingual-e5-small-onnx`
 - `mmarco-minilm-l12-onnx`
 - `indextts-1.5-onnx`
 - `indextts-2.5-onnx` (FP16, about 2.8 GB)
-- `voice-cascade` (downloads only Silero VAD; the ASR, chat and TTS models the conversation uses are downloaded separately)
+- `voice-cascade` (downloads only Silero VAD; the ASR, chat and TTS models the conversation uses are downloaded or exported separately, the default ASR `sensevoice-small-fp16-onnx` being a local export, see above)
+
+`depth-anything-v2-metric-indoor-small-onnx` and `sensevoice-small-fp16-onnx` have no published package; export them locally with the commands above.
 
 `qwen3-4b-instruct-2507-int4-onnx` has no published ONNX package; export it from the pinned revision with the commands in [`configs/providers/chat/qwen3-chat.yaml`](configs/providers/chat/qwen3-chat.yaml) into `workdir/models/qwen3-4b-instruct-2507-int4-onnx`.
 
@@ -254,6 +257,8 @@ Both `rpc` and `mcp` include OCR (`--tests ocr` runs it alone); it is reported a
 | Unlimited-OCR (source of the local ONNX export) | [baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-OCR) | `07dea832e22aefee32ad281d4b80551282e1c168` |
 | Qwen3-TTS-12Hz-0.6B-Base (source of the local ONNX export) | [Qwen/Qwen3-TTS-12Hz-0.6B-Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base) | `5d83992436eae1d760afd27aff78a71d676296fc` |
 | Qwen3-4B-Instruct-2507 (source of the local INT4 export) | [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) | `cdbee75f17c01a7cc42f958dc650907174af0554` |
+| Depth Anything V2 Metric Indoor Small (source of the local ONNX export) | [depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf](https://huggingface.co/depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf) | `8078d68a9c75a972131914f6afd0c1723be0da7f` |
+| SenseVoiceSmall (source of the local float16 ONNX export) | [FunAudioLLM/SenseVoiceSmall](https://huggingface.co/FunAudioLLM/SenseVoiceSmall) | `3847d57b6bdf2dd8875cb1508d2af43d80a16bf7` |
 | Silero VAD v6.2.3 | [snakers4/silero-vad](https://github.com/snakers4/silero-vad) | `5cd7945676eb32225748052e2e6a0580e4686a08` |
 
 The exact files, revisions and SHA-256 sums are the ones in [`configs/providers`](configs/providers) (one directory per category): Hugging Face artifacts are pinned to a commit and URL artifacts carry a SHA-256, which the `local-registry` tests check. The IndexTTS 1.5 and 2.5 configs both download the Mandarin frontend (`ModaLeap/zh-tts-frontend`, about 177 MB; per-file licenses in its `NOTICE`) into `zh-tts-frontend/` inside their model directories; `scripts/local/zh_frontend_export.py` can also rebuild it locally.

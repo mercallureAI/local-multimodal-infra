@@ -48,7 +48,7 @@
 
 画面文字行（场景文字、界面标签、名牌等）使用 PaddleOCR 的 PP-OCRv5 mobile 检测与识别模型（中、英、日等文字同一个模型，两个 ONNX 合计约 21 MB），返回每行文字及其像素框，按从上到下、从左到右排列。逐帧调用可直接 `POST /v1/ocr/lines[?model=ppocrv5-mobile-onnx]`，请求体就是图片（PNG/JPEG/BMP），立即返回 `{"lines": [{"text", "confidence", "bbox"}]}`，受推理 token 保护；也可用通用任务 `ocr.lines`（上传 `image`）。目标检测同样有逐帧接口 `POST /v1/detect/objects[?model=yolo11n.onnx]`，返回 `{"objects": [{"label", "confidence", "bbox"}]}`。
 
-单目米制深度使用 Depth Anything V2 Metric Indoor Small（ViT-S，室内 Hypersim 微调，最大 20 m，Apache-2.0），由 `python -m scripts.local.depth_anything_export --size 308x546 --output-dir <models>/depth-anything-v2-metric-indoor-small-onnx` 从固定 revision 导出为固定输入尺寸的 ONNX（约 99 MB）。逐帧接口 `POST /v1/depth[?model=&cols=&rows=]`（默认 64×36）返回 `{"cols", "rows", "max_depth", "depth": [米，自上而下逐行]}`，每格是该区域的平均深度；通用任务 `depth.estimate`（上传 `image`，`params.cols/rows`）同样可用。RTX 4090 上一帧 1280×720 约 30 ms（含解码）。
+单目米制深度使用 Depth Anything V2 Metric Indoor Small（ViT-S，室内 Hypersim 微调，最大 20 m，Apache-2.0），由 `python -m scripts.local.depth_anything_export --size 308x546 --output-dir <models>/depth-anything-v2-metric-indoor-small-onnx` 从固定 revision 导出为固定输入尺寸的 ONNX（约 99 MB）；图片被拉伸到该尺寸，因此按 16:9 画面（如 1280×720 游戏画面）导出，其他宽高比的图片会变形、深度有偏差，需按其宽高比另行导出（`--size`）。逐帧接口 `POST /v1/depth[?model=&cols=&rows=]`（默认 64×36）返回 `{"cols", "rows", "max_depth", "depth": [米，自上而下逐行]}`，每格是该区域的平均深度；通用任务 `depth.estimate`（上传 `image`，`params.cols/rows`）同样可用。RTX 4090 上一帧 1280×720 约 30 ms（含解码）。
 
 低延迟语音识别 `sensevoice-small-fp16-onnx` 与 `sensevoice-small-onnx` 是同一个 SenseVoiceSmall：后者的 int8 图里 281 个 `DynamicQuantizeLinear` 在 CUDA provider 下回落到 CPU，每层在 CPU 与 GPU 间往返，一句话约 200–350 ms；float16 图全程在 GPU 上，约 40–90 ms，转写相同。由 `python -m scripts.local.sensevoice_fp16_export --base-dir <models>/sensevoice-small-onnx --output-dir <models>/sensevoice-small-fp16-onnx` 从固定 revision 导出（约 470 MB），其余文件取自 `sensevoice-small-onnx`；元数据 `asr_model_file` 指定 `asr/` 中的图。实时语音级联在 `voice-cascade.yaml` 的 `asr_model` 中选用。
 
@@ -153,11 +153,14 @@ curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
 其他默认模型 ID：
 
 - `yolo11n.onnx`
+- `ppocrv5-mobile-onnx`
 - `multilingual-e5-small-onnx`
 - `mmarco-minilm-l12-onnx`
 - `indextts-1.5-onnx`
 - `indextts-2.5-onnx`（FP16，约 2.8 GB）
-- `voice-cascade`（只下载 Silero VAD；对话所用的 ASR、对话与 TTS 模型需各自下载）
+- `voice-cascade`（只下载 Silero VAD；对话所用的 ASR、对话与 TTS 模型需各自下载或导出，默认 ASR `sensevoice-small-fp16-onnx` 需本地导出，见上文）
+
+`depth-anything-v2-metric-indoor-small-onnx` 与 `sensevoice-small-fp16-onnx` 没有发布的包，按上文的导出命令本地导出。
 
 `qwen3-4b-instruct-2507-int4-onnx` 没有发布的 ONNX 包，需按 [`configs/providers/chat/qwen3-chat.yaml`](configs/providers/chat/qwen3-chat.yaml) 中的命令从固定 revision 本地导出到 `workdir/models/qwen3-4b-instruct-2507-int4-onnx`。
 
@@ -254,6 +257,8 @@ python -m scripts.local.smoke --tests mcp \
 | Unlimited-OCR（本地导出 ONNX 的源模型） | [baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-OCR) | `07dea832e22aefee32ad281d4b80551282e1c168` |
 | Qwen3-TTS-12Hz-0.6B-Base（本地导出 ONNX 的源模型） | [Qwen/Qwen3-TTS-12Hz-0.6B-Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base) | `5d83992436eae1d760afd27aff78a71d676296fc` |
 | Qwen3-4B-Instruct-2507（本地导出 INT4 的源模型） | [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) | `cdbee75f17c01a7cc42f958dc650907174af0554` |
+| Depth Anything V2 Metric Indoor Small（本地导出 ONNX 的源模型） | [depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf](https://huggingface.co/depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf) | `8078d68a9c75a972131914f6afd0c1723be0da7f` |
+| SenseVoiceSmall（本地导出 float16 ONNX 的源模型） | [FunAudioLLM/SenseVoiceSmall](https://huggingface.co/FunAudioLLM/SenseVoiceSmall) | `3847d57b6bdf2dd8875cb1508d2af43d80a16bf7` |
 | Silero VAD v6.2.3 | [snakers4/silero-vad](https://github.com/snakers4/silero-vad) | `5cd7945676eb32225748052e2e6a0580e4686a08` |
 
 实际下载文件、revision 与 SHA-256 以 [`configs/providers`](configs/providers)（按分类分目录）中的配置为准：Hugging Face 工件固定到 commit，URL 工件附带 SHA-256，`local-registry` 的测试会检查这两点。IndexTTS 1.5 与 2.5 的配置都会把中文前端（`ModaLeap/zh-tts-frontend`，约 177 MB，各文件许可见其 `NOTICE`）下载到各自模型目录下的 `zh-tts-frontend/`；也可用 `scripts/local/zh_frontend_export.py` 本地重新生成。
