@@ -202,3 +202,18 @@ fn stage_timings_if_env_set() {
         );
     }
 }
+
+#[test]
+fn boxes_on_one_row_read_left_to_right() {
+    let at = |x0, y0| PixelBox {
+        x0,
+        y0,
+        x1: x0 + 20,
+        y1: y0 + 10,
+        score: 1.0,
+    };
+    // The right box's top is a pixel higher, the next row far lower.
+    let mut boxes = vec![at(100, 50), at(10, 51), at(5, 80)];
+    reading_order(&mut boxes);
+    assert_eq!(boxes, vec![at(10, 51), at(100, 50), at(5, 80)]);
+}

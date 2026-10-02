@@ -13,6 +13,7 @@ use axum::{
     Json,
 };
 use futures_util::{SinkExt, StreamExt};
+use local_error::InfraError;
 use serde::Deserialize;
 use serde_json::json;
 use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest};
@@ -57,6 +58,9 @@ pub(super) async fn realtime(
         .await
     {
         Ok(worker) => worker,
+        Err(err @ InfraError::BadRequest(_)) => {
+            return error(StatusCode::BAD_REQUEST, err.to_string())
+        }
         Err(err) => return error(StatusCode::SERVICE_UNAVAILABLE, err.to_string()),
     };
     let url = format!(

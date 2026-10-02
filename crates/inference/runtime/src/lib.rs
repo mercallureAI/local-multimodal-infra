@@ -424,7 +424,9 @@ impl RuntimeManager {
         }
         self.specs
             .values()
-            .find(|spec| spec.enabled && spec.task_kinds.contains(&task.kind))
+            .find(|spec| {
+                spec.enabled && spec.task_kinds.contains(&task.kind) && spec.auto_selectable()
+            })
             .cloned()
             .ok_or_else(|| InfraError::ModelNotConfigured {
                 model_id: "<auto>".to_string(),
@@ -699,7 +701,7 @@ fn validated_runtime_providers_for_model(model_id: &str) -> Option<&'static [&'s
         "yolo11n.onnx" => Some(&["cuda", "dml", "cpu"]),
         // The FunASR ASR pipeline loads FSMN-VAD, SenseVoice, and CAM++ ONNX
         // sessions with one shared provider policy.
-        "sensevoice-small-onnx" => Some(&["cuda", "cpu"]),
+        "sensevoice-small-onnx" | "sensevoice-small-fp16-onnx" => Some(&["cuda", "cpu"]),
         // All A-F/prefill sessions receive the same provider selection. Root
         // FP32 CUDA is policy-enabled, but still needs real NVIDIA validation.
         "indextts-1.5-onnx" => Some(&["cuda", "cpu"]),

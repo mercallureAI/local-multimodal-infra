@@ -32,8 +32,8 @@ load_policy:
 metadata:
   runtime: onnxruntime
   # Detection / recognition knobs (adapter defaults shown, but for
-  # det_limit_side_len: 960 by default; 1280 keeps 720p game frames whole,
-  # so small, far name tags are still found).
+  # det_limit_side_len, 960 by default, and rec_batch, 8 by default).
+  # 1280 keeps 720p game frames whole, so small, far name tags are still found.
   det_limit_side_len: 1280
   # All lines in one recognition batch (up to 32): a 1280 px game frame gives
   # ~10-15 small boxes, and split in two batches of 8 they took ~320 ms with

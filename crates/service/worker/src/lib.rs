@@ -238,11 +238,13 @@ async fn infer(
     );
     match result {
         Ok(output) => (StatusCode::OK, Json(json!(output))).into_response(),
-        Err(err) => (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(json!({ "error": err.to_string() })),
-        )
-            .into_response(),
+        Err(err) => {
+            let status = match err {
+                InfraError::BadRequest(_) => StatusCode::BAD_REQUEST,
+                _ => StatusCode::NOT_IMPLEMENTED,
+            };
+            (status, Json(json!({ "error": err.to_string() }))).into_response()
+        }
     }
 }
 

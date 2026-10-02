@@ -41,7 +41,8 @@ The chat, ASR and TTS models are named by the `voice-cascade` model
 must be enabled (`tts_model` defaults to `qwen3-tts-0.6b-onnx`, a local
 export; `asr_model` to `sensevoice-small-fp16-onnx`, a local float16 export of
 SenseVoiceSmall, ~4x faster on CUDA than the downloadable int8
-`sensevoice-small-onnx`, which also works). With IndexTTS-2.5 the bot speaks with a fixed emotion,
+`sensevoice-small-onnx`; a session whose `asr_model` fails to load when it
+starts falls back to `asr_fallback_model`, `sensevoice-small-onnx`). With IndexTTS-2.5 the bot speaks with a fixed emotion,
 `tts_emotion` (default `calm`; `none` keeps the reference voice's own) at
 `tts_emotion_strength` (default 0.8); a session may choose its own
 (`session.start` config). A session loads them all before

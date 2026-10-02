@@ -80,24 +80,29 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     out = args.output_dir / "model.onnx"
+    # Checked before it takes the model's name.
+    checked = args.output_dir / "model.onnx.unchecked"
     sample = torch.from_numpy(pixel_values(args.check_image, height, width))
     torch.onnx.export(
-        Depth(model), (sample,), str(out),
+        Depth(model), (sample,), str(checked),
         input_names=["pixel_values"], output_names=["depth"],
         opset_version=args.opset, do_constant_folding=True, dynamo=False,
     )
     for name in ("config.json", "preprocessor_config.json"):
         shutil.copy2(Path(source) / name, args.output_dir / name)
 
-    session = ort.InferenceSession(str(out), providers=["CPUExecutionProvider"])
+    session = ort.InferenceSession(str(checked), providers=["CPUExecutionProvider"])
     with torch.no_grad():
         expected = Depth(model)(sample).numpy()
     actual = session.run(["depth"], {"pixel_values": sample.numpy()})[0]
     diff = float(np.abs(actual - expected).max())
     print(f"[depth-export] {height}x{width}: depth {actual.min():.2f}..{actual.max():.2f} m, "
           f"max |onnx - torch| {diff:.5f}")
+    del session  # its file is renamed or removed next
     if actual.shape != (1, height, width) or diff > 1e-2:
+        checked.unlink(missing_ok=True)
         raise SystemExit("the export does not match PyTorch")
+    checked.replace(out)
     print(f"[depth-export] wrote {out} ({out.stat().st_size / 1e6:.1f} MB)")
 
 

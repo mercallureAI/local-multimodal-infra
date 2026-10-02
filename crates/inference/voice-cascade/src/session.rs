@@ -122,6 +122,9 @@ pub struct CascadeModels {
     pub vad_model: PathBuf,
     pub chat_model: String,
     pub asr_model: String,
+    /// The ASR model used instead when `asr_model` cannot load
+    /// (`asr_fallback_model`: a local export missing here).
+    pub asr_fallback_model: Option<String>,
     pub tts_model: String,
     pub default_reference_audio: Option<PathBuf>,
     /// What `default_reference_audio` says (Qwen3-TTS in-context cloning).
@@ -172,6 +175,12 @@ impl CascadeModels {
             vad_model,
             chat_model: text("chat_model", "qwen3-4b-instruct-2507-int4-onnx"),
             asr_model: text("asr_model", "sensevoice-small-onnx"),
+            asr_fallback_model: spec
+                .metadata
+                .get("asr_fallback_model")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string),
             tts_model: text("tts_model", "indextts-1.5-onnx"),
             default_reference_audio: spec
                 .metadata
@@ -390,7 +399,7 @@ async fn converse(
         runtime,
         system: prompt::system(&config),
         chat_model: config.chat_model.clone().unwrap_or(models.chat_model),
-        asr_model: config.asr_model.clone().unwrap_or(models.asr_model),
+        asr_model: Mutex::new(config.asr_model.clone().unwrap_or(models.asr_model)),
         tts_model,
         tts_params,
         tts_stream_text,
@@ -419,7 +428,23 @@ async fn converse(
     // prompt in the chat model's prefix cache.
     let warm = async {
         let silence = wav_file(&shared.temp_dir, vec![0.0; INPUT_RATE as usize / 2]).await?;
-        let asr = shared.recognize(&silence.0);
+        let asr = async {
+            let first = shared.recognize(&silence.0).await;
+            let current = shared.asr_model.lock().unwrap().clone();
+            match (first, &models.asr_fallback_model) {
+                (Err(err), Some(fallback)) if *fallback != current => {
+                    tracing::warn!(
+                        asr_model = %current,
+                        fallback = %fallback,
+                        error = %err,
+                        "voice cascade ASR model did not load; using the fallback"
+                    );
+                    *shared.asr_model.lock().unwrap() = fallback.clone();
+                    shared.recognize(&silence.0).await
+                }
+                (result, _) => result,
+            }
+        };
         // Audio mode has no chat model.
         let chat = async {
             if audio {
@@ -1073,7 +1098,8 @@ struct Shared {
     runtime: Arc<RuntimeManager>,
     system: String,
     chat_model: String,
-    asr_model: String,
+    /// The fallback once the configured one failed to load.
+    asr_model: Mutex<String>,
     tts_model: String,
     tts_params: BTreeMap<String, Value>,
     /// See [`CascadeModels::tts_stream_text`].
@@ -1556,7 +1582,7 @@ impl Shared {
     async fn recognize(&self, wav: &Path) -> Result<String> {
         let mut task = InferenceTask::new(
             TaskKind::AsrTranscribe,
-            Some(self.asr_model.clone()),
+            Some(self.asr_model.lock().unwrap().clone()),
             InferenceInput::AsrTranscribe {
                 audio: FileRef::local(wav),
             },
@@ -2307,7 +2333,7 @@ mod tests {
             runtime: Arc::new(RuntimeManager::new(Vec::new(), Default::default())),
             system: String::new(),
             chat_model: String::new(),
-            asr_model: String::new(),
+            asr_model: Mutex::new(String::new()),
             tts_model: String::new(),
             tts_params: BTreeMap::new(),
             tts_stream_text: stream_text,

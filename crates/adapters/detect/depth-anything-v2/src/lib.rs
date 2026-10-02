@@ -8,8 +8,9 @@
 //!   exported from its transformers form by `scripts/local/depth_anything_export.py`
 //!   for one input size (`model.onnx`; see `configs/providers/detect/depth-anything-v2.yaml`).
 //! - Preprocessing follows its `DPTImageProcessor` (bicubic resize,
-//!   ImageNet mean and std), resizing to the graph's fixed input size: a
-//!   traced export bakes that size in.
+//!   ImageNet mean and std), but stretches the image to the graph's fixed
+//!   input size (a traced export bakes that size in) instead of keeping its
+//!   aspect ratio: export for the frames' aspect ratio (16:9 by default).
 
 use image::{imageops, ImageReader, RgbImage};
 use local_backend_ort::{

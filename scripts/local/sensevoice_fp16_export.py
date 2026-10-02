@@ -107,35 +107,41 @@ def main() -> None:
     from funasr import AutoModel
 
     work = Path(tempfile.mkdtemp(prefix="sensevoice-export-"))
-    for name in SOURCE_FILES:
-        shutil.copy2(Path(source) / name, work / name)
-    AutoModel(model=str(work), device="cpu", disable_update=True).export(
-        type="onnx", quantize=False)
-    fp32 = work / "model.onnx"
+    try:
+        for name in SOURCE_FILES:
+            shutil.copy2(Path(source) / name, work / name)
+        AutoModel(model=str(work), device="cpu", disable_update=True).export(
+            type="onnx", quantize=False)
+        fp32 = work / "model.onnx"
 
-    model = onnx.shape_inference.infer_shapes(onnx.load(str(fp32)))
-    model16 = convert_float_to_float16(model, keep_io_types=True, force_fp16_initializers=True)
+        model = onnx.shape_inference.infer_shapes(onnx.load(str(fp32)))
+        model16 = convert_float_to_float16(model, keep_io_types=True,
+                                           force_fp16_initializers=True)
+        checked = work / MODEL_FILE
+        onnx.save(model16, str(checked))
 
-    # All but the int8 SenseVoice graph (vad/ keeps its own model_quant.onnx).
-    shutil.copytree(args.base_dir, args.output_dir, dirs_exist_ok=True,
-                    ignore=lambda folder, names: ["model_quant.onnx"]
-                    if Path(folder).name == "asr" else [])
-    out = args.output_dir / "asr" / MODEL_FILE
-    onnx.save(model16, str(out))
+        inputs = features(args.check_wav, args.base_dir)
+        expected = ctc_tokens(
+            ort.InferenceSession(str(fp32), providers=["CPUExecutionProvider"]), inputs)
+        actual = ctc_tokens(
+            ort.InferenceSession(str(checked), providers=["CPUExecutionProvider"]), inputs)
+        same = sum(a == b for a, b in zip(expected, actual))
+        print(f"[sensevoice-fp16] {args.check_wav.name}: {len(expected)} float32 tokens, "
+              f"{len(actual)} float16, {same} the same")
+        if actual != expected:
+            raise SystemExit("the float16 graph's tokens differ from the float32 graph's")
 
-    inputs = features(args.check_wav, args.base_dir)
-    expected = ctc_tokens(ort.InferenceSession(str(fp32), providers=["CPUExecutionProvider"]),
-                          inputs)
-    actual = ctc_tokens(ort.InferenceSession(str(out), providers=["CPUExecutionProvider"]),
-                        inputs)
-    same = sum(a == b for a, b in zip(expected, actual))
-    print(f"[sensevoice-fp16] {args.check_wav.name}: {len(expected)} float32 tokens, "
-          f"{len(actual)} float16, {same} the same")
-    if actual != expected:
-        raise SystemExit("the float16 graph's tokens differ from the float32 graph's")
-    shutil.rmtree(work, ignore_errors=True)
+        # Only a checked graph reaches the model directory: all of the base
+        # directory but its int8 SenseVoice graph (vad/ keeps its own
+        # model_quant.onnx), then the float16 one.
+        shutil.copytree(args.base_dir, args.output_dir, dirs_exist_ok=True,
+                        ignore=lambda folder, names: ["model_quant.onnx"]
+                        if Path(folder).name == "asr" else [])
+        out = args.output_dir / "asr" / MODEL_FILE
+        shutil.move(str(checked), str(out))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
     print(f"[sensevoice-fp16] wrote {out} ({out.stat().st_size / 1e6:.1f} MB)")
-
 
 if __name__ == "__main__":
     main()

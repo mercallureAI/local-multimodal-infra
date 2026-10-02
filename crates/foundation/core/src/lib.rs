@@ -566,6 +566,16 @@ impl ModelSpec {
     pub fn category(&self) -> ModelCategory {
         self.adapter.category()
     }
+
+    /// Whether a task naming no model may get this one: not when its
+    /// metadata says `auto_select: false` (a local export most installs lack,
+    /// used where it is named).
+    pub fn auto_selectable(&self) -> bool {
+        self.metadata
+            .get("auto_select")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1084,6 +1094,20 @@ pub struct WaitTaskRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_auto_select_false_keeps_a_model_from_auto_selection() {
+        let spec = |metadata: serde_json::Value| -> ModelSpec {
+            serde_json::from_value(serde_json::json!({
+                "id": "m", "name": "m", "adapter": "sense_voice_asr", "backend": "ort",
+                "metadata": metadata,
+            }))
+            .expect("spec")
+        };
+        assert!(spec(serde_json::json!({})).auto_selectable());
+        assert!(spec(serde_json::json!({"auto_select": true})).auto_selectable());
+        assert!(!spec(serde_json::json!({"auto_select": false})).auto_selectable());
+    }
 
     #[test]
     fn legacy_asr_text_output_deserializes_without_rich_fields() {

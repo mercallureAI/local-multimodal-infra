@@ -1001,7 +1001,7 @@ async fn ocr_lines_hands_the_body_to_the_worker_as_a_temporary_image() {
 
     let response = reqwest::Client::new()
         .post(format!("{base_url}/v1/ocr/lines?model=ppocrv5-mobile-onnx"))
-        .body(b"not really a png".to_vec())
+        .body(b"\x89PNG not really a png".to_vec())
         .send()
         .await
         .expect("request");
@@ -1017,7 +1017,7 @@ async fn ocr_lines_hands_the_body_to_the_worker_as_a_temporary_image() {
     let (task, image) = &seen[0];
     assert_eq!(task.kind, TaskKind::OcrLines);
     assert_eq!(task.model_id.as_deref(), Some("ppocrv5-mobile-onnx"));
-    assert_eq!(image.as_deref(), Some(&b"not really a png"[..]));
+    assert_eq!(image.as_deref(), Some(&b"\x89PNG not really a png"[..]));
     // The temporary image is gone once answered.
     let InferenceInput::OcrLines { image } = &task.input else {
         panic!("not ocr.lines");
@@ -1066,7 +1066,7 @@ async fn detect_objects_hands_the_body_to_the_worker_as_a_temporary_image() {
 
     let response = reqwest::Client::new()
         .post(format!("{base_url}/v1/detect/objects?model=yolo11n.onnx"))
-        .body(b"not really a jpeg".to_vec())
+        .body(b"\xff\xd8\xff not really a jpeg".to_vec())
         .send()
         .await
         .expect("request");
@@ -1081,7 +1081,10 @@ async fn detect_objects_hands_the_body_to_the_worker_as_a_temporary_image() {
     let seen = seen.lock().expect("seen lock");
     let (task, image) = &seen[0];
     assert_eq!(task.kind, TaskKind::ObjectDetect);
-    assert_eq!(image.as_deref(), Some(&b"not really a jpeg"[..]));
+    assert_eq!(
+        image.as_deref(),
+        Some(&b"\xff\xd8\xff not really a jpeg"[..])
+    );
     let InferenceInput::ObjectDetect { image } = &task.input else {
         panic!("not object.detect");
     };
@@ -1118,7 +1121,7 @@ async fn depth_passes_the_grid_and_answers_the_map() {
 
     let response = client
         .post(format!("{base_url}/v1/depth?cols=2&rows=1"))
-        .body(b"not really a jpeg".to_vec())
+        .body(b"\xff\xd8\xff not really a jpeg".to_vec())
         .send()
         .await
         .expect("request");
@@ -1136,13 +1139,69 @@ async fn depth_passes_the_grid_and_answers_the_map() {
         assert_eq!(*grid, Some(local_core::DepthGrid { cols: 2, rows: 1 }));
     }
 
-    // Only one of cols and rows is refused before the worker sees anything.
+    // Refused before the worker sees anything: only one of cols and rows,
+    // values that are no numbers, a body that is no image.
+    for (query, body) in [
+        ("cols=2", &b"\xff\xd8\xff"[..]),
+        ("cols=abc&rows=xyz", &b"\xff\xd8\xff"[..]),
+        ("cols=-1&rows=2", &b"\xff\xd8\xff"[..]),
+        ("", &b"GIF89a"[..]),
+    ] {
+        let response = client
+            .post(format!("{base_url}/v1/depth?{query}"))
+            .body(body.to_vec())
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "{query}"
+        );
+    }
+    assert_eq!(seen.lock().expect("seen lock").len(), 1);
+}
+
+async fn refuse_the_input(Json(_task): Json<InferenceTask>) -> impl IntoResponse {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        Json(json!({"error": "bad request: cannot decode the image"})),
+    )
+}
+
+#[tokio::test]
+async fn input_errors_are_bad_requests() {
+    let worker = Router::new().route("/internal/infer", post(refuse_the_input));
+    let (base_url, _dir) = controller_with_fake_worker(
+        "depth-anything-v2-metric-indoor-small-onnx",
+        AdapterKind::DepthAnythingV2,
+        TaskKind::DepthEstimate,
+        worker,
+    )
+    .await;
+    let client = reqwest::Client::new();
+    // The worker's verdict on the input.
     let response = client
-        .post(format!("{base_url}/v1/depth?cols=2"))
-        .body(b"x".to_vec())
+        .post(format!("{base_url}/v1/depth"))
+        .body(b"\x89PNG broken".to_vec())
         .send()
         .await
         .expect("request");
     assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
-    assert_eq!(seen.lock().expect("seen lock").len(), 1);
+    let body: Value = response.json().await.expect("json");
+    // Said once, not "bad request: bad request: ...".
+    assert_eq!(
+        body["error"].as_str(),
+        Some("bad request: cannot decode the image")
+    );
+    // A model that does another task.
+    let response = client
+        .post(format!(
+            "{base_url}/v1/ocr/lines?model=depth-anything-v2-metric-indoor-small-onnx"
+        ))
+        .body(b"\x89PNG".to_vec())
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
 }

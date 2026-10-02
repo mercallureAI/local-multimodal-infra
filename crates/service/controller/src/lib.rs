@@ -352,14 +352,25 @@ impl ControllerState {
         kind: local_core::TaskKind,
     ) -> Result<(String, String)> {
         let models = if let Some(model_id) = model_id {
-            vec![self.registry.get(model_id).await.ok_or_else(|| {
+            let model = self.registry.get(model_id).await.ok_or_else(|| {
                 InfraError::ModelNotConfigured {
                     model_id: model_id.to_string(),
                     reason: "model is not registered".to_string(),
                 }
-            })?]
+            })?;
+            if !model.task_kinds.contains(&kind) {
+                return Err(InfraError::BadRequest(format!(
+                    "model `{model_id}` does not do {kind:?}"
+                )));
+            }
+            vec![model]
         } else {
-            self.registry.enabled_for_task(kind).await
+            self.registry
+                .enabled_for_task(kind)
+                .await
+                .into_iter()
+                .filter(local_core::ModelSpec::auto_selectable)
+                .collect()
         };
         let model = models.into_iter().find(|m| m.enabled).ok_or_else(|| {
             InfraError::ModelNotConfigured {
@@ -499,16 +510,29 @@ impl ControllerState {
     }
 
     async fn forward_to_worker(&self, task: InferenceTask) -> Result<InferenceOutput> {
+        self.forward_to_worker_as(task, false).await
+    }
+
+    /// As [`Self::forward_to_worker`]; `direct` for the direct frame
+    /// endpoints: no job rows (frame after frame, they would pile up), and
+    /// the worker's verdict on a bad frame answered as a bad request (their
+    /// adapters raise it for the input only).
+    async fn forward_to_worker_as(
+        &self,
+        task: InferenceTask,
+        direct: bool,
+    ) -> Result<InferenceOutput> {
         let total_started = std::time::Instant::now();
         let request_id = task.id;
-        if let Some(store) = &self.store {
+        let store = self.store.as_ref().filter(|_| !direct);
+        if let Some(store) = store {
             store.record_job_state(&task, JobState::Queued, None, None)?;
         }
         let (worker_base_url, worker_token) = self
             .select_worker(task.model_id.as_deref(), task.kind)
             .await?;
         let schedule_ms = total_started.elapsed().as_millis() as u64;
-        if let Some(store) = &self.store {
+        if let Some(store) = store {
             store.record_job_state(&task, JobState::Running, None, None)?;
         }
         let url = format!("{worker_base_url}/internal/infer");
@@ -523,12 +547,27 @@ impl ControllerState {
             .map_err(|e| InfraError::Backend(format!("forward inference task to worker: {e}")))?;
         let worker_response_headers_ms = http_started.elapsed().as_millis() as u64;
         if !response.status().is_success() {
+            let status = response.status();
             let text = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "<empty worker error>".to_string());
-            let err = InfraError::Backend(format!("worker returned non-success response: {text}"));
-            if let Some(store) = &self.store {
+            let err = if direct && status == reqwest::StatusCode::BAD_REQUEST {
+                // The frame is at fault (the worker says why).
+                let message = serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .and_then(|body| body["error"].as_str().map(str::to_string))
+                    .unwrap_or(text);
+                InfraError::BadRequest(
+                    message
+                        .strip_prefix("bad request: ")
+                        .map(str::to_string)
+                        .unwrap_or(message),
+                )
+            } else {
+                InfraError::Backend(format!("worker returned non-success response: {text}"))
+            };
+            if let Some(store) = store {
                 store.record_job_state(&task, JobState::Failed, None, Some(&err.to_string()))?;
             }
             return Err(err);
@@ -539,7 +578,7 @@ impl ControllerState {
             .await
             .map_err(|e| InfraError::Backend(format!("decode worker inference response: {e}")))?;
         let response_body_decode_ms = body_started.elapsed().as_millis() as u64;
-        if let Some(store) = &self.store {
+        if let Some(store) = store {
             store.record_job_state(&task, JobState::Succeeded, Some(&output), None)?;
         }
         tracing::info!(
@@ -1174,7 +1213,13 @@ impl ControllerState {
                         )
                     })
                     .and_then(to_ref)?,
-                grid: depth_grid(|key| status.params.get(key).and_then(Value::as_u64))?,
+                grid: depth_grid(|key| {
+                    status.params.get(key).map(|value| {
+                        value
+                            .as_u64()
+                            .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+                    })
+                })?,
             },
             local_core::TaskKind::AsrTranscribe => InferenceInput::AsrTranscribe {
                 audio: uploaded("audio")
@@ -1845,7 +1890,7 @@ async fn depth_map(
     Query(query): Query<BTreeMap<String, String>>,
     body: Bytes,
 ) -> axum::response::Response {
-    let grid = match depth_grid(|key| query.get(key).and_then(|v| v.parse().ok())) {
+    let grid = match depth_grid(|key| query.get(key).map(|v| v.parse().ok())) {
         Ok(grid) => grid,
         Err(err) => return error_response(err),
     };
@@ -1873,18 +1918,21 @@ async fn depth_map(
     }
 }
 
-/// A depth grid from `cols` and `rows` (both or neither).
-fn depth_grid(get: impl Fn(&str) -> Option<u64>) -> Result<Option<local_core::DepthGrid>> {
+/// A depth grid from `cols` and `rows` (both or neither); `get` is `None`
+/// for a missing key, `Some(None)` for one that is not a whole number.
+fn depth_grid(get: impl Fn(&str) -> Option<Option<u64>>) -> Result<Option<local_core::DepthGrid>> {
     match (get("cols"), get("rows")) {
         (None, None) => Ok(None),
-        (Some(cols), Some(rows)) if (1..=4096).contains(&cols) && (1..=4096).contains(&rows) => {
+        (Some(Some(cols)), Some(Some(rows)))
+            if (1..=4096).contains(&cols) && (1..=4096).contains(&rows) =>
+        {
             Ok(Some(local_core::DepthGrid {
                 cols: cols as u32,
                 rows: rows as u32,
             }))
         }
         _ => Err(InfraError::BadRequest(
-            "cols and rows go together, each 1 to 4096".to_string(),
+            "cols and rows go together, each a whole number from 1 to 4096".to_string(),
         )),
     }
 }
@@ -1904,23 +1952,50 @@ async fn direct_image_task(
             "the request body must be an image".to_string(),
         ));
     }
+    // Named by the image type: some adapters pick the decoder by extension.
+    let extension = match body.as_ref() {
+        [0x89, b'P', b'N', b'G', ..] => "png",
+        [0xff, 0xd8, 0xff, ..] => "jpg",
+        [b'B', b'M', ..] => "bmp",
+        _ => {
+            return Err(InfraError::BadRequest(
+                "the request body must be a PNG, JPEG or BMP image".to_string(),
+            ));
+        }
+    };
     let dir = state.data_dir.join("tmp").join("direct-images");
-    let path = dir.join(format!("{}.img", Uuid::new_v4()));
+    let path = dir.join(format!("{}.{extension}", Uuid::new_v4()));
     let task = InferenceTask::new(
         kind,
         query.get("model").cloned(),
         input(FileRef::local(&path)),
     );
-    let written = fs::create_dir_all(&dir).and_then(|()| fs::write(&path, body));
-    let result = match written {
-        Ok(()) => state.forward_to_worker(task).await,
-        Err(source) => Err(InfraError::Io {
-            path: Some(path.clone()),
-            source,
-        }),
-    };
-    let _ = fs::remove_file(&path);
-    result
+    let body = body.clone();
+    let write_path = path.clone();
+    // The guard comes with the written file, so it is removed however this
+    // ends (an answer, an error, the client gone, even mid-write).
+    let _file = tokio::task::spawn_blocking(move || {
+        fs::create_dir_all(&dir)?;
+        let file = RemoveOnDrop(write_path);
+        fs::write(&file.0, &body)?;
+        Ok::<_, std::io::Error>(file)
+    })
+    .await
+    .map_err(|err| InfraError::Runtime(format!("write the image: {err}")))?
+    .map_err(|source| InfraError::Io {
+        path: Some(path.clone()),
+        source,
+    })?;
+    state.forward_to_worker_as(task, true).await
+}
+
+/// Removes its file when dropped.
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 fn error_response(err: InfraError) -> axum::response::Response {

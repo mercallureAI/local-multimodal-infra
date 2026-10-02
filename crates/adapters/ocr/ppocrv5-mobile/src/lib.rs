@@ -432,8 +432,28 @@ pub fn text_boxes(
             boxes.push(b);
         }
     }
-    boxes.sort_by_key(|b| (b.y0, b.x0));
+    reading_order(&mut boxes);
     boxes
+}
+
+/// Boxes whose tops are this close (px) are on one row (PaddleOCR's
+/// `sorted_boxes`).
+const SAME_ROW_PX: u32 = 10;
+
+/// Top to bottom, then left to right within a row: boxes on one row whose
+/// tops differ by a few pixels still read left to right.
+pub fn reading_order(boxes: &mut [PixelBox]) {
+    boxes.sort_by_key(|b| (b.y0, b.x0));
+    for i in 1..boxes.len() {
+        let mut j = i;
+        while j > 0
+            && boxes[j].y0.abs_diff(boxes[j - 1].y0) < SAME_ROW_PX
+            && boxes[j].x0 < boxes[j - 1].x0
+        {
+            boxes.swap(j, j - 1);
+            j -= 1;
+        }
+    }
 }
 
 /// Greedy CTC decoding of one line (`steps` x `classes` probabilities):

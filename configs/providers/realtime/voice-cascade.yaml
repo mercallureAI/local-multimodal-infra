@@ -31,6 +31,8 @@ metadata:
   # The low-latency float16 SenseVoice (~40-90 ms per utterance on CUDA;
   # sensevoice-small-onnx, int8: ~200-350 ms).
   asr_model: sensevoice-small-fp16-onnx
+  # Used instead when asr_model cannot load (not exported here).
+  asr_fallback_model: sensevoice-small-onnx
   # Qwen3-TTS streams: a clause starts playing ~50 ms after it is asked
   # for. IndexTTS (indextts-1.5-onnx, indextts-2.5-onnx) speaks clause by
   # clause.

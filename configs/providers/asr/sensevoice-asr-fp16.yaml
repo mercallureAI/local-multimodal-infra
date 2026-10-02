@@ -31,6 +31,9 @@ load_policy:
   evictable: true
   pin: false
 metadata:
+  # Used where it is named (voice-cascade's asr_model), never picked for a
+  # task naming no model: most installs lack the local export.
+  auto_select: false
   license: FunASR Model License
   runtime: onnxruntime
   model_family: funasr_full_asr
