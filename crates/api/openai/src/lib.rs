@@ -464,6 +464,13 @@ mod tests {
                 TaskKind::OcrRecognize => InferenceOutput::OcrText {
                     text: "ok".to_string(),
                 },
+                TaskKind::OcrLines => InferenceOutput::OcrLines { lines: Vec::new() },
+                TaskKind::DepthEstimate => InferenceOutput::DepthMap {
+                    cols: 1,
+                    rows: 1,
+                    max_depth: 20.0,
+                    depth: vec![1.0],
+                },
                 TaskKind::VoiceRealtime => InferenceOutput::Accepted {
                     job_id: "unsupported-test".to_string(),
                 },
@@ -738,7 +745,10 @@ mod tests {
         let params = &tasks[0].params;
         assert_eq!(params.get("language"), Some(&serde_json::json!("zh")));
         assert_eq!(params.get("speed"), Some(&serde_json::json!(1.25)));
-        assert_eq!(params.get("emotion_vector"), Some(&serde_json::json!({"happy": 0.6})));
+        assert_eq!(
+            params.get("emotion_vector"),
+            Some(&serde_json::json!({"happy": 0.6}))
+        );
         assert!(!params.contains_key("model") && !params.contains_key("input"));
     }
 

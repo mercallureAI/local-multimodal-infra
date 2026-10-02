@@ -123,7 +123,9 @@ pub fn split_text_by_tokens(
     max_tokens: usize,
     prefix: &str,
 ) -> Vec<String> {
-    let budget = max_tokens.saturating_sub(tokenizer.token_len(prefix)).max(1);
+    let budget = max_tokens
+        .saturating_sub(tokenizer.token_len(prefix))
+        .max(1);
     let fits = |s: &str| tokenizer.token_len(s) <= budget;
     if fits(text) {
         return vec![text.to_string()];
@@ -210,13 +212,44 @@ fn split_after_punctuation(text: &str) -> Vec<&str> {
 /// normalization is off).
 fn apply_char_rep_map(text: &str) -> String {
     const MAP: [(&str, &str); 38] = [
-        ("：", ","), ("；", ","), (";", ","), ("，", ","), ("。", "."), ("！", "!"),
-        ("？", "?"), ("\n", " "), ("·", "-"), ("、", ","), ("...", "…"), (",,,", "…"),
-        ("，，，", "…"), ("……", "…"), ("“", "'"), ("”", "'"), ("\"", "'"), ("‘", "'"),
-        ("’", "'"), ("（", "'"), ("）", "'"), ("(", "'"), (")", "'"), ("《", "'"),
-        ("》", "'"), ("【", "'"), ("】", "'"), ("[", "'"), ("]", "'"), ("—", "-"),
-        ("～", "-"), ("~", "-"), ("「", "'"), ("」", "'"), (":", ","), ("−", "-"),
-        ("\u{3000}", " "), ("\t", " "),
+        ("：", ","),
+        ("；", ","),
+        (";", ","),
+        ("，", ","),
+        ("。", "."),
+        ("！", "!"),
+        ("？", "?"),
+        ("\n", " "),
+        ("·", "-"),
+        ("、", ","),
+        ("...", "…"),
+        (",,,", "…"),
+        ("，，，", "…"),
+        ("……", "…"),
+        ("“", "'"),
+        ("”", "'"),
+        ("\"", "'"),
+        ("‘", "'"),
+        ("’", "'"),
+        ("（", "'"),
+        ("）", "'"),
+        ("(", "'"),
+        (")", "'"),
+        ("《", "'"),
+        ("》", "'"),
+        ("【", "'"),
+        ("】", "'"),
+        ("[", "'"),
+        ("]", "'"),
+        ("—", "-"),
+        ("～", "-"),
+        ("~", "-"),
+        ("「", "'"),
+        ("」", "'"),
+        (":", ","),
+        ("−", "-"),
+        ("\u{3000}", " "),
+        ("\t", " "),
     ];
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -272,19 +305,34 @@ mod tests {
     #[test]
     fn annotations_survive_normalization_and_lowercasing() {
         let text = prepare_text("最<重|ZHONG4>要的是2个", "zh", true, None);
-        assert!(text.contains("<|SPECIAL_TOKEN_2|>ZHONG4<|SPECIAL_TOKEN_2|>"), "{text}");
+        assert!(
+            text.contains("<|SPECIAL_TOKEN_2|>ZHONG4<|SPECIAL_TOKEN_2|>"),
+            "{text}"
+        );
         assert!(!text.contains('2') || text.contains("ZHONG4"), "{text}");
     }
 
     #[test]
     fn non_zh_en_languages_only_replace_characters_and_case() {
-        assert_eq!(prepare_text("今日は「晴れ」です。", "ja", true, None), "今日は'晴れ'です.");
-        assert_eq!(prepare_text("Hola, ¿cómo estás? 25 años", "es", true, None), "HOLA, ¿CÓMO ESTÁS? 25 AÑOS");
-        assert_eq!(prepare_text("مرحبا، العالم (1)", "ar", true, None), "مرحبا، العالم '1'");
+        assert_eq!(
+            prepare_text("今日は「晴れ」です。", "ja", true, None),
+            "今日は'晴れ'です."
+        );
+        assert_eq!(
+            prepare_text("Hola, ¿cómo estás? 25 años", "es", true, None),
+            "HOLA, ¿CÓMO ESTÁS? 25 AÑOS"
+        );
+        assert_eq!(
+            prepare_text("مرحبا، العالم (1)", "ar", true, None),
+            "مرحبا، العالم '1'"
+        );
     }
 
     #[test]
     fn punctuation_split_keeps_marks_on_the_left() {
-        assert_eq!(split_after_punctuation("你好，世界。ok"), ["你好，", "世界。", "ok"]);
+        assert_eq!(
+            split_after_punctuation("你好，世界。ok"),
+            ["你好，", "世界。", "ok"]
+        );
     }
 }

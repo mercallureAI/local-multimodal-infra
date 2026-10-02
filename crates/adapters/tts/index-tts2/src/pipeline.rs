@@ -7,16 +7,15 @@
 
 use crate::{
     artifacts::{IndexTts2Artifacts, PackageRuntime},
-    audio,
-    frontend,
+    audio, frontend,
     params::SynthesisParams,
     tokenizer::MultilingualTokenizer,
 };
+use local_adapter_index_tts::MandarinFrontend;
 use local_backend_ort::{
     DeviceBinding, DeviceTensor, OrtBackend, OrtSession, OrtTensorData, OrtTensorInput,
     OrtTensorOutput, ProviderSelection, SessionProviderReport, SharedInitializers,
 };
-use local_adapter_index_tts::MandarinFrontend;
 use local_core::{FileRef, InferenceOutput, ModelSpec};
 use local_error::{InfraError, Result};
 use serde_json::Value;
@@ -88,7 +87,8 @@ impl Graph {
         host: Vec<OrtTensorInput>,
         device: &[(&str, &DeviceTensor)],
     ) -> Result<local_backend_ort::DeviceBindingOutputs> {
-        self.session.run_device_binding(&mut self.binding, host, device)
+        self.session
+            .run_device_binding(&mut self.binding, host, device)
     }
 }
 
@@ -134,9 +134,10 @@ impl IndexTts2Adapter {
         let manifest = &artifacts.manifest;
         // Initializers go straight to the device allocator instead of the BFC
         // arena, which would round each weight region up to a power of two.
-        let mut backend =
-            OrtBackend::new(ProviderSelection::from_strings(&spec.runtime.provider_order))
-                .with_config_entry("session.use_device_allocator_for_initializers", "1");
+        let mut backend = OrtBackend::new(ProviderSelection::from_strings(
+            &spec.runtime.provider_order,
+        ))
+        .with_config_entry("session.use_device_allocator_for_initializers", "1");
         if !manifest.disabled_optimizers.is_empty() {
             backend = backend.with_config_entry(
                 "optimization.disable_specified_optimizers",
@@ -155,7 +156,12 @@ impl IndexTts2Adapter {
         let reference = Graph::load(
             &backend,
             &artifacts.graph(&graphs.reference_preprocess),
-            &["semantic_features", "style", "reference_hidden", "null_hidden"],
+            &[
+                "semantic_features",
+                "style",
+                "reference_hidden",
+                "null_hidden",
+            ],
         )?;
         let conditioning = Graph::load(
             &backend,
@@ -167,7 +173,8 @@ impl IndexTts2Adapter {
                 let data_file = shared.data_file.as_deref().ok_or_else(|| {
                     InfraError::Adapter("device_shared_initializers has no data_file".to_string())
                 })?;
-                let uploaded = backend.upload_initializers(&artifacts.graph(data_file), &shared.tensors)?;
+                let uploaded =
+                    backend.upload_initializers(&artifacts.graph(data_file), &shared.tensors)?;
                 tracing::info!(
                     tensors = uploaded.len(),
                     mib = uploaded.bytes() / (1 << 20),
@@ -193,7 +200,12 @@ impl IndexTts2Adapter {
         let synthesis = Graph::load(
             &backend,
             &artifacts.graph(&graphs.synthesis),
-            &["static_hidden", "cfg_scales", "cfg_scale_sum", "target_mask"],
+            &[
+                "static_hidden",
+                "cfg_scales",
+                "cfg_scale_sum",
+                "target_mask",
+            ],
         )?;
         let cfm = Graph::load(
             &backend,
@@ -277,7 +289,10 @@ impl IndexTts2Adapter {
             params.text_normalization,
             self.mandarin.as_ref(),
         );
-        if segments.iter().all(|segment| segment.text.trim().is_empty()) {
+        if segments
+            .iter()
+            .all(|segment| segment.text.trim().is_empty())
+        {
             return Err(InfraError::BadRequest(
                 "IndexTTS-2.5 text is empty after normalization".to_string(),
             ));
@@ -290,13 +305,21 @@ impl IndexTts2Adapter {
 
         let mut rng = Rng::new(params.seed);
         let mut audio = Vec::new();
-        let silence =
-            vec![0.0f32; (self.runtime.out_sample_rate as u64 * params.interval_silence_ms / 1000) as usize];
+        let silence = vec![
+            0.0f32;
+            (self.runtime.out_sample_rate as u64 * params.interval_silence_ms / 1000)
+                as usize
+        ];
         let mut total_codes = 0usize;
         for (index, segment) in segments.iter().enumerate() {
             let segment_started = Instant::now();
-            let (codes, accepted) =
-                self.generate_codes(&segment.ids, language_id, &params, &speaker_latent, &emotion_vector)?;
+            let (codes, accepted) = self.generate_codes(
+                &segment.ids,
+                language_id,
+                &params,
+                &speaker_latent,
+                &emotion_vector,
+            )?;
             let generate_ms = segment_started.elapsed().as_millis() as u64;
             let waveform = self.render_segment(
                 &segment.ids,
@@ -340,14 +363,20 @@ impl IndexTts2Adapter {
     }
 
     fn ensure_reference(&mut self, path: &Path) -> Result<()> {
-        let metadata = fs::metadata(path)
-            .map_err(|e| InfraError::BadRequest(format!("reference audio {}: {e}", path.display())))?;
+        let metadata = fs::metadata(path).map_err(|e| {
+            InfraError::BadRequest(format!("reference audio {}: {e}", path.display()))
+        })?;
         let key = (path.to_path_buf(), metadata.len(), metadata.modified().ok());
-        if self.cached_reference.as_ref().is_some_and(|state| state.key == key) {
+        if self
+            .cached_reference
+            .as_ref()
+            .is_some_and(|state| state.key == key)
+        {
             return Ok(());
         }
         self.cached_reference = None;
-        let samples = audio::read_wav_mono(path, self.runtime.in_sample_rate, MAX_REFERENCE_SECONDS)?;
+        let samples =
+            audio::read_wav_mono(path, self.runtime.in_sample_rate, MAX_REFERENCE_SECONDS)?;
         // The in-graph 16 kHz fbank needs at least one 25 ms frame plus a shift.
         let minimum = (560 * self.runtime.in_sample_rate as usize).div_ceil(16_000);
         if samples.len() < minimum {
@@ -359,10 +388,9 @@ impl IndexTts2Adapter {
             )));
         }
         let len = samples.len();
-        let mut outputs = self.reference.run(
-            vec![host_f32("audio", vec![1, 1, len], samples)],
-            &[],
-        )?;
+        let mut outputs = self
+            .reference
+            .run(vec![host_f32("audio", vec![1, 1, len], samples)], &[])?;
         let speaker_features = outputs.take_device("semantic_features")?;
         let speaker_frames = *speaker_features.shape().get(1).ok_or_else(|| {
             InfraError::Backend("semantic_features has no frame axis".to_string())
@@ -380,11 +408,13 @@ impl IndexTts2Adapter {
 
     /// Emotion from an explicit 8-way vector (scaled by `emotion_alpha`, as
     /// upstream) or, by default, from the speaker reference itself.
-    fn run_conditioning(&mut self, params: &SynthesisParams) -> Result<(DeviceTensor, DeviceTensor)> {
-        let state = self
-            .cached_reference
-            .as_ref()
-            .ok_or_else(|| InfraError::Backend("IndexTTS-2.5 reference state missing".to_string()))?;
+    fn run_conditioning(
+        &mut self,
+        params: &SynthesisParams,
+    ) -> Result<(DeviceTensor, DeviceTensor)> {
+        let state = self.cached_reference.as_ref().ok_or_else(|| {
+            InfraError::Backend("IndexTTS-2.5 reference state missing".to_string())
+        })?;
         let weights = match params.emotion_vector {
             Some(vector) => {
                 let scale = params.emotion_alpha.clamp(0.0, 1.0);
@@ -425,20 +455,35 @@ impl IndexTts2Adapter {
         let controls = |repetition: bool| {
             let mut inputs = vec![
                 host_f32("temperature", vec![1], vec![params.temperature]),
-                host_i64("top_k", vec![1], vec![params.top_k.min(self.runtime.mel_code_size) as i64]),
+                host_i64(
+                    "top_k",
+                    vec![1],
+                    vec![params.top_k.min(self.runtime.mel_code_size) as i64],
+                ),
                 host_f32("top_p", vec![1], vec![params.top_p]),
             ];
             if repetition {
-                inputs.push(host_f32("repetition_penalty", vec![1], vec![params.repetition_penalty]));
+                inputs.push(host_f32(
+                    "repetition_penalty",
+                    vec![1],
+                    vec![params.repetition_penalty],
+                ));
             }
             inputs
         };
         let mut host = controls(false);
-        host.push(host_i32("text_ids", vec![1, text_ids.len()], text_ids.to_vec()));
+        host.push(host_i32(
+            "text_ids",
+            vec![1, text_ids.len()],
+            text_ids.to_vec(),
+        ));
         host.push(host_i64("language_id", vec![1], vec![language_id]));
         let mut outputs = self.prefill.run(
             host,
-            &[("speaker_latent", speaker_latent), ("emotion_vector", emotion_vector)],
+            &[
+                ("speaker_latent", speaker_latent),
+                ("emotion_vector", emotion_vector),
+            ],
         )?;
         let mut kv = take_kv(&mut outputs, &self.kv_out)?;
         let mut token = outputs.take_host("next_token")?;
@@ -449,9 +494,11 @@ impl IndexTts2Adapter {
             shape: vec![1, 1],
             data: token.data.clone(),
         };
-        let max_tokens = params
-            .max_mel_tokens
-            .min(self.runtime.max_signal_length.saturating_sub(prefill_length));
+        let max_tokens = params.max_mel_tokens.min(
+            self.runtime
+                .max_signal_length
+                .saturating_sub(prefill_length),
+        );
         let mut accepted = 0usize;
         loop {
             if scalar_i32(&token)? == self.runtime.stop_mel_token {
@@ -459,7 +506,10 @@ impl IndexTts2Adapter {
             }
             accepted += 1;
             if accepted >= max_tokens {
-                tracing::warn!(max_tokens, "IndexTTS-2.5 hit the mel token limit without a stop token");
+                tracing::warn!(
+                    max_tokens,
+                    "IndexTTS-2.5 hit the mel token limit without a stop token"
+                );
                 break;
             }
             let mut host = controls(true);
@@ -500,10 +550,9 @@ impl IndexTts2Adapter {
         let mut padded = text_ids.to_vec();
         padded.push(1);
         // Field-level borrow so `self.synthesis` can be borrowed mutably.
-        let state = self
-            .cached_reference
-            .as_ref()
-            .ok_or_else(|| InfraError::Backend("IndexTTS-2.5 reference state missing".to_string()))?;
+        let state = self.cached_reference.as_ref().ok_or_else(|| {
+            InfraError::Backend("IndexTTS-2.5 reference state missing".to_string())
+        })?;
         let mut outputs = self.synthesis.run(
             vec![
                 host_i32("text_ids", vec![1, padded.len()], padded),
@@ -525,9 +574,10 @@ impl IndexTts2Adapter {
         let cfg_scale_sum = outputs.take_device("cfg_scale_sum")?;
         let target_mask = outputs.take_device("target_mask")?;
         let target_length = outputs.take_host("target_length")?;
-        let total_frames = *static_hidden.shape().get(1).ok_or_else(|| {
-            InfraError::Backend("static_hidden has no frame axis".to_string())
-        })?;
+        let total_frames = *static_hidden
+            .shape()
+            .get(1)
+            .ok_or_else(|| InfraError::Backend("static_hidden has no frame axis".to_string()))?;
 
         let noise = (0..total_frames * 80)
             .map(|_| rng.normal() * params.diffusion_temperature)
@@ -543,7 +593,11 @@ impl IndexTts2Adapter {
             ];
             match &mel {
                 Some(current) => device.push(("mel_features", current)),
-                None => host.push(host_f32("mel_features", vec![1, total_frames, 80], noise.clone())),
+                None => host.push(host_f32(
+                    "mel_features",
+                    vec![1, total_frames, 80],
+                    noise.clone(),
+                )),
             }
             let mut outputs = self.cfm.run(host, &device)?;
             drop(device);
@@ -566,7 +620,9 @@ impl IndexTts2Adapter {
     fn write_output(&self, samples: &[f32]) -> Result<FileRef> {
         fs::create_dir_all(&self.output_dir)
             .map_err(|e| InfraError::io(Some(self.output_dir.clone()), e))?;
-        let path = self.output_dir.join(format!("indextts2-{}.wav", Uuid::new_v4()));
+        let path = self
+            .output_dir
+            .join(format!("indextts2-{}.wav", Uuid::new_v4()));
         audio::write_wav_i16(&path, samples, self.runtime.out_sample_rate)?;
         let mut file = FileRef::local(path);
         file.mime = Some("audio/wav".to_string());
@@ -589,19 +645,35 @@ fn take_kv(
 }
 
 fn host_f32(name: &str, shape: Vec<usize>, data: Vec<f32>) -> OrtTensorInput {
-    OrtTensorInput { name: name.to_string(), shape, data: OrtTensorData::F32(data) }
+    OrtTensorInput {
+        name: name.to_string(),
+        shape,
+        data: OrtTensorData::F32(data),
+    }
 }
 
 fn host_i32(name: &str, shape: Vec<usize>, data: Vec<i32>) -> OrtTensorInput {
-    OrtTensorInput { name: name.to_string(), shape, data: OrtTensorData::I32(data) }
+    OrtTensorInput {
+        name: name.to_string(),
+        shape,
+        data: OrtTensorData::I32(data),
+    }
 }
 
 fn host_i64(name: &str, shape: Vec<usize>, data: Vec<i64>) -> OrtTensorInput {
-    OrtTensorInput { name: name.to_string(), shape, data: OrtTensorData::I64(data) }
+    OrtTensorInput {
+        name: name.to_string(),
+        shape,
+        data: OrtTensorData::I64(data),
+    }
 }
 
 fn renamed(output: OrtTensorOutput, name: &str) -> OrtTensorInput {
-    OrtTensorInput { name: name.to_string(), shape: output.shape, data: output.data }
+    OrtTensorInput {
+        name: name.to_string(),
+        shape: output.shape,
+        data: output.data,
+    }
 }
 
 fn scalar_i32(output: &OrtTensorOutput) -> Result<i32> {
@@ -634,7 +706,10 @@ struct Rng {
 
 impl Rng {
     fn new(seed: u64) -> Self {
-        Self { state: seed, spare: None }
+        Self {
+            state: seed,
+            spare: None,
+        }
     }
 
     fn next_u64(&mut self) -> u64 {
@@ -682,7 +757,6 @@ mod tests {
         assert!(mean.abs() < 0.03, "{mean}");
         assert!((var - 1.0).abs() < 0.05, "{var}");
     }
-
 }
 
 /// Opt-in end-to-end synthesis against a real package:
@@ -766,7 +840,10 @@ mod real_model {
         let custom = env::var("LOCAL_INDEXTTS2_AB_TEXT")
             .map(|path| fs::read_to_string(path).expect("read LOCAL_INDEXTTS2_AB_TEXT"));
         let texts: Vec<&str> = match &custom {
-            Ok(text) => text.lines().filter(|line| !line.trim().is_empty()).collect(),
+            Ok(text) => text
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .collect(),
             Err(_) => texts.to_vec(),
         };
         let params: BTreeMap<String, Value> =
@@ -784,8 +861,11 @@ mod real_model {
                     panic!("unexpected output");
                 };
                 let path = audio.path.expect("wav path");
-                fs::copy(&path, Path::new(&ab_dir).join(format!("{label}_{index:02}.wav")))
-                    .expect("keep wav");
+                fs::copy(
+                    &path,
+                    Path::new(&ab_dir).join(format!("{label}_{index:02}.wav")),
+                )
+                .expect("keep wav");
                 std::mem::swap(&mut adapter.mandarin, &mut parked);
             }
         }
@@ -805,7 +885,11 @@ mod real_model {
         let load_started = Instant::now();
         let mut adapter =
             IndexTts2Adapter::load(&spec(model_dir)).expect("load IndexTTS-2.5 package");
-        eprintln!("load {:?}; providers {:?}", load_started.elapsed(), adapter.provider_report());
+        eprintln!(
+            "load {:?}; providers {:?}",
+            load_started.elapsed(),
+            adapter.provider_report()
+        );
         let reference = FileRef::local(PathBuf::from(reference));
         let cases = [
             ("zh", "大家好，我现在正在体验 IndexTTS 二点五的 Rust 推理。", json!({"seed": 9527})),
@@ -837,10 +921,14 @@ mod real_model {
             let reader = hound::WavReader::open(&path).expect("open output wav");
             let seconds = reader.duration() as f32 / reader.spec().sample_rate as f32;
             let elapsed = started.elapsed().as_secs_f32();
-            eprintln!("{label}: {seconds:.2}s audio in {elapsed:.2}s (RTF {:.3})", elapsed / seconds);
+            eprintln!(
+                "{label}: {seconds:.2}s audio in {elapsed:.2}s (RTF {:.3})",
+                elapsed / seconds
+            );
             assert!(seconds > 0.5, "{label} produced {seconds}s of audio");
             if let Ok(keep) = env::var("LOCAL_INDEXTTS2_KEEP_DIR") {
-                fs::copy(&path, Path::new(&keep).join(format!("rust_{label}.wav"))).expect("keep wav");
+                fs::copy(&path, Path::new(&keep).join(format!("rust_{label}.wav")))
+                    .expect("keep wav");
             }
         }
     }

@@ -1,0 +1,45 @@
+id: ppocrv5-mobile-onnx
+name: PP-OCRv5 mobile text lines ONNX
+enabled: true
+task_kinds:
+  - ocr.lines
+adapter: ppocrv5_mobile
+backend: ort
+artifacts:
+  # paddle2onnx conversions of PaddleOCR's PP-OCRv5_mobile_det and
+  # PP-OCRv5_mobile_rec (Chinese, English, Japanese and more in one model).
+  - type: hugging_face
+    repo_id: ilaylow/PP_OCRv5_mobile_onnx
+    revision: f97b337b3ac256f9dffcac5fc53955082d919d58
+    files: [ppocrv5_det.onnx, ppocrv5_rec.onnx]
+  # The recogniser's characters (18383; its 18385 classes add the CTC blank
+  # and a space), identical to PP-OCRv5_mobile_rec's inference.yml.
+  - type: url
+    url: https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/a38c087bcb2579f9ccc2068aea02ec893b1c2311/ppocr/utils/dict/ppocrv5_dict.txt
+    sha256: d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b
+    path: ppocrv5_dict.txt
+runtime:
+  provider_order: [cuda, cpu]
+  max_concurrency: 1
+  idle_ttl_sec: 600
+resources:
+  min_ram_mb: 512
+  min_vram_mb: 0
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  runtime: onnxruntime
+  # Detection / recognition knobs (adapter defaults shown, but for
+  # det_limit_side_len: 960 by default; 1280 keeps 720p game frames whole,
+  # so small, far name tags are still found).
+  det_limit_side_len: 1280
+  # All lines in one recognition batch (up to 32): a 1280 px game frame gives
+  # ~10-15 small boxes, and split in two batches of 8 they took ~320 ms with
+  # fewer lines read, against ~30 ms in one (RTX 4090).
+  rec_batch: 32
+  det_thresh: 0.3
+  box_thresh: 0.6
+  unclip_ratio: 1.5
+  min_confidence: 0.5

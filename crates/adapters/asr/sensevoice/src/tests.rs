@@ -27,6 +27,39 @@ fn validates_official_artifact_layout() {
 }
 
 #[test]
+fn metadata_names_another_asr_graph() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for subdir in ["asr", "vad", "speaker"] {
+        fs::create_dir_all(dir.path().join(subdir)).expect("mkdir");
+    }
+    for name in ["model_fp16.onnx", CONFIG_FILE, CMVN_FILE, TOKENS_FILE] {
+        File::create(dir.path().join("asr").join(name)).expect("create");
+    }
+    for name in [MODEL_FILE, CONFIG_FILE, CMVN_FILE] {
+        File::create(dir.path().join("vad").join(name)).expect("create");
+    }
+    File::create(dir.path().join("speaker/campplus_cn_en_common_200k.onnx")).expect("create");
+    let mut spec = model_spec(dir.path().to_path_buf());
+    spec.metadata.insert(
+        ASR_MODEL_FILE_KEY.to_string(),
+        serde_json::json!("model_fp16.onnx"),
+    );
+    let artifacts = SenseVoiceArtifacts::from_spec(&spec).expect("validate");
+    assert_eq!(artifacts.model, dir.path().join("asr/model_fp16.onnx"));
+    // The VAD keeps its own graph.
+    assert!(artifacts.vad_root.join(MODEL_FILE).is_file());
+    // Without the int8 graph, the default layout is incomplete.
+    spec.metadata.remove(ASR_MODEL_FILE_KEY);
+    assert!(SenseVoiceArtifacts::from_spec(&spec).is_err());
+    // Only a file name in asr/.
+    spec.metadata.insert(
+        ASR_MODEL_FILE_KEY.to_string(),
+        serde_json::json!("../model_fp16.onnx"),
+    );
+    assert!(SenseVoiceArtifacts::from_spec(&spec).is_err());
+}
+
+#[test]
 fn wav_reader_mixes_and_resamples_to_16k() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("stereo_8k.wav");
@@ -463,5 +496,96 @@ fn model_spec(root: PathBuf) -> ModelSpec {
         resources: ResourceRequirement::default(),
         load_policy: Default::default(),
         metadata,
+    }
+}
+
+/// Where a voice-cascade utterance's ASR time goes (no timestamps, no
+/// diarization, as the cascade asks): FSMN-VAD, features, SenseVoice.
+/// `LOCAL_SENSEVOICE_ASR_STAGE_TIMING=1` with the model directory set
+/// (`LOCAL_SENSEVOICE_ASR_MODEL_FILE`: its graph in asr/, e.g.
+/// model_fp16.onnx); `LOCAL_SENSEVOICE_ASR_STAGE_SECONDS` cuts the audio
+/// (default 1.5).
+#[test]
+fn real_model_stage_timing_if_env_set() {
+    if std::env::var("LOCAL_SENSEVOICE_ASR_STAGE_TIMING").as_deref() != Ok("1") {
+        return;
+    }
+    let model_dir = std::env::var("LOCAL_SENSEVOICE_ASR_MODEL_DIR").expect("model directory");
+    let audio = std::env::var_os("LOCAL_SENSEVOICE_ASR_TEST_AUDIO")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../../scripts/assets/tts-input-mon3tr.wav")
+        });
+    let seconds: f32 = std::env::var("LOCAL_SENSEVOICE_ASR_STAGE_SECONDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1.5);
+    let mut spec = model_spec(PathBuf::from(model_dir));
+    if let Ok(file) = std::env::var("LOCAL_SENSEVOICE_ASR_MODEL_FILE") {
+        spec.metadata
+            .insert(ASR_MODEL_FILE_KEY.to_string(), serde_json::json!(file));
+    }
+    let mut adapter = SenseVoiceAsrAdapter::load(&spec).expect("load real SenseVoice model");
+    eprintln!("providers: {:?}", adapter.pipeline_provider_report());
+    let mut samples = audio::read_wav_mono_f32(&audio).expect("read audio");
+    samples.truncate((seconds * 16_000.0) as usize);
+    let cut = std::env::temp_dir().join("sensevoice-stage-timing.wav");
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 16_000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(&cut, spec).expect("write cut audio");
+    for sample in &samples {
+        writer
+            .write_sample((sample.clamp(-1.0, 1.0) * 32767.0) as i16)
+            .expect("write sample");
+    }
+    writer.finalize().expect("finish cut audio");
+    let params: BTreeMap<String, serde_json::Value> = [
+        ("timestamps".to_string(), serde_json::Value::Bool(false)),
+        (
+            "speaker_diarization".to_string(),
+            serde_json::Value::Bool(false),
+        ),
+    ]
+    .into();
+    for round in 0..6 {
+        let started = std::time::Instant::now();
+        let read = audio::read_wav_mono_f32(&cut).expect("read cut audio");
+        let read_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let at = std::time::Instant::now();
+        let segments = adapter.vad.segment(&read).expect("vad");
+        let vad_ms = at.elapsed().as_secs_f64() * 1000.0;
+        let (mut features_ms, mut asr_ms) = (0.0, 0.0);
+        for segment in &segments {
+            let at = std::time::Instant::now();
+            let features = features::extract(
+                &read[segment.start_sample..segment.end_sample],
+                &adapter.config.frontend_conf,
+                &adapter.cmvn,
+            )
+            .expect("features");
+            features_ms += at.elapsed().as_secs_f64() * 1000.0;
+            let at = std::time::Instant::now();
+            adapter.infer_features(features).expect("infer");
+            asr_ms += at.elapsed().as_secs_f64() * 1000.0;
+        }
+        let at = std::time::Instant::now();
+        let output = adapter
+            .transcribe_with_params(&FileRef::local(&cut), &params)
+            .expect("transcribe");
+        let whole_ms = at.elapsed().as_secs_f64() * 1000.0;
+        let InferenceOutput::AsrTranscription { text, .. } = output else {
+            panic!("unexpected output")
+        };
+        eprintln!(
+            "round {round}: {seconds}s audio, {} segments: read {read_ms:.1} ms, \
+             vad {vad_ms:.1} ms, features {features_ms:.1} ms, sensevoice {asr_ms:.1} ms; \
+             transcribe {whole_ms:.1} ms {text:?}",
+            segments.len()
+        );
     }
 }

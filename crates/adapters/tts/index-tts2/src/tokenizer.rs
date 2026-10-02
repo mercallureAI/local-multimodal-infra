@@ -11,11 +11,7 @@ use base64::Engine;
 use local_error::{InfraError, Result};
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::Path,
-};
+use std::{collections::BTreeMap, fs, path::Path};
 use tiktoken_rs::CoreBPE;
 
 pub const TOKENIZER_MANIFEST_FILE: &str = "tokenizer.json";
@@ -84,9 +80,8 @@ impl MultilingualTokenizer {
             }
         }
         let specials: FxHashMap<String, u32> = manifest.special_tokens.into_iter().collect();
-        let bpe = CoreBPE::new(ranks, specials, &manifest.pattern).map_err(|e| {
-            InfraError::Adapter(format!("build IndexTTS2 tiktoken BPE: {e}"))
-        })?;
+        let bpe = CoreBPE::new(ranks, specials, &manifest.pattern)
+            .map_err(|e| InfraError::Adapter(format!("build IndexTTS2 tiktoken BPE: {e}")))?;
         Ok(Self {
             bpe,
             languages: manifest.languages,
@@ -148,9 +143,9 @@ fn read_tiktoken_ranks(path: &Path) -> Result<FxHashMap<Vec<u8>, u32>> {
                 InfraError::Adapter(format!("{}:{}: {e}", path.display(), line_no + 1))
             })?
         };
-        let rank = rank.parse::<u32>().map_err(|e| {
-            InfraError::Adapter(format!("{}:{}: {e}", path.display(), line_no + 1))
-        })?;
+        let rank = rank
+            .parse::<u32>()
+            .map_err(|e| InfraError::Adapter(format!("{}:{}: {e}", path.display(), line_no + 1)))?;
         ranks.insert(token, rank);
     }
     Ok(ranks)

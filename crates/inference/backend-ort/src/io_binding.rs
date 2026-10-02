@@ -114,8 +114,8 @@ pub struct ResidentIoBinding {
     binding: IoBinding,
     session: Arc<SharedSessionInner>,
     device_id: u32,
-    cuda_memory: MemoryInfo,
-    cpu_memory: MemoryInfo,
+    cuda_memory: MemoryInfo<'static>,
+    cpu_memory: MemoryInfo<'static>,
     cuda_outputs: Vec<String>,
     cpu_outputs: Vec<String>,
     /// Last: held while the fields above are released (see `Drop`).
@@ -807,7 +807,7 @@ fn validate_resident_output_names<'a>(
     Ok(())
 }
 
-fn pinned_output_memory(device_id: u32) -> Result<MemoryInfo> {
+fn pinned_output_memory(device_id: u32) -> Result<MemoryInfo<'static>> {
     MemoryInfo::new(
         AllocationDevice::CUDA_PINNED,
         device_id as i32,

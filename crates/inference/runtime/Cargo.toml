@@ -13,8 +13,8 @@ tts = ["dep:local-adapter-index-tts", "dep:local-adapter-index-tts2", "dep:local
 chat = ["dep:local-adapter-qwen3-chat"]
 embedding = ["dep:local-adapter-e5-embedding"]
 rerank = ["dep:local-adapter-mmarco-reranker"]
-detect = ["dep:local-adapter-yolo"]
-ocr = ["dep:local-adapter-unlimited-ocr"]
+detect = ["dep:local-adapter-yolo", "dep:local-adapter-depth-anything-v2"]
+ocr = ["dep:local-adapter-unlimited-ocr", "dep:local-adapter-ppocrv5-mobile"]
 cuda = [
     "local-adapter-e5-embedding?/cuda",
     "local-adapter-index-tts?/cuda",
@@ -24,7 +24,9 @@ cuda = [
     "local-adapter-qwen3-chat?/cuda",
     "local-adapter-sensevoice-asr?/cuda",
     "local-adapter-unlimited-ocr?/cuda",
+    "local-adapter-ppocrv5-mobile?/cuda",
     "local-adapter-yolo?/cuda",
+    "local-adapter-depth-anything-v2?/cuda",
 ]
 directml = [
     "local-adapter-e5-embedding?/directml",
@@ -35,7 +37,9 @@ directml = [
     "local-adapter-qwen3-chat?/directml",
     "local-adapter-sensevoice-asr?/directml",
     "local-adapter-unlimited-ocr?/directml",
+    "local-adapter-ppocrv5-mobile?/directml",
     "local-adapter-yolo?/directml",
+    "local-adapter-depth-anything-v2?/directml",
 ]
 tensorrt = [
     "local-adapter-e5-embedding?/tensorrt",
@@ -46,7 +50,9 @@ tensorrt = [
     "local-adapter-qwen3-chat?/tensorrt",
     "local-adapter-sensevoice-asr?/tensorrt",
     "local-adapter-unlimited-ocr?/tensorrt",
+    "local-adapter-ppocrv5-mobile?/tensorrt",
     "local-adapter-yolo?/tensorrt",
+    "local-adapter-depth-anything-v2?/tensorrt",
 ]
 
 [dependencies]
@@ -58,7 +64,9 @@ local-adapter-mmarco-reranker = { workspace = true, optional = true }
 local-adapter-qwen3-chat = { workspace = true, optional = true }
 local-adapter-sensevoice-asr = { workspace = true, optional = true }
 local-adapter-unlimited-ocr = { workspace = true, optional = true }
+local-adapter-ppocrv5-mobile = { workspace = true, optional = true }
 local-adapter-yolo = { workspace = true, optional = true }
+local-adapter-depth-anything-v2 = { workspace = true, optional = true }
 local-backend-ort.workspace = true
 local-core.workspace = true
 local-error.workspace = true

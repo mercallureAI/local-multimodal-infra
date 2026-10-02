@@ -91,9 +91,8 @@ impl IndexTts2Artifacts {
                 manifest_path.display()
             ))
         })?;
-        let manifest: PackageManifest = serde_json::from_slice(&bytes).map_err(|e| {
-            InfraError::Adapter(format!("parse {}: {e}", manifest_path.display()))
-        })?;
+        let manifest: PackageManifest = serde_json::from_slice(&bytes)
+            .map_err(|e| InfraError::Adapter(format!("parse {}: {e}", manifest_path.display())))?;
         if manifest.schema != MANIFEST_SCHEMA {
             return Err(not_ready(format!(
                 "{} has schema `{}`, expected `{MANIFEST_SCHEMA}`",

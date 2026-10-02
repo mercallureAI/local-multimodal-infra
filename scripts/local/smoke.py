@@ -35,6 +35,18 @@ ASSET_DIR = repo_root() / "scripts" / "assets"
 DEFAULT_YOLO_IMAGE = ASSET_DIR / "yolo-input.jpg"
 DEFAULT_OCR_IMAGE = ASSET_DIR / "ocr-input.png"
 OCR_MODEL_ID = "unlimited-ocr-onnx"
+PPOCR_MODEL_ID = "ppocrv5-mobile-onnx"
+PPOCR_REQUIRED = ["ppocrv5_det.onnx", "ppocrv5_rec.onnx", "ppocrv5_dict.txt"]
+DEFAULT_PPOCR_IMAGE = ASSET_DIR / "ppocr-input.png"
+# Lines of scripts/assets/ppocr-input.png, top to bottom.
+PPOCR_EXPECTED = ["xkeyC", "猫猫ねこ Neko_42", "VRChat 名牌测试 Hello"]
+DEPTH_MODEL_ID = "depth-anything-v2-metric-indoor-small-onnx"
+DEPTH_REQUIRED = ["model.onnx", "config.json"]
+DEFAULT_DEPTH_IMAGE = ASSET_DIR / "depth-input.jpg"
+# scripts/assets/depth-input.jpg on a 16x9 grid (80 px cells): the player
+# (column 7, rows 6..8) stands closer than the balcony behind them (columns
+# 6..7, row 4).
+DEPTH_GRID = (16, 9)
 # Text of scripts/assets/ocr-input.png that the OCR result must contain.
 OCR_EXPECTED_TEXT = ("Local Multimodal Infra", "OCR smoke test", "2026-0042", "1,280.50")
 # The first request loads ~4 GB of weights and the page decodes ~100 tokens.
@@ -62,6 +74,8 @@ TEST_ALIASES = {
     "assets",
     "yolo",
     "ocr",
+    "ppocr",
+    "depth",
     "sensevoice-asr",
     "indextts",
     "indextts_asr",
@@ -73,7 +87,7 @@ TEST_ALIASES = {
     "text",
     "mcp_standard",
 }
-RPC_TESTS = {"assets", "yolo", "ocr", "sensevoice-asr", "indextts", "indextts_asr", "indextts2", "indextts2_asr", "embedding", "rerank", "chat"}
+RPC_TESTS = {"assets", "yolo", "ocr", "ppocr", "depth", "sensevoice-asr", "indextts", "indextts_asr", "indextts2", "indextts2_asr", "embedding", "rerank", "chat"}
 MCP_TESTS = {"mcp_standard"}
 INDEXTTS_MODEL_ID = "indextts-1.5-onnx"
 INDEXTTS2_MODEL_ID = "indextts-2.5-onnx"
@@ -255,6 +269,18 @@ def main(argv: list[str] | None = None) -> int:
                 )
             except SmokeError as exc:
                 failures.append(f"ocr: {exc}")
+
+        if "ppocr" in requested_tests:
+            try:
+                run_ppocr(model_dir, data_dir, timestamp, args.request_timeout)
+            except SmokeError as exc:
+                failures.append(f"ppocr: {exc}")
+
+        if "depth" in requested_tests:
+            try:
+                run_depth(model_dir, data_dir, timestamp, args.request_timeout)
+            except SmokeError as exc:
+                failures.append(f"depth: {exc}")
 
         if "sensevoice-asr" in requested_tests:
             try:
@@ -1059,6 +1085,136 @@ def run_ocr(model_dir: Path, image: Path, data_dir: Path, timestamp: str, timeou
     direct_text = validate_ocr_output(direct.get("result"), "legacy RPC ocr_recognize")
     save_json(out, {"input_image": str(image), "task": payload, "direct": direct})
     print(f"[smoke] ocr generic={len(generic_text)} chars direct={len(direct_text)} chars saved {out}")
+
+
+def run_ppocr(model_dir: Path, data_dir: Path, timestamp: str, timeout: float) -> None:
+    """PP-OCRv5 mobile text lines: the direct endpoint (image as the body)
+    and the generic task flow."""
+    out = data_dir / f"smoke-ppocr-{timestamp}.json"
+    missing = [name for name in PPOCR_REQUIRED if not (model_dir / PPOCR_MODEL_ID / name).exists()]
+    if missing:
+        save_json(out, {"status": "skipped", "reason": f"missing {missing} under {model_dir / PPOCR_MODEL_ID}"})
+        print(f"[smoke] ppocr skipped: missing {missing}; details saved {out}")
+        return
+    image = DEFAULT_PPOCR_IMAGE
+    status, direct = raw_request(
+        "POST",
+        f"{CONTROLLER_URL}/v1/ocr/lines?model={PPOCR_MODEL_ID}",
+        image.read_bytes(),
+        {"Content-Type": image_mime(image), **INFER_AUTH_HEADERS},
+        timeout,
+    )
+    if status != 200:
+        raise SmokeError(f"POST /v1/ocr/lines returned HTTP {status}: {direct}")
+    direct_texts = validate_ppocr_lines(direct.get("lines"), "POST /v1/ocr/lines")
+    status, unauthorized = raw_request(
+        "POST", f"{CONTROLLER_URL}/v1/ocr/lines", image.read_bytes(), {"Content-Type": "image/png"}, timeout
+    )
+    if status != 401:
+        raise SmokeError(f"POST /v1/ocr/lines without a token must be refused, got HTTP {status}: {unauthorized}")
+
+    content_type = image_mime(image)
+    create = rpc_create_task(
+        {
+            "task_kind": "ocr.lines",
+            "model": PPOCR_MODEL_ID,
+            "files": [{"name": image.name, "mime": content_type, "role": "image", "required": True}],
+            "params": {},
+        },
+        f"smoke-ppocr-create-{timestamp}",
+        timeout,
+    )
+    upload = first_upload(create, "image")
+    payload = upload_file(upload["upload_url"] + "&with_start_task=true", image, content_type, timeout)
+    if payload.get("uri", "").startswith("assets://"):
+        payload = rpc_start_task(create["task_id"], f"smoke-ppocr-start-{timestamp}", timeout)
+    output = payload.get("output") if isinstance(payload, dict) else None
+    if payload.get("state") != "succeeded" or not isinstance(output, dict) or output.get("type") != "ocr_lines":
+        raise SmokeError(f"ocr.lines generic task did not succeed: {payload}")
+    validate_ppocr_lines(output.get("lines"), "ocr.lines generic task")
+    save_json(out, {"input_image": str(image), "direct": direct, "task": payload})
+    print(f"[smoke] ppocr lines={direct_texts} saved {out}")
+
+
+def run_depth(model_dir: Path, data_dir: Path, timestamp: str, timeout: float) -> None:
+    """Depth Anything V2 metric depth: the direct endpoint (image as the
+    body, grid by query) and the generic task flow."""
+    out = data_dir / f"smoke-depth-{timestamp}.json"
+    missing = [name for name in DEPTH_REQUIRED if not (model_dir / DEPTH_MODEL_ID / name).exists()]
+    if missing:
+        save_json(out, {"status": "skipped", "reason": f"missing {missing} under {model_dir / DEPTH_MODEL_ID}"})
+        print(f"[smoke] depth skipped: missing {missing}; details saved {out}")
+        return
+    image = DEFAULT_DEPTH_IMAGE
+    cols, rows = DEPTH_GRID
+    status, direct = raw_request(
+        "POST",
+        f"{CONTROLLER_URL}/v1/depth?model={DEPTH_MODEL_ID}&cols={cols}&rows={rows}",
+        image.read_bytes(),
+        {"Content-Type": image_mime(image), **INFER_AUTH_HEADERS},
+        timeout,
+    )
+    if status != 200:
+        raise SmokeError(f"POST /v1/depth returned HTTP {status}: {direct}")
+    player, behind = validate_depth(direct, "POST /v1/depth")
+    # A tiny body: refused before it is read, a large one can reset the connection.
+    status, unauthorized = raw_request(
+        "POST", f"{CONTROLLER_URL}/v1/depth", b"x", {"Content-Type": "image/jpeg"}, timeout
+    )
+    if status != 401:
+        raise SmokeError(f"POST /v1/depth without a token must be refused, got HTTP {status}: {unauthorized}")
+
+    content_type = image_mime(image)
+    create = rpc_create_task(
+        {
+            "task_kind": "depth.estimate",
+            "model": DEPTH_MODEL_ID,
+            "files": [{"name": image.name, "mime": content_type, "role": "image", "required": True}],
+            "params": {"cols": cols, "rows": rows},
+        },
+        f"smoke-depth-create-{timestamp}",
+        timeout,
+    )
+    upload = first_upload(create, "image")
+    payload = upload_file(upload["upload_url"] + "&with_start_task=true", image, content_type, timeout)
+    if payload.get("uri", "").startswith("assets://"):
+        payload = rpc_start_task(create["task_id"], f"smoke-depth-start-{timestamp}", timeout)
+    output = payload.get("output") if isinstance(payload, dict) else None
+    if payload.get("state") != "succeeded" or not isinstance(output, dict) or output.get("type") != "depth_map":
+        raise SmokeError(f"depth.estimate generic task did not succeed: {payload}")
+    validate_depth(output, "depth.estimate generic task")
+    save_json(out, {"input_image": str(image), "direct": direct, "task": payload})
+    print(f"[smoke] depth player={player:.2f} m behind={behind:.2f} m saved {out}")
+
+
+def validate_depth(result: object, label: str) -> tuple[float, float]:
+    cols, rows = DEPTH_GRID
+    depth = result.get("depth") if isinstance(result, dict) else None
+    if (
+        not isinstance(depth, list)
+        or result.get("cols") != cols
+        or result.get("rows") != rows
+        or len(depth) != cols * rows
+    ):
+        raise SmokeError(f"{label} must return a {cols}x{rows} grid: {result}")
+    player = sum(depth[row * cols + 7] for row in (6, 7, 8)) / 3
+    behind = (depth[4 * cols + 6] + depth[4 * cols + 7]) / 2
+    if not 1.0 <= player <= 8.0 or behind <= player + 1.0:
+        raise SmokeError(f"{label}: the player at {player:.2f} m, behind them {behind:.2f} m")
+    return player, behind
+
+
+def validate_ppocr_lines(lines: object, label: str) -> list[str]:
+    if not isinstance(lines, list):
+        raise SmokeError(f"{label} must return a list of lines: {lines}")
+    texts = [line.get("text") for line in lines if isinstance(line, dict)]
+    if texts != PPOCR_EXPECTED:
+        raise SmokeError(f"{label} read {texts}, expected {PPOCR_EXPECTED}")
+    for line in lines:
+        box = line.get("bbox") or {}
+        if not all(isinstance(box.get(key), (int, float)) for key in ("x", "y", "width", "height")):
+            raise SmokeError(f"{label} line without a box: {line}")
+    return texts
 
 
 def validate_ocr_output(output: object, label: str) -> str:

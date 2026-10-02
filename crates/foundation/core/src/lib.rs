@@ -23,13 +23,17 @@ pub enum AdapterKind {
     MmarcoReranker,
     Qwen3Chat,
     UnlimitedOcr,
+    /// PP-OCRv5 mobile text lines (detection + recognition).
+    Ppocrv5Mobile,
+    /// Depth Anything V2 metric depth (metres per pixel).
+    DepthAnythingV2,
     /// Pseudo-realtime voice (VAD, ASR, chat and TTS models of the worker),
     /// served over `/v1/realtime` only.
     VoiceCascade,
 }
 
 impl AdapterKind {
-    pub const ALL: [AdapterKind; 10] = [
+    pub const ALL: [AdapterKind; 12] = [
         AdapterKind::Yolo,
         AdapterKind::SenseVoiceAsr,
         AdapterKind::IndexTts,
@@ -39,13 +43,15 @@ impl AdapterKind {
         AdapterKind::MmarcoReranker,
         AdapterKind::Qwen3Chat,
         AdapterKind::UnlimitedOcr,
+        AdapterKind::Ppocrv5Mobile,
+        AdapterKind::DepthAnythingV2,
         AdapterKind::VoiceCascade,
     ];
 
     /// The category the adapter's models are filed and built under.
     pub fn category(self) -> ModelCategory {
         match self {
-            AdapterKind::Yolo => ModelCategory::Detect,
+            AdapterKind::Yolo | AdapterKind::DepthAnythingV2 => ModelCategory::Detect,
             AdapterKind::SenseVoiceAsr => ModelCategory::Asr,
             AdapterKind::IndexTts | AdapterKind::IndexTts2 | AdapterKind::Qwen3Tts => {
                 ModelCategory::Tts
@@ -53,7 +59,7 @@ impl AdapterKind {
             AdapterKind::E5Embedding => ModelCategory::Embedding,
             AdapterKind::MmarcoReranker => ModelCategory::Rerank,
             AdapterKind::Qwen3Chat => ModelCategory::Chat,
-            AdapterKind::UnlimitedOcr => ModelCategory::Ocr,
+            AdapterKind::UnlimitedOcr | AdapterKind::Ppocrv5Mobile => ModelCategory::Ocr,
             AdapterKind::VoiceCascade => ModelCategory::Realtime,
         }
     }
@@ -124,6 +130,12 @@ pub enum TaskKind {
     ChatComplete,
     #[serde(rename = "ocr.recognize")]
     OcrRecognize,
+    /// Text lines with their boxes (scene text, UI labels).
+    #[serde(rename = "ocr.lines")]
+    OcrLines,
+    /// Metric depth of an image, pooled to a grid.
+    #[serde(rename = "depth.estimate")]
+    DepthEstimate,
     #[serde(rename = "voice.realtime")]
     VoiceRealtime,
 }
@@ -636,6 +648,15 @@ pub enum InferenceInput {
     OcrRecognize {
         image: FileRef,
     },
+    OcrLines {
+        image: FileRef,
+    },
+    DepthEstimate {
+        image: FileRef,
+        /// The grid the depth is pooled to (default: the adapter's).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grid: Option<DepthGrid>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -679,6 +700,18 @@ pub enum InferenceOutput {
     },
     OcrText {
         text: String,
+    },
+    OcrLines {
+        lines: Vec<OcrLine>,
+    },
+    /// `depth[row * cols + col]`: the mean depth (metres) of that cell of the
+    /// image, rows top to bottom.
+    DepthMap {
+        cols: u32,
+        rows: u32,
+        /// The model's largest depth (metres): farther reads as this.
+        max_depth: f32,
+        depth: Vec<f32>,
     },
     Accepted {
         job_id: String,
@@ -840,6 +873,23 @@ pub struct RerankResult {
 pub struct DetectedObject {
     pub label: String,
     pub confidence: f32,
+    pub bbox: BoundingBox,
+}
+
+/// Columns and rows of a depth grid over the whole image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DepthGrid {
+    pub cols: u32,
+    pub rows: u32,
+}
+
+/// A line of text found in an image, top to bottom then left to right.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OcrLine {
+    pub text: String,
+    /// Mean probability of the recognised characters.
+    pub confidence: f32,
+    /// In the image's pixels.
     pub bbox: BoundingBox,
 }
 

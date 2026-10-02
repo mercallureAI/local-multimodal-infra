@@ -227,6 +227,18 @@ impl ControllerState {
         ));
         let realtime = Router::new()
             .route("/v1/realtime", get(realtime::realtime))
+            .route(
+                "/v1/ocr/lines",
+                post(ocr_lines).layer(DefaultBodyLimit::max(DIRECT_IMAGE_MAX_BYTES)),
+            )
+            .route(
+                "/v1/detect/objects",
+                post(detect_objects).layer(DefaultBodyLimit::max(DIRECT_IMAGE_MAX_BYTES)),
+            )
+            .route(
+                "/v1/depth",
+                post(depth_map).layer(DefaultBodyLimit::max(DIRECT_IMAGE_MAX_BYTES)),
+            )
             .route_layer(axum::middleware::from_fn_with_state(
                 infer_auth,
                 standard_mcp::authorize_api,
@@ -1145,6 +1157,25 @@ impl ControllerState {
                     })
                     .and_then(to_ref)?,
             },
+            local_core::TaskKind::OcrLines => InferenceInput::OcrLines {
+                image: uploaded("image")
+                    .or_else(first_file)
+                    .ok_or_else(|| {
+                        InfraError::BadRequest("ocr.lines requires an image upload".to_string())
+                    })
+                    .and_then(to_ref)?,
+            },
+            local_core::TaskKind::DepthEstimate => InferenceInput::DepthEstimate {
+                image: uploaded("image")
+                    .or_else(first_file)
+                    .ok_or_else(|| {
+                        InfraError::BadRequest(
+                            "depth.estimate requires an image upload".to_string(),
+                        )
+                    })
+                    .and_then(to_ref)?,
+                grid: depth_grid(|key| status.params.get(key).and_then(Value::as_u64))?,
+            },
             local_core::TaskKind::AsrTranscribe => InferenceInput::AsrTranscribe {
                 audio: uploaded("audio")
                     .or_else(first_file)
@@ -1751,6 +1782,145 @@ impl ControllerState {
             ))
         }
     }
+}
+
+/// Largest image `/v1/ocr/lines` and `/v1/detect/objects` take.
+const DIRECT_IMAGE_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+/// `POST /v1/ocr/lines[?model=<id>]` with an image (PNG, JPEG or BMP) as the
+/// body: its text lines (`ocr.lines`), answered at once as
+/// `{"lines": [{"text", "confidence", "bbox": {"x", "y", "width", "height"}}]}`.
+/// For callers sending frame after frame: no task, upload or asset (see
+/// `direct_image_task`).
+async fn ocr_lines(
+    State(state): State<ControllerState>,
+    Query(query): Query<BTreeMap<String, String>>,
+    body: Bytes,
+) -> axum::response::Response {
+    let task = |image| InferenceInput::OcrLines { image };
+    match direct_image_task(&state, local_core::TaskKind::OcrLines, &query, &body, task).await {
+        Ok(InferenceOutput::OcrLines { lines }) => Json(json!({ "lines": lines })).into_response(),
+        Ok(other) => error_response(InfraError::Backend(format!(
+            "the worker answered ocr.lines with {other:?}"
+        ))),
+        Err(err) => error_response(err),
+    }
+}
+
+/// `POST /v1/detect/objects[?model=<id>]` with an image (PNG, JPEG or BMP) as
+/// the body: the objects in it (`object.detect`), answered at once as
+/// `{"objects": [{"label", "confidence", "bbox": {"x", "y", "width",
+/// "height"}}]}`. Like `/v1/ocr/lines`, for frame after frame.
+async fn detect_objects(
+    State(state): State<ControllerState>,
+    Query(query): Query<BTreeMap<String, String>>,
+    body: Bytes,
+) -> axum::response::Response {
+    let task = |image| InferenceInput::ObjectDetect { image };
+    match direct_image_task(
+        &state,
+        local_core::TaskKind::ObjectDetect,
+        &query,
+        &body,
+        task,
+    )
+    .await
+    {
+        Ok(InferenceOutput::ObjectDetections { objects }) => {
+            Json(json!({ "objects": objects })).into_response()
+        }
+        Ok(other) => error_response(InfraError::Backend(format!(
+            "the worker answered object.detect with {other:?}"
+        ))),
+        Err(err) => error_response(err),
+    }
+}
+
+/// `POST /v1/depth[?model=<id>&cols=<n>&rows=<n>]` with an image (PNG, JPEG
+/// or BMP) as the body: its metric depth (`depth.estimate`) pooled to a grid,
+/// answered at once as `{"cols", "rows", "max_depth", "depth": [metres, row
+/// by row from the top]}`. Like `/v1/ocr/lines`, for frame after frame.
+async fn depth_map(
+    State(state): State<ControllerState>,
+    Query(query): Query<BTreeMap<String, String>>,
+    body: Bytes,
+) -> axum::response::Response {
+    let grid = match depth_grid(|key| query.get(key).and_then(|v| v.parse().ok())) {
+        Ok(grid) => grid,
+        Err(err) => return error_response(err),
+    };
+    let task = |image| InferenceInput::DepthEstimate { image, grid };
+    match direct_image_task(
+        &state,
+        local_core::TaskKind::DepthEstimate,
+        &query,
+        &body,
+        task,
+    )
+    .await
+    {
+        Ok(InferenceOutput::DepthMap {
+            cols,
+            rows,
+            max_depth,
+            depth,
+        }) => Json(json!({ "cols": cols, "rows": rows, "max_depth": max_depth, "depth": depth }))
+            .into_response(),
+        Ok(other) => error_response(InfraError::Backend(format!(
+            "the worker answered depth.estimate with {other:?}"
+        ))),
+        Err(err) => error_response(err),
+    }
+}
+
+/// A depth grid from `cols` and `rows` (both or neither).
+fn depth_grid(get: impl Fn(&str) -> Option<u64>) -> Result<Option<local_core::DepthGrid>> {
+    match (get("cols"), get("rows")) {
+        (None, None) => Ok(None),
+        (Some(cols), Some(rows)) if (1..=4096).contains(&cols) && (1..=4096).contains(&rows) => {
+            Ok(Some(local_core::DepthGrid {
+                cols: cols as u32,
+                rows: rows as u32,
+            }))
+        }
+        _ => Err(InfraError::BadRequest(
+            "cols and rows go together, each 1 to 4096".to_string(),
+        )),
+    }
+}
+
+/// Runs a one-image task on the worker right away: the request body goes to a
+/// temporary file in the data directory (which the worker sees too), removed
+/// once answered.
+async fn direct_image_task(
+    state: &ControllerState,
+    kind: local_core::TaskKind,
+    query: &BTreeMap<String, String>,
+    body: &Bytes,
+    input: impl FnOnce(FileRef) -> InferenceInput,
+) -> Result<InferenceOutput> {
+    if body.is_empty() {
+        return Err(InfraError::BadRequest(
+            "the request body must be an image".to_string(),
+        ));
+    }
+    let dir = state.data_dir.join("tmp").join("direct-images");
+    let path = dir.join(format!("{}.img", Uuid::new_v4()));
+    let task = InferenceTask::new(
+        kind,
+        query.get("model").cloned(),
+        input(FileRef::local(&path)),
+    );
+    let written = fs::create_dir_all(&dir).and_then(|()| fs::write(&path, body));
+    let result = match written {
+        Ok(()) => state.forward_to_worker(task).await,
+        Err(source) => Err(InfraError::Io {
+            path: Some(path.clone()),
+            source,
+        }),
+    };
+    let _ = fs::remove_file(&path);
+    result
 }
 
 fn error_response(err: InfraError) -> axum::response::Response {

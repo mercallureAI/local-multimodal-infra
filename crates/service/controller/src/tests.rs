@@ -898,3 +898,251 @@ fn percent_decode(value: &str) -> String {
     }
     String::from_utf8(out).expect("query value UTF-8")
 }
+
+/// What the fake worker saw of an `ocr.lines` task: the task, and the image
+/// file it names, read while the request is in flight.
+type SeenOcr = Arc<Mutex<Vec<(InferenceTask, Option<Vec<u8>>)>>>;
+
+async fn answer_ocr_lines(
+    State(seen): State<SeenOcr>,
+    Json(task): Json<InferenceTask>,
+) -> impl IntoResponse {
+    let image = match &task.input {
+        InferenceInput::OcrLines { image } => image.path.as_ref().and_then(|p| fs::read(p).ok()),
+        _ => None,
+    };
+    seen.lock().expect("seen lock").push((task, image));
+    Json(InferenceOutput::OcrLines {
+        lines: vec![local_core::OcrLine {
+            text: "xkeyC".to_string(),
+            confidence: 0.5,
+            bbox: local_core::BoundingBox {
+                x: 1.0,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+            },
+        }],
+    })
+}
+
+/// A controller serving `model` (of `adapter`), backed by the fake `worker`
+/// router; returns its base URL and the data directory to keep alive.
+async fn controller_with_fake_worker(
+    model: &str,
+    adapter: AdapterKind,
+    kind: TaskKind,
+    worker: Router,
+) -> (String, tempfile::TempDir) {
+    let worker_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake worker");
+    let worker_url = format!("http://{}", worker_listener.local_addr().expect("addr"));
+    tokio::spawn(async move {
+        axum::serve(worker_listener, worker)
+            .await
+            .expect("fake worker");
+    });
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut spec = test_model();
+    spec.id = model.to_string();
+    spec.adapter = adapter;
+    spec.task_kinds = vec![kind];
+    let controller = ControllerState::new_with_options(
+        ModelRegistry::from_models(vec![spec]),
+        None,
+        ControllerOptions {
+            data_dir: dir.path().to_path_buf(),
+            ..ControllerOptions::default()
+        },
+    );
+    controller
+        .register_worker(WorkerRegistration {
+            node_id: "fake-worker".to_string(),
+            base_url: worker_url,
+            registration_token: None,
+            supported_backends: vec![BackendKind::Ort],
+            supported_adapters: vec![adapter],
+            resources: ResourceSnapshot {
+                cpu_cores: 4,
+                total_ram_mb: 8192,
+                used_ram_mb: 1024,
+                devices: DeviceSpec::default(),
+                captured_at: Utc::now(),
+            },
+        })
+        .await
+        .expect("register worker");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind controller");
+    let base_url = format!("http://{}", listener.local_addr().expect("addr"));
+    let app = controller.app();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("controller");
+    });
+    (base_url, dir)
+}
+
+#[tokio::test]
+async fn ocr_lines_hands_the_body_to_the_worker_as_a_temporary_image() {
+    let seen: SeenOcr = Arc::new(Mutex::new(Vec::new()));
+    let worker = Router::new()
+        .route("/internal/infer", post(answer_ocr_lines))
+        .with_state(seen.clone());
+    let (base_url, _dir) = controller_with_fake_worker(
+        "ppocrv5-mobile-onnx",
+        AdapterKind::Ppocrv5Mobile,
+        TaskKind::OcrLines,
+        worker,
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{base_url}/v1/ocr/lines?model=ppocrv5-mobile-onnx"))
+        .body(b"not really a png".to_vec())
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(
+        body,
+        json!({"lines": [{"text": "xkeyC", "confidence": 0.5,
+                          "bbox": {"x": 1.0, "y": 2.0, "width": 3.0, "height": 4.0}}]})
+    );
+
+    let seen = seen.lock().expect("seen lock");
+    let (task, image) = &seen[0];
+    assert_eq!(task.kind, TaskKind::OcrLines);
+    assert_eq!(task.model_id.as_deref(), Some("ppocrv5-mobile-onnx"));
+    assert_eq!(image.as_deref(), Some(&b"not really a png"[..]));
+    // The temporary image is gone once answered.
+    let InferenceInput::OcrLines { image } = &task.input else {
+        panic!("not ocr.lines");
+    };
+    assert!(!image.path.as_ref().expect("path").exists());
+}
+
+async fn answer_object_detect(
+    State(seen): State<SeenOcr>,
+    Json(task): Json<InferenceTask>,
+) -> impl IntoResponse {
+    let image = match &task.input {
+        InferenceInput::ObjectDetect { image } => {
+            image.path.as_ref().and_then(|p| fs::read(p).ok())
+        }
+        _ => None,
+    };
+    seen.lock().expect("seen lock").push((task, image));
+    Json(InferenceOutput::ObjectDetections {
+        objects: vec![local_core::DetectedObject {
+            label: "person".to_string(),
+            confidence: 0.5,
+            bbox: local_core::BoundingBox {
+                x: 1.0,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+            },
+        }],
+    })
+}
+
+#[tokio::test]
+async fn detect_objects_hands_the_body_to_the_worker_as_a_temporary_image() {
+    let seen: SeenOcr = Arc::new(Mutex::new(Vec::new()));
+    let worker = Router::new()
+        .route("/internal/infer", post(answer_object_detect))
+        .with_state(seen.clone());
+    let (base_url, _dir) = controller_with_fake_worker(
+        "yolo11n.onnx",
+        AdapterKind::Yolo,
+        TaskKind::ObjectDetect,
+        worker,
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{base_url}/v1/detect/objects?model=yolo11n.onnx"))
+        .body(b"not really a jpeg".to_vec())
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(
+        body,
+        json!({"objects": [{"label": "person", "confidence": 0.5,
+                            "bbox": {"x": 1.0, "y": 2.0, "width": 3.0, "height": 4.0}}]})
+    );
+
+    let seen = seen.lock().expect("seen lock");
+    let (task, image) = &seen[0];
+    assert_eq!(task.kind, TaskKind::ObjectDetect);
+    assert_eq!(image.as_deref(), Some(&b"not really a jpeg"[..]));
+    let InferenceInput::ObjectDetect { image } = &task.input else {
+        panic!("not object.detect");
+    };
+    assert!(!image.path.as_ref().expect("path").exists());
+}
+
+async fn answer_depth(
+    State(seen): State<SeenOcr>,
+    Json(task): Json<InferenceTask>,
+) -> impl IntoResponse {
+    seen.lock().expect("seen lock").push((task, None));
+    Json(InferenceOutput::DepthMap {
+        cols: 2,
+        rows: 1,
+        max_depth: 20.0,
+        depth: vec![1.5, 4.0],
+    })
+}
+
+#[tokio::test]
+async fn depth_passes_the_grid_and_answers_the_map() {
+    let seen: SeenOcr = Arc::new(Mutex::new(Vec::new()));
+    let worker = Router::new()
+        .route("/internal/infer", post(answer_depth))
+        .with_state(seen.clone());
+    let (base_url, _dir) = controller_with_fake_worker(
+        "depth-anything-v2-metric-indoor-small-onnx",
+        AdapterKind::DepthAnythingV2,
+        TaskKind::DepthEstimate,
+        worker,
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(format!("{base_url}/v1/depth?cols=2&rows=1"))
+        .body(b"not really a jpeg".to_vec())
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(
+        body,
+        json!({"cols": 2, "rows": 1, "max_depth": 20.0, "depth": [1.5, 4.0]})
+    );
+    {
+        let seen = seen.lock().expect("seen lock");
+        let InferenceInput::DepthEstimate { grid, .. } = &seen[0].0.input else {
+            panic!("not depth.estimate");
+        };
+        assert_eq!(*grid, Some(local_core::DepthGrid { cols: 2, rows: 1 }));
+    }
+
+    // Only one of cols and rows is refused before the worker sees anything.
+    let response = client
+        .post(format!("{base_url}/v1/depth?cols=2"))
+        .body(b"x".to_vec())
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(seen.lock().expect("seen lock").len(), 1);
+}

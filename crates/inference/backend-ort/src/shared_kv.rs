@@ -338,7 +338,7 @@ impl OrtSession {
             Some(arenas) => {
                 let mut options = ort::session::RunOptions::new().map_err(map_ort_err)?;
                 options
-                    .add_config_entry("memory.enable_memory_arena_shrinkage", arenas)
+                    .set("memory.enable_memory_arena_shrinkage", arenas)
                     .map_err(map_ort_err)?;
                 self.real
                     .session
@@ -361,7 +361,7 @@ impl OrtSession {
     }
 }
 
-fn host_output_memory() -> Result<MemoryInfo> {
+fn host_output_memory() -> Result<MemoryInfo<'static>> {
     MemoryInfo::new(
         AllocationDevice::CPU,
         0,

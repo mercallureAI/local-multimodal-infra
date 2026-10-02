@@ -1,0 +1,32 @@
+id: depth-anything-v2-metric-indoor-small-onnx
+name: Depth Anything V2 Metric Indoor Small ONNX (308x546)
+enabled: true
+task_kinds:
+  - depth.estimate
+adapter: depth_anything_v2
+backend: ort
+artifacts:
+  # Local export (path omitted: <model_dir>/depth-anything-v2-metric-indoor-small-onnx)
+  # of depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf at revision
+  # 8078d68a9c75a972131914f6afd0c1723be0da7f (the transformers form of
+  # Depth-Anything-V2-Metric-Hypersim-Small, Apache-2.0):
+  #   python -m scripts.local.depth_anything_export --size 308x546 --output-dir <dir>
+  # The directory holds model.onnx (fixed 308x546 input, ~99 MB),
+  # config.json (max_depth) and preprocessor_config.json.
+  - type: local
+runtime:
+  provider_order: [cuda, cpu]
+  max_concurrency: 1
+  idle_ttl_sec: 600
+resources:
+  min_ram_mb: 512
+  min_vram_mb: 0
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  runtime: onnxruntime
+  # The default depth grid (overridden per request by cols/rows).
+  grid_cols: 64
+  grid_rows: 36

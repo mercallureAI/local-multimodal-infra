@@ -1345,6 +1345,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
+name = "local-adapter-depth-anything-v2"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "local-backend-ort",
+ "local-core",
+ "local-error",
+ "local-files",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "local-adapter-e5-embedding"
 version = "0.1.0"
 dependencies = [
@@ -1409,6 +1422,20 @@ dependencies = [
  "local-error",
  "tempfile",
  "tokenizers",
+]
+
+[[package]]
+name = "local-adapter-ppocrv5-mobile"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "local-backend-ort",
+ "local-core",
+ "local-error",
+ "local-files",
+ "serde_json",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -1702,10 +1729,12 @@ name = "local-runtime"
 version = "0.1.0"
 dependencies = [
  "hound",
+ "local-adapter-depth-anything-v2",
  "local-adapter-e5-embedding",
  "local-adapter-index-tts",
  "local-adapter-index-tts2",
  "local-adapter-mmarco-reranker",
+ "local-adapter-ppocrv5-mobile",
  "local-adapter-qwen3-chat",
  "local-adapter-qwen3-tts",
  "local-adapter-sensevoice-asr",
@@ -2084,9 +2113,9 @@ dependencies = [
 
 [[package]]
 name = "ort"
-version = "2.0.0-rc.12"
+version = "2.0.0-rc.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7de3af33d24a745ffb8fab904b13478438d1cd52868e6f17735ef6e1f8bf133"
+checksum = "4336a1e2b38848325241c72889086886004e589b7c74f335e60a8e8db5138a0b"
 dependencies = [
  "half",
  "libloading",
@@ -2098,9 +2127,9 @@ dependencies = [
 
 [[package]]
 name = "ort-sys"
-version = "2.0.0-rc.12"
+version = "2.0.0-rc.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7b497d21a8b6fbb4b5a544f8fadb77e801a09ae0add9e411d31c6f89e3c1e90"
+checksum = "cf211e3776eea6aec988552fa118dd746d70e1b1e5e244058d1c98015f3e5872"
 
 [[package]]
 name = "paste"

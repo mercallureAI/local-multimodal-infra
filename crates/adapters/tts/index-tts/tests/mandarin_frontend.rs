@@ -13,9 +13,21 @@ fn polyphones_and_numbers_if_env_set() {
     let frontend = MandarinFrontend::load(Path::new(&dir)).expect("load Mandarin frontend");
     let cases = [
         // (input, 1.5 inline must contain, 2.5 tagged must contain)
-        ("他在银行工作了3年，很了解这一行。", ["HANG2", "LIAO3"], ["<行|HANG2>", "<了|LIAO3>"]),
-        ("这个东西还给你，我还要睡觉。", ["HUAN2", "JIAO4"], ["<还|HUAN2>", "<觉|JIAO4>"]),
-        ("会议于2024年3月15日举行，长度为2.5米。", ["CHANG2", "二零二四"], ["<长|CHANG2>", "二零二四"]),
+        (
+            "他在银行工作了3年，很了解这一行。",
+            ["HANG2", "LIAO3"],
+            ["<行|HANG2>", "<了|LIAO3>"],
+        ),
+        (
+            "这个东西还给你，我还要睡觉。",
+            ["HUAN2", "JIAO4"],
+            ["<还|HUAN2>", "<觉|JIAO4>"],
+        ),
+        (
+            "会议于2024年3月15日举行，长度为2.5米。",
+            ["CHANG2", "二零二四"],
+            ["<长|CHANG2>", "二零二四"],
+        ),
     ];
     for (input, inline, tagged) in cases {
         let one = normalize_text_with(input, Some((&frontend, PinyinAnnotation::Inline)));

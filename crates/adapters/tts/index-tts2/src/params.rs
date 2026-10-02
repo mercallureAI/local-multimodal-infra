@@ -41,12 +41,17 @@ impl SynthesisParams {
         let language = string(params, &["language", "lang"])?
             .map(|value| value.to_lowercase())
             .unwrap_or_else(|| detect_language(text).to_string());
-        let duration_factor = match (number(params, &["duration_factor"])?, number(params, &["speed"])?) {
+        let duration_factor = match (
+            number(params, &["duration_factor"])?,
+            number(params, &["speed"])?,
+        ) {
             (Some(factor), _) => factor,
             // OpenAI-style speed: 2.0 speaks twice as fast, i.e. half the duration.
             (None, Some(speed)) if speed > 0.0 => 1.0 / speed,
             (None, Some(speed)) => {
-                return Err(InfraError::BadRequest(format!("speed must be positive, got {speed}")))
+                return Err(InfraError::BadRequest(format!(
+                    "speed must be positive, got {speed}"
+                )))
             }
             (None, None) => 1.0,
         };
@@ -76,10 +81,16 @@ impl SynthesisParams {
     fn validate(&self) -> Result<()> {
         let bad = |message: String| Err(InfraError::BadRequest(message));
         if !(0.25..=4.0).contains(&self.duration_factor) {
-            return bad(format!("duration_factor must be in [0.25, 4], got {}", self.duration_factor));
+            return bad(format!(
+                "duration_factor must be in [0.25, 4], got {}",
+                self.duration_factor
+            ));
         }
         if !(self.temperature > 0.0 && self.temperature <= 2.0) {
-            return bad(format!("temperature must be in (0, 2], got {}", self.temperature));
+            return bad(format!(
+                "temperature must be in (0, 2], got {}",
+                self.temperature
+            ));
         }
         if !(self.top_p > 0.0 && self.top_p <= 1.0) {
             return bad(format!("top_p must be in (0, 1], got {}", self.top_p));
@@ -88,11 +99,18 @@ impl SynthesisParams {
             return bad("top_k must be positive".to_string());
         }
         if self.max_mel_tokens == 0 || self.max_text_tokens_per_segment == 0 {
-            return bad("max_mel_tokens and max_text_tokens_per_segment must be positive".to_string());
+            return bad(
+                "max_mel_tokens and max_text_tokens_per_segment must be positive".to_string(),
+            );
         }
         if let Some(vector) = self.emotion_vector {
-            if vector.iter().any(|value| !value.is_finite() || *value < 0.0) {
-                return bad(format!("emotion_vector values must be finite and >= 0, got {vector:?}"));
+            if vector
+                .iter()
+                .any(|value| !value.is_finite() || *value < 0.0)
+            {
+                return bad(format!(
+                    "emotion_vector values must be finite and >= 0, got {vector:?}"
+                ));
             }
         }
         Ok(())
@@ -102,7 +120,10 @@ impl SynthesisParams {
 /// `emotion_vector` as 8 numbers in [`EMOTION_NAMES`] order, or an object
 /// keyed by those names (missing names are 0).
 fn emotion_vector(params: &BTreeMap<String, Value>) -> Result<Option<[f32; 8]>> {
-    let Some(value) = ["emotion_vector", "emo_vector"].iter().find_map(|key| params.get(*key)) else {
+    let Some(value) = ["emotion_vector", "emo_vector"]
+        .iter()
+        .find_map(|key| params.get(*key))
+    else {
         return Ok(None);
     };
     let mut vector = [0.0f32; 8];
@@ -111,7 +132,9 @@ fn emotion_vector(params: &BTreeMap<String, Value>) -> Result<Option<[f32; 8]>> 
         Value::Array(items) if items.len() == 8 => {
             for (slot, item) in vector.iter_mut().zip(items) {
                 *slot = item.as_f64().ok_or_else(|| {
-                    InfraError::BadRequest(format!("emotion_vector entries must be numbers, got {item}"))
+                    InfraError::BadRequest(format!(
+                        "emotion_vector entries must be numbers, got {item}"
+                    ))
                 })? as f32;
             }
         }
@@ -132,8 +155,8 @@ fn emotion_vector(params: &BTreeMap<String, Value>) -> Result<Option<[f32; 8]>> 
         }
         other => {
             return Err(InfraError::BadRequest(format!(
-                "emotion_vector must be 8 numbers or an object keyed by {EMOTION_NAMES:?}, got {other}"
-            )))
+            "emotion_vector must be 8 numbers or an object keyed by {EMOTION_NAMES:?}, got {other}"
+        )))
         }
     }
     Ok(Some(vector))
@@ -143,7 +166,8 @@ fn emotion_vector(params: &BTreeMap<String, Value>) -> Result<Option<[f32; 8]>> 
 /// contains kana, zh for other CJK ideographs, otherwise en. Callers should
 /// pass `language` explicitly for es and other Latin-script languages.
 pub fn detect_language(text: &str) -> &'static str {
-    let is_kana = |c: char| ('\u{3040}'..='\u{30ff}').contains(&c) || ('\u{31f0}'..='\u{31ff}').contains(&c);
+    let is_kana =
+        |c: char| ('\u{3040}'..='\u{30ff}').contains(&c) || ('\u{31f0}'..='\u{31ff}').contains(&c);
     if text.chars().any(is_kana) {
         "ja"
     } else if text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) {
@@ -174,7 +198,9 @@ fn integer(params: &BTreeMap<String, Value>, keys: &[&str]) -> Result<Option<u64
     first(params, keys)
         .map(|(key, value)| {
             value.as_u64().ok_or_else(|| {
-                InfraError::BadRequest(format!("`{key}` must be a non-negative integer, got {value}"))
+                InfraError::BadRequest(format!(
+                    "`{key}` must be a non-negative integer, got {value}"
+                ))
             })
         })
         .transpose()
@@ -221,8 +247,16 @@ mod tests {
         let params = SynthesisParams::from_map(&map(json!({"seed": 1})), "你好").unwrap();
         assert_eq!(params.language, "zh");
         assert_eq!(params.emotion_vector, None);
-        assert_eq!((params.top_k, params.top_p, params.cfg_rate), (20, 0.9, 0.7));
-        assert_eq!(SynthesisParams::from_map(&map(json!({})), "hello").unwrap().language, "en");
+        assert_eq!(
+            (params.top_k, params.top_p, params.cfg_rate),
+            (20, 0.9, 0.7)
+        );
+        assert_eq!(
+            SynthesisParams::from_map(&map(json!({})), "hello")
+                .unwrap()
+                .language,
+            "en"
+        );
     }
 
     #[test]
@@ -240,9 +274,12 @@ mod tests {
             "x",
         )
         .unwrap();
-        let named = SynthesisParams::from_map(&map(json!({"emotion_vector": {"sad": 0.8}})), "x").unwrap();
+        let named =
+            SynthesisParams::from_map(&map(json!({"emotion_vector": {"sad": 0.8}})), "x").unwrap();
         assert_eq!(list.emotion_vector, named.emotion_vector);
-        assert!(SynthesisParams::from_map(&map(json!({"emotion_vector": {"bored": 1}})), "x").is_err());
+        assert!(
+            SynthesisParams::from_map(&map(json!({"emotion_vector": {"bored": 1}})), "x").is_err()
+        );
         assert!(SynthesisParams::from_map(&map(json!({"emotion_vector": [1, 2]})), "x").is_err());
     }
 

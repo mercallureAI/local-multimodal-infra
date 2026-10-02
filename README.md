@@ -30,8 +30,10 @@
 | 能力 | 默认模型 | 状态 | 主要输出 |
 | --- | --- | --- | --- |
 | 图片目标检测 | `yolo11n.onnx` | 默认启用 | 目标类别、置信度、边界框 |
+| 单目米制深度 | `depth-anything-v2-metric-indoor-small-onnx` | 本地导出后启用 | 每格平均深度（米）的网格 |
 | 文档 OCR | `unlimited-ocr-onnx` | 本地导出后启用（int8 专家，需 NVIDIA GPU） | 页面文本（Markdown/HTML 表格），带版面类别与坐标 |
 | 语音识别 | `sensevoice-small-onnx` | 默认启用 | 文本、时间轴、语言、情绪、发言人 |
+| 语音识别（低延迟） | `sensevoice-small-fp16-onnx` | 本地导出后启用 | 同上；float16 图，CUDA 上每句约 40–90 ms |
 | 语音合成 | `indextts-1.5-onnx` | 默认启用 | WAV 音频 |
 | 语音合成 | `indextts-2.5-onnx` | 默认启用（FP16，建议 NVIDIA GPU） | WAV 音频，支持情绪控制 |
 | 语音合成 | `qwen3-tts-0.6b-onnx` | 本地导出后启用（INT8 权重，建议 NVIDIA GPU） | 流式 24 kHz 音频，3 秒参考音频克隆声音，可边接收文字边合成 |
@@ -43,6 +45,12 @@
 所有模型均通过 ONNX Runtime 运行（运行时加载官方 ONNX Runtime 1.30，见 `docs/implementation-notes.md`）。模型配置表达 CUDA 优先、CPU 回退；实际 provider 仍取决于构建方式、运行环境和具体模型算子支持情况。
 
 文档 OCR 使用 [baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-OCR)（DeepEncoder + DeepSeek-V2 MoE，R-SWA 注意力），每次请求识别一页图片（base 模式，缩放填充到 1024×1024）。结果为整页文本，每个版面块前带 `<|det|>类别 [x1, y1, x2, y2]<|/det|>` 标签，坐标按 0–999 归一化，表格为 HTML。可通过 MCP / legacy RPC 的 `ocr_recognize`（传 `image` FileRef 或 `image_path`）或通用任务 `ocr.recognize`（上传 `image`）调用。
+
+画面文字行（场景文字、界面标签、名牌等）使用 PaddleOCR 的 PP-OCRv5 mobile 检测与识别模型（中、英、日等文字同一个模型，两个 ONNX 合计约 21 MB），返回每行文字及其像素框，按从上到下、从左到右排列。逐帧调用可直接 `POST /v1/ocr/lines[?model=ppocrv5-mobile-onnx]`，请求体就是图片（PNG/JPEG/BMP），立即返回 `{"lines": [{"text", "confidence", "bbox"}]}`，受推理 token 保护；也可用通用任务 `ocr.lines`（上传 `image`）。目标检测同样有逐帧接口 `POST /v1/detect/objects[?model=yolo11n.onnx]`，返回 `{"objects": [{"label", "confidence", "bbox"}]}`。
+
+单目米制深度使用 Depth Anything V2 Metric Indoor Small（ViT-S，室内 Hypersim 微调，最大 20 m，Apache-2.0），由 `python -m scripts.local.depth_anything_export --size 308x546 --output-dir <models>/depth-anything-v2-metric-indoor-small-onnx` 从固定 revision 导出为固定输入尺寸的 ONNX（约 99 MB）。逐帧接口 `POST /v1/depth[?model=&cols=&rows=]`（默认 64×36）返回 `{"cols", "rows", "max_depth", "depth": [米，自上而下逐行]}`，每格是该区域的平均深度；通用任务 `depth.estimate`（上传 `image`，`params.cols/rows`）同样可用。RTX 4090 上一帧 1280×720 约 30 ms（含解码）。
+
+低延迟语音识别 `sensevoice-small-fp16-onnx` 与 `sensevoice-small-onnx` 是同一个 SenseVoiceSmall：后者的 int8 图里 281 个 `DynamicQuantizeLinear` 在 CUDA provider 下回落到 CPU，每层在 CPU 与 GPU 间往返，一句话约 200–350 ms；float16 图全程在 GPU 上，约 40–90 ms，转写相同。由 `python -m scripts.local.sensevoice_fp16_export --base-dir <models>/sensevoice-small-onnx --output-dir <models>/sensevoice-small-fp16-onnx` 从固定 revision 导出（约 470 MB），其余文件取自 `sensevoice-small-onnx`；元数据 `asr_model_file` 指定 `asr/` 中的图。实时语音级联在 `voice-cascade.yaml` 的 `asr_model` 中选用。
 
 SenseVoice ASR 集成 FSMN-VAD 和 CAM++ 发言人识别，默认返回纯文本、约 10 秒粒度的 `timestamped_text`、`segments[].speaker` 和 `speakers[]`。可通过 `timestamps`、`timestamp_granularity_sec`、`token_timestamps`、`speaker_diarization` 调整或关闭这些结果。
 
@@ -242,6 +250,7 @@ python -m scripts.local.smoke --tests mcp \
 | IndexTTS 中文前端（WeText + g2pW） | [ModaLeap/zh-tts-frontend](https://huggingface.co/ModaLeap/zh-tts-frontend) | `ba6b85aeb17ebc58d2d3d73121096f9495ee710e` |
 | multilingual-e5-small | [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) | `614241f622f53c4eeff9890bdc4f31cfecc418b3` |
 | mMARCO MiniLM reranker | [cross-encoder/mmarco-mMiniLMv2-L12-H384-v1](https://huggingface.co/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1) | `1427fd652930e4ba29e8149678df786c240d8825` |
+| PP-OCRv5 mobile 检测 / 识别（ONNX） | [ilaylow/PP_OCRv5_mobile_onnx](https://huggingface.co/ilaylow/PP_OCRv5_mobile_onnx)，字典 [PaddleOCR `ppocrv5_dict.txt`](https://github.com/PaddlePaddle/PaddleOCR/blob/a38c087bcb2579f9ccc2068aea02ec893b1c2311/ppocr/utils/dict/ppocrv5_dict.txt) | `f97b337b3ac256f9dffcac5fc53955082d919d58` / `a38c087bcb2579f9ccc2068aea02ec893b1c2311` |
 | Unlimited-OCR（本地导出 ONNX 的源模型） | [baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-OCR) | `07dea832e22aefee32ad281d4b80551282e1c168` |
 | Qwen3-TTS-12Hz-0.6B-Base（本地导出 ONNX 的源模型） | [Qwen/Qwen3-TTS-12Hz-0.6B-Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base) | `5d83992436eae1d760afd27aff78a71d676296fc` |
 | Qwen3-4B-Instruct-2507（本地导出 INT4 的源模型） | [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) | `cdbee75f17c01a7cc42f958dc650907174af0554` |
@@ -254,6 +263,7 @@ python -m scripts.local.smoke --tests mcp \
 - [modelscope/FunASR](https://github.com/modelscope/FunASR)：SenseVoice ONNX 前处理、推理与 FSMN-VAD 管线参考；
 - [FunAudioLLM/SenseVoice](https://github.com/FunAudioLLM/SenseVoice)：SenseVoice 模型与官方实现；
 - [ultralytics/ultralytics](https://github.com/ultralytics/ultralytics)：YOLO 预处理、输出解码与 COCO 标签来源；
+- [PaddlePaddle/PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)：PP-OCRv5 模型、DB 检测后处理与 CTC 解码的参考；
 - [baidu/Unlimited-OCR](https://github.com/baidu/Unlimited-OCR)：Unlimited-OCR 模型与官方实现（预处理、提示词、R-SWA 与防重复采样）；
 - [index-tts/index-tts](https://github.com/index-tts/index-tts)：IndexTTS 官方实现；
 - [DakeQQ/Text-to-Speech-TTS-ONNX](https://github.com/DakeQQ/Text-to-Speech-TTS-ONNX)：IndexTTS ONNX 导出与推理参考；

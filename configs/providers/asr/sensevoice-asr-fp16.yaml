@@ -1,0 +1,50 @@
+id: sensevoice-small-fp16-onnx
+# Low latency: the float16 graph runs on the GPU throughout, ~40-90 ms per
+# utterance on CUDA against ~200-350 ms for sensevoice-small-onnx's int8 graph
+# (its DynamicQuantizeLinear nodes run on the CPU), the same transcripts.
+name: FunASR Full ASR ONNX, float16 (low latency)
+enabled: true
+task_kinds:
+  - asr.transcribe
+adapter: sense_voice_asr
+backend: ort
+artifacts:
+  # Local export (path omitted: <model_dir>/sensevoice-small-fp16-onnx) of
+  # FunAudioLLM/SenseVoiceSmall at revision
+  # 3847d57b6bdf2dd8875cb1508d2af43d80a16bf7 (FunASR model license):
+  #   python -m scripts.local.sensevoice_fp16_export \
+  #     --base-dir <model_dir>/sensevoice-small-onnx \
+  #     --output-dir <model_dir>/sensevoice-small-fp16-onnx
+  # The directory is sensevoice-small-onnx's (asr/am.mvn, config.yaml,
+  # tokens.json, vad/, speaker/) with asr/model_fp16.onnx (~470 MB, float32
+  # inputs and outputs) in place of asr/model_quant.onnx.
+  - type: local
+runtime:
+  provider_order: [cuda, cpu]
+  max_concurrency: 1
+  idle_ttl_sec: 600
+resources:
+  min_ram_mb: 1536
+  min_vram_mb: 0
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  license: FunASR Model License
+  runtime: onnxruntime
+  model_family: funasr_full_asr
+  task: automatic-speech-recognition
+  source: FunAudioLLM/SenseVoiceSmall
+  huggingface_revision: 3847d57b6bdf2dd8875cb1508d2af43d80a16bf7
+  # The SenseVoice graph in asr/ (default model_quant.onnx, the int8 one).
+  asr_model_file: model_fp16.onnx
+  sensevoice_max_chunk_seconds: 30
+  vad_max_segment_seconds: 20
+  vad_provider_order: [cpu]
+  speaker_batch_size: 32
+  speaker_io_binding: true
+  speaker_diarization_default: true
+  timestamps_default: true
+  timestamp_granularity_sec: 10
+  token_timestamps_default: false

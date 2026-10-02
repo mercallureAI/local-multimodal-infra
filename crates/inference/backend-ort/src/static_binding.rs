@@ -20,7 +20,7 @@ use half::f16;
 use ort::{
     memory::{AllocationDevice, Allocator, AllocatorType, MemoryInfo, MemoryType},
     session::{IoBinding, RunOptions, SharedSessionInner},
-    value::{DynTensor, DynTensorRefMut, DynTensorValueType, Shape, Tensor, TensorRefMut},
+    value::{DynTensor, DynTensorValueType, Shape, Tensor},
 };
 use std::sync::Arc;
 
@@ -52,7 +52,7 @@ enum DeviceTensor {
     Input(DynTensor),
     /// A view of an output buffer the binding owns (`bind_output` takes
     /// ownership); used to copy the result out.
-    Output(DynTensorRefMut<'static>),
+    Output(DynTensor),
 }
 
 #[derive(Debug)]
@@ -97,7 +97,7 @@ pub struct StaticIoBinding {
     kv_shape: [usize; 4],
     fixed: Vec<FixedSlot>,
     /// Views of the KV cache layers (the binding owns the memory).
-    kv_views: Vec<DynTensorRefMut<'static>>,
+    kv_views: Vec<DynTensor>,
     /// Saved copies of the whole KV cache, by key.
     kv_snapshots: Vec<(String, Vec<DynTensor>)>,
     /// Host inputs bound once for every run (e.g. a CPU-side scalar).
@@ -277,7 +277,7 @@ impl StaticIoBinding {
         }
         let mut options = RunOptions::new().map_err(map_ort_err)?;
         options
-            .add_config_entry("gpu_graph_id", id.to_string())
+            .set("gpu_graph_id", id.to_string())
             .map_err(map_ort_err)?;
         let options = Arc::new(options);
         self.graph_options.push(GraphRunOptions {
@@ -559,13 +559,13 @@ fn bind_fixed_output(
     allocator: &Allocator,
     memory: &MemoryInfo,
     spec: &FixedTensorSpec,
-) -> Result<DynTensorRefMut<'static>> {
+) -> Result<DynTensor> {
     fn bind<T>(
         binding: &mut IoBinding,
         allocator: &Allocator,
         memory: &MemoryInfo,
         spec: &FixedTensorSpec,
-    ) -> Result<DynTensorRefMut<'static>>
+    ) -> Result<DynTensor>
     where
         T: ort::value::PrimitiveTensorElementType + std::fmt::Debug + 'static,
     {
@@ -576,14 +576,11 @@ fn bind_fixed_output(
         // binding, which outlives the view (both live in the same
         // `StaticIoBinding`, whose allocator is dropped last). The view never
         // frees the memory.
-        let view = unsafe { TensorRefMut::<T>::from_raw(memory.clone(), data, dims) }
-            .map_err(map_ort_err)?;
+        let view = unsafe { raw_view::<T>(memory, data, &dims, &spec.name) }?;
         binding
             .bind_output(spec.name.as_str(), owner)
             .map_err(map_ort_err)?;
-        view.into_dyn()
-            .downcast::<DynTensorValueType>()
-            .map_err(map_ort_err)
+        Ok(view)
     }
     match spec.element {
         TensorElement::F32 => bind::<f32>(binding, allocator, memory, spec),
@@ -603,7 +600,7 @@ fn bind_kv<T>(
     memory: &MemoryInfo,
     pair: &SharedKvPair,
     dims: Shape,
-) -> Result<DynTensorRefMut<'static>>
+) -> Result<DynTensor>
 where
     T: ort::value::PrimitiveTensorElementType + std::fmt::Debug + 'static,
 {
@@ -611,17 +608,43 @@ where
     let data = owner.data_ptr_mut();
     // SAFETY: as in `shared_kv`: the owner is moved into the binding below,
     // which lives as long as the view (both in one `StaticIoBinding`).
-    let view =
-        unsafe { TensorRefMut::<T>::from_raw(memory.clone(), data, dims) }.map_err(map_ort_err)?;
+    let view = unsafe { raw_view::<T>(memory, data, &dims, &pair.past_input) }?;
     binding
-        .bind_input(pair.past_input.as_str(), &*view)
+        .bind_input(pair.past_input.as_str(), &view)
         .map_err(map_ort_err)?;
     binding
         .bind_output(pair.present_output.as_str(), owner)
         .map_err(map_ort_err)?;
-    view.into_dyn()
-        .downcast::<DynTensorValueType>()
-        .map_err(map_ort_err)
+    Ok(view)
+}
+
+/// A tensor of `dims` over `data` in `memory` that does not own it.
+///
+/// # Safety
+/// `data` must hold `dims` elements of `T` in `memory`, alive for as long as
+/// the view.
+unsafe fn raw_view<T>(
+    memory: &MemoryInfo,
+    data: *mut std::ffi::c_void,
+    dims: &Shape,
+    what: &str,
+) -> Result<DynTensor>
+where
+    T: ort::value::PrimitiveTensorElementType,
+{
+    let bytes = dims.num_elements() * std::mem::size_of::<T>();
+    // SAFETY: per this function's contract.
+    let value = unsafe {
+        crate::shared_initializers::wrap_memory(
+            memory,
+            data,
+            bytes,
+            dims,
+            T::into_tensor_element_type(),
+            what,
+        )
+    }?;
+    value.downcast::<DynTensorValueType>().map_err(map_ort_err)
 }
 
 fn kv_element(metadata: &SessionMetadata, pairs: &[SharedKvPair]) -> Result<TensorElement> {

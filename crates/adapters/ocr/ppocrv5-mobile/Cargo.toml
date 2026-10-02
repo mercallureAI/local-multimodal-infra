@@ -1,0 +1,23 @@
+[package]
+name = "local-adapter-ppocrv5-mobile"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+cuda = ["local-backend-ort/cuda"]
+directml = ["local-backend-ort/directml"]
+tensorrt = ["local-backend-ort/tensorrt"]
+
+[dependencies]
+image.workspace = true
+local-backend-ort.workspace = true
+local-core.workspace = true
+local-error.workspace = true
+local-files.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

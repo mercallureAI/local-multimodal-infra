@@ -218,16 +218,44 @@ pub(crate) fn device_view(
     let tensor = owner
         .downcast_ref::<ort::value::DynTensorValueType>()
         .map_err(map_ort_err)?;
-    let element: ort::value::TensorElementType = *tensor.data_type();
     let shape = shape.iter().map(|dim| *dim as i64).collect::<Vec<_>>();
-    let api = ort::api();
-    let mut out: *mut ort::sys::OrtValue = std::ptr::null_mut();
     // SAFETY: the pointer, byte length, shape and element type all describe
     // `owner`'s live buffer, which the caller keeps alive alongside the view.
+    unsafe {
+        wrap_memory(
+            tensor.memory_info(),
+            tensor.data_ptr() as *mut _,
+            bytes,
+            &shape,
+            *tensor.data_type(),
+            what,
+        )
+    }
+}
+
+/// A value of `shape` and `element` over `bytes` at `data` in `memory`, not
+/// owning it (ort's `TensorRefMut::from_raw` loses a device `MemoryInfo` as of
+/// 2.0.0-rc.13: its `MemoryInfo::to_owned` always describes the CPU, so a
+/// CUDA buffer would be read as host memory).
+///
+/// # Safety
+/// `data` must point to `bytes` live bytes in `memory`, kept alive for as long
+/// as the returned value.
+pub(crate) unsafe fn wrap_memory(
+    memory: &ort::memory::MemoryInfo<'_>,
+    data: *mut std::ffi::c_void,
+    bytes: usize,
+    shape: &[i64],
+    element: ort::value::TensorElementType,
+    what: &str,
+) -> Result<DynValue> {
+    let api = ort::api();
+    let mut out: *mut ort::sys::OrtValue = std::ptr::null_mut();
+    // SAFETY: per this function's contract.
     let status = unsafe {
         (api.CreateTensorWithDataAsOrtValue)(
-            tensor.memory_info().ptr(),
-            tensor.data_ptr() as *mut _,
+            memory.ptr(),
+            data as *mut _,
             bytes,
             shape.as_ptr(),
             shape.len(),

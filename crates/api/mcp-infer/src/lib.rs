@@ -406,6 +406,13 @@ mod tests {
                 TaskKind::OcrRecognize => InferenceOutput::OcrText {
                     text: "ok".to_string(),
                 },
+                TaskKind::OcrLines => InferenceOutput::OcrLines { lines: Vec::new() },
+                TaskKind::DepthEstimate => InferenceOutput::DepthMap {
+                    cols: 1,
+                    rows: 1,
+                    max_depth: 20.0,
+                    depth: vec![1.0],
+                },
                 TaskKind::ChatComplete | TaskKind::VoiceRealtime => InferenceOutput::Accepted {
                     job_id: "unsupported-test".to_string(),
                 },

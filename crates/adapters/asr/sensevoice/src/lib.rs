@@ -22,6 +22,9 @@ use std::{
 };
 
 const MODEL_FILE: &str = "model_quant.onnx";
+/// Metadata naming the SenseVoice graph in `asr/` instead of [`MODEL_FILE`]
+/// (the int8 graph): e.g. a float16 export, several times faster on CUDA.
+const ASR_MODEL_FILE_KEY: &str = "asr_model_file";
 const CONFIG_FILE: &str = "config.yaml";
 const CMVN_FILE: &str = "am.mvn";
 const TOKENS_FILE: &str = "tokens.json";
@@ -48,12 +51,17 @@ pub struct SenseVoiceArtifacts {
 
 impl SenseVoiceArtifacts {
     pub fn validate(root: impl AsRef<Path>) -> Result<Self> {
+        Self::validate_with_model(root, MODEL_FILE)
+    }
+
+    /// As [`Self::validate`], the SenseVoice graph being `asr/<model_file>`.
+    pub fn validate_with_model(root: impl AsRef<Path>, model_file: &str) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         let asr_root = root.join("asr");
         let vad_root = root.join("vad");
         let speaker_root = root.join("speaker");
         let artifacts = Self {
-            model: asr_root.join(MODEL_FILE),
+            model: asr_root.join(model_file),
             config: asr_root.join(CONFIG_FILE),
             cmvn: asr_root.join(CMVN_FILE),
             tokens: asr_root.join(TOKENS_FILE),
@@ -88,12 +96,24 @@ impl SenseVoiceArtifacts {
     }
 
     fn from_spec(spec: &ModelSpec) -> Result<Self> {
+        let model_file = match spec.metadata.get(ASR_MODEL_FILE_KEY) {
+            None => MODEL_FILE,
+            Some(value) => value
+                .as_str()
+                .filter(|name| {
+                    !name.is_empty() && Path::new(name).file_name() == Some(name.as_ref())
+                })
+                .ok_or_else(|| InfraError::ModelNotConfigured {
+                    model_id: spec.id.clone(),
+                    reason: format!("metadata `{ASR_MODEL_FILE_KEY}` must be a file name in asr/"),
+                })?,
+        };
         let asr_model = spec
             .artifacts
             .iter()
             .map(|artifact| &artifact.path)
             .find(|path| {
-                path.file_name().and_then(|name| name.to_str()) == Some(MODEL_FILE)
+                path.file_name().and_then(|name| name.to_str()) == Some(model_file)
                     && path
                         .parent()
                         .and_then(Path::file_name)
@@ -113,7 +133,7 @@ impl SenseVoiceArtifacts {
                 model_id: spec.id.clone(),
                 reason: "SenseVoice artifact directory is not configured".to_string(),
             })?;
-        Self::validate(root).map_err(|error| match error {
+        Self::validate_with_model(root, model_file).map_err(|error| match error {
             InfraError::ModelNotConfigured { reason, .. } => InfraError::ModelNotConfigured {
                 model_id: spec.id.clone(),
                 reason,

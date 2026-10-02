@@ -71,7 +71,11 @@ pub fn resample(samples: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32>
             acc += *sample as f64 * weight;
             norm += weight;
         }
-        out.push(if norm.abs() > 1e-12 { (acc / norm) as f32 } else { 0.0 });
+        out.push(if norm.abs() > 1e-12 {
+            (acc / norm) as f32
+        } else {
+            0.0
+        });
     }
     out
 }

@@ -13,12 +13,8 @@ RUN apt-get update \
     && rustc --version \
     && cargo --version
 
-COPY . .
-# ONNX Runtime is loaded at run time (ort `load-dynamic`); --locked fixes all
-# Cargo inputs.
-RUN cargo build --locked --release -p local-cli --bin worker --features cuda
-
-# The official ONNX Runtime 1.30.0 CUDA 12 build, pinned by digest.
+# The official ONNX Runtime 1.30.0 CUDA 12 build, pinned by digest. Before the
+# sources, so a code change does not download it again.
 ARG ORT_VERSION=1.30.0
 ARG ORT_SHA256=f9886932ee7bb0b4d3fcab736a392d4ff5efaa0672b47f19f0cec03437cf64f1
 RUN set -eux; \
@@ -28,7 +24,18 @@ RUN set -eux; \
     mkdir -p /tmp/ort /ort-libs; \
     tar -xzf /tmp/ort.tgz -C /tmp/ort --strip-components=1; \
     cp -av /tmp/ort/lib/libonnxruntime.so* /tmp/ort/lib/libonnxruntime_providers_shared.so \
-        /tmp/ort/lib/libonnxruntime_providers_cuda.so /ort-libs/
+        /tmp/ort/lib/libonnxruntime_providers_cuda.so /ort-libs/; \
+    rm -rf /tmp/ort /tmp/ort.tgz
+
+COPY . .
+# ONNX Runtime is loaded at run time (ort `load-dynamic`); --locked fixes all
+# Cargo inputs. The crate downloads and the target directory are BuildKit
+# caches kept between builds: a code change rebuilds only what it touches.
+RUN --mount=type=cache,id=lmi-cargo-registry,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,id=lmi-cargo-git,target=/root/.cargo/git,sharing=locked \
+    --mount=type=cache,id=lmi-target-cuda,target=/app/target,sharing=locked \
+    cargo build --locked --release -p local-cli --bin worker --features cuda \
+    && cp target/release/worker /usr/local/bin/worker
 
 # Use Ubuntu 24.04 for both stages, keeping the runtime CUDA and cuDNN
 # versions fixed.
@@ -40,7 +47,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /app/workdir/models
 
-COPY --from=builder /app/target/release/worker /usr/local/bin/worker
+COPY --from=builder /usr/local/bin/worker /usr/local/bin/worker
 COPY --from=builder /ort-libs/ /usr/local/lib/
 COPY configs ./configs
 # Every library must resolve, except the driver's libcuda.so.1, which the

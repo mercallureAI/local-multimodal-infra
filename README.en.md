@@ -30,8 +30,10 @@ Models and input files are not baked into the images. Local configs bind to loop
 | Capability | Default model | Status | Main output |
 | --- | --- | --- | --- |
 | Object detection | `yolo11n.onnx` | Enabled by default | Classes, confidences, bounding boxes |
+| Monocular metric depth | `depth-anything-v2-metric-indoor-small-onnx` | Enabled after a local export | A grid of mean depths (metres) |
 | Document OCR | `unlimited-ocr-onnx` | Enabled after a local export (int8 experts, NVIDIA GPU required) | Page text (Markdown/HTML tables) with layout categories and boxes |
 | Speech recognition | `sensevoice-small-onnx` | Enabled by default | Text, timeline, language, emotion, speaker |
+| Speech recognition (low latency) | `sensevoice-small-fp16-onnx` | Enabled after a local export | The same; a float16 graph, ~40-90 ms per utterance on CUDA |
 | Speech synthesis | `indextts-1.5-onnx` | Enabled by default | WAV audio |
 | Speech synthesis | `indextts-2.5-onnx` | Enabled by default (FP16, NVIDIA GPU recommended) | WAV audio with emotion control |
 | Speech synthesis | `qwen3-tts-0.6b-onnx` | Enabled after a local export (INT8 weights, NVIDIA GPU recommended) | Streamed 24 kHz audio, voice cloned from a 3 s reference, text accepted while it is written |
@@ -43,6 +45,12 @@ Models and input files are not baked into the images. Local configs bind to loop
 All models run on ONNX Runtime (the official ONNX Runtime 1.30, loaded at run time; see `docs/implementation-notes.md`). Model configs ask for CUDA first with CPU fallback; the provider actually used still depends on the build, the environment and each model's operator support.
 
 Document OCR uses [baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-OCR) (DeepEncoder + DeepSeek-V2 MoE with R-SWA attention) and recognizes one page image per request (base mode, padded to 1024×1024). The result is the page text with a `<|det|>category [x1, y1, x2, y2]<|/det|>` tag before each layout block, coordinates normalized to 0–999, tables as HTML. Call it through the MCP / legacy RPC `ocr_recognize` (an `image` FileRef or `image_path`) or the generic `ocr.recognize` task (upload `image`).
+
+Text lines in pictures (scene text, UI labels, name tags) use PaddleOCR's PP-OCRv5 mobile detection and recognition models (Chinese, English, Japanese and more in one model; the two ONNX files are about 21 MB), returning each line with its pixel box, top to bottom then left to right. For frame-by-frame use, `POST /v1/ocr/lines[?model=ppocrv5-mobile-onnx]` takes the image (PNG/JPEG/BMP) as the body and answers at once with `{"lines": [{"text", "confidence", "bbox"}]}`, behind the inference token; the generic `ocr.lines` task (upload `image`) works too. Object detection has the same frame-by-frame form, `POST /v1/detect/objects[?model=yolo11n.onnx]`, answering `{"objects": [{"label", "confidence", "bbox"}]}`.
+
+Monocular metric depth uses Depth Anything V2 Metric Indoor Small (ViT-S fine-tuned on indoor Hypersim, up to 20 m, Apache-2.0), exported from a pinned revision to a fixed-input-size ONNX (~99 MB) by `python -m scripts.local.depth_anything_export --size 308x546 --output-dir <models>/depth-anything-v2-metric-indoor-small-onnx`. The frame-by-frame `POST /v1/depth[?model=&cols=&rows=]` (default 64x36) answers `{"cols", "rows", "max_depth", "depth": [metres, row by row from the top]}`, each cell the mean depth of its area; the generic `depth.estimate` task (upload `image`, `params.cols/rows`) works too. A 1280x720 frame takes ~30 ms on an RTX 4090 (decoding included).
+
+Low-latency speech recognition `sensevoice-small-fp16-onnx` is the same SenseVoiceSmall as `sensevoice-small-onnx`: the latter's int8 graph has 281 `DynamicQuantizeLinear` nodes that fall back to the CPU under the CUDA provider, each layer going back and forth, ~200-350 ms per utterance; the float16 graph runs on the GPU throughout, ~40-90 ms, the same transcripts. `python -m scripts.local.sensevoice_fp16_export --base-dir <models>/sensevoice-small-onnx --output-dir <models>/sensevoice-small-fp16-onnx` exports it from a pinned revision (~470 MB), the other files taken from `sensevoice-small-onnx`; the metadata `asr_model_file` names the graph in `asr/`. The realtime voice cascade picks it in `voice-cascade.yaml`'s `asr_model`.
 
 SenseVoice ASR includes FSMN-VAD and CAM++ speaker identification. By default it returns plain text, `timestamped_text` at about 10-second granularity, `segments[].speaker` and `speakers[]`. Use `timestamps`, `timestamp_granularity_sec`, `token_timestamps` and `speaker_diarization` to adjust or turn off these results.
 
@@ -242,6 +250,7 @@ Both `rpc` and `mcp` include OCR (`--tests ocr` runs it alone); it is reported a
 | IndexTTS Mandarin frontend (WeText + g2pW) | [ModaLeap/zh-tts-frontend](https://huggingface.co/ModaLeap/zh-tts-frontend) | `ba6b85aeb17ebc58d2d3d73121096f9495ee710e` |
 | multilingual-e5-small | [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) | `614241f622f53c4eeff9890bdc4f31cfecc418b3` |
 | mMARCO MiniLM reranker | [cross-encoder/mmarco-mMiniLMv2-L12-H384-v1](https://huggingface.co/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1) | `1427fd652930e4ba29e8149678df786c240d8825` |
+| PP-OCRv5 mobile detection / recognition (ONNX) | [ilaylow/PP_OCRv5_mobile_onnx](https://huggingface.co/ilaylow/PP_OCRv5_mobile_onnx), dictionary [PaddleOCR `ppocrv5_dict.txt`](https://github.com/PaddlePaddle/PaddleOCR/blob/a38c087bcb2579f9ccc2068aea02ec893b1c2311/ppocr/utils/dict/ppocrv5_dict.txt) | `f97b337b3ac256f9dffcac5fc53955082d919d58` / `a38c087bcb2579f9ccc2068aea02ec893b1c2311` |
 | Unlimited-OCR (source of the local ONNX export) | [baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-OCR) | `07dea832e22aefee32ad281d4b80551282e1c168` |
 | Qwen3-TTS-12Hz-0.6B-Base (source of the local ONNX export) | [Qwen/Qwen3-TTS-12Hz-0.6B-Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base) | `5d83992436eae1d760afd27aff78a71d676296fc` |
 | Qwen3-4B-Instruct-2507 (source of the local INT4 export) | [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) | `cdbee75f17c01a7cc42f958dc650907174af0554` |
@@ -254,6 +263,7 @@ The exact files, revisions and SHA-256 sums are the ones in [`configs/providers`
 - [modelscope/FunASR](https://github.com/modelscope/FunASR): reference for SenseVoice ONNX preprocessing, inference and the FSMN-VAD pipeline;
 - [FunAudioLLM/SenseVoice](https://github.com/FunAudioLLM/SenseVoice): the SenseVoice model and official implementation;
 - [ultralytics/ultralytics](https://github.com/ultralytics/ultralytics): YOLO preprocessing, output decoding and the COCO labels;
+- [PaddlePaddle/PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR): the PP-OCRv5 models, reference for DB detection postprocessing and CTC decoding;
 - [baidu/Unlimited-OCR](https://github.com/baidu/Unlimited-OCR): the Unlimited-OCR model and official implementation (preprocessing, prompt, R-SWA and the no-repeat sampler);
 - [index-tts/index-tts](https://github.com/index-tts/index-tts): the official IndexTTS implementation;
 - [DakeQQ/Text-to-Speech-TTS-ONNX](https://github.com/DakeQQ/Text-to-Speech-TTS-ONNX): reference for IndexTTS ONNX export and inference;

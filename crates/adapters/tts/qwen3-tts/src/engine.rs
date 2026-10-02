@@ -93,6 +93,7 @@ impl Engine {
         let talker_backend = base.clone().with_cuda_session_options(CudaSessionOptions {
             cuda_graph,
             tf32: None,
+            ..CudaSessionOptions::default()
         });
         let talker = Talker::load(
             &talker_backend,
@@ -134,6 +135,7 @@ impl Engine {
         let encoder_backend = base.with_cuda_session_options(CudaSessionOptions {
             cuda_graph: false,
             tf32: Some(false),
+            ..CudaSessionOptions::default()
         });
         let encoder = VoiceEncoder::load(
             &encoder_backend,

@@ -60,6 +60,10 @@ pub struct CudaSessionOptions {
     pub cuda_graph: bool,
     /// TF32 matmul/conv math on Ampere and later; `None` keeps ORT's default.
     pub tf32: Option<bool>,
+    /// Pick cuDNN convolution algorithms by heuristic instead of benchmarking
+    /// them for every new input shape (ORT's default, exhaustive search): for
+    /// models whose input sizes vary from run to run.
+    pub conv_algo_heuristic: bool,
 }
 pub use io_binding::{
     PinnedCudaF32IoBinding, PinnedCudaIoBinding, ResidentBindingOutputs, ResidentCudaTensor,
@@ -854,6 +858,10 @@ impl RealSession {
             if let Some(tf32) = extras.cuda.tf32 {
                 cuda = cuda.with_tf32(tf32);
             }
+            if extras.cuda.conv_algo_heuristic {
+                cuda =
+                    cuda.with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Heuristic);
+            }
             let builder = Session::builder()
                 .map_err(map_ort_err)?
                 .with_execution_providers([cuda.build().error_on_failure()])
@@ -1053,7 +1061,7 @@ impl RealSession {
         };
         let mut options = ort::session::RunOptions::new().map_err(map_ort_err)?;
         options
-            .add_config_entry("memory.enable_memory_arena_shrinkage", arenas)
+            .set("memory.enable_memory_arena_shrinkage", arenas)
             .map_err(map_ort_err)?;
         let outputs = self
             .session
