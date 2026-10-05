@@ -10,6 +10,11 @@
 //! In audio mode there is no chat model: utterances go to the client
 //! (`input.transcript`), which streams back the text to speak
 //! (`response.delta`); listening, speaking and being talked over work alike.
+//!
+//! In a group the input also runs through a keyword spotter (the bot's
+//! name, its aliases and other wake words; `local_adapter_kws_zipformer`):
+//! with `wake` on, only an utterance a wake word was spoken in (or one that
+//! follows a bare call) wants a reply, the rest is context.
 
 use crate::{
     history::History,
@@ -18,6 +23,7 @@ use crate::{
     text::{live_prefix, speakable, takes_floor, ClauseSplitter},
 };
 use base64::Engine;
+use local_adapter_kws_zipformer::KeywordSpotter;
 use local_adapter_silero_vad::{SileroVad, VadEvent, VadIterator, WINDOW};
 use local_core::{
     AdapterKind, ArtifactKind, ChatMessage, ChatOptions, ChatToolCall, FileRef, InferenceEvent,
@@ -47,6 +53,11 @@ const JOIN_SAMPLES: usize = INPUT_RATE as usize * 3 / 2;
 /// In a group, a shorter utterance (a bare "<name>,") is continued by what
 /// follows it; a longer one is not joined by what others say after it.
 const CALL_SAMPLES: usize = INPUT_RATE as usize * 3 / 2;
+/// After a bare call ("<name>,") an utterance starting within this long
+/// counts as called too (the request after the pause).
+const CALL_FOLLOW_SAMPLES: usize = INPUT_RATE as usize * 5;
+/// Wake words heard this long ago are forgotten.
+const WAKE_KEPT_SAMPLES: usize = INPUT_RATE as usize * 60;
 /// Shorter speech is noise (a click, a cough cut short).
 const MIN_UTTERANCE_SAMPLES: usize = INPUT_RATE as usize / 4;
 /// Longer speech is recognised in pieces of this length, answered once it
@@ -141,6 +152,9 @@ pub struct CascadeModels {
     pub tts_emotion: BTreeMap<String, Value>,
     /// Where a conversation keeps its short-lived audio files.
     pub temp_dir: PathBuf,
+    /// The keyword spotter's model (`kws_dir`, beside the VAD model; default
+    /// `kws`), if there: wake words in a group.
+    pub kws_dir: Option<PathBuf>,
 }
 
 impl CascadeModels {
@@ -171,6 +185,10 @@ impl CascadeModels {
                 .unwrap_or(default)
                 .to_string()
         };
+        let kws_dir = vad_model
+            .parent()
+            .map(|dir| dir.join(text("kws_dir", "kws")))
+            .filter(|dir| dir.join("encoder.onnx").is_file());
         Ok(Self {
             vad_model,
             chat_model: text("chat_model", "qwen3-4b-instruct-2507-int4-onnx"),
@@ -220,6 +238,7 @@ impl CascadeModels {
                 emotion
             },
             temp_dir: data_dir.join("voice-cascade"),
+            kws_dir,
         })
     }
 }
@@ -479,17 +498,48 @@ async fn converse(
         tasks.push(tokio::spawn(report_state(shared.clone())));
     }
     let mut input = Input::new(vad, &config, asr_tx);
-    let names: Option<Vec<String>> = config.group.then(|| {
+    let mut names: Option<Vec<String>> = config.group.then(|| {
         std::iter::once(config.name.clone())
             .chain(config.aliases.iter().cloned())
             .collect()
     });
+    // In a group: the wake words, and whether only they want a reply.
+    let mut wake_words = config.wake_words.clone();
+    let mut wake = config.group && config.wake.unwrap_or(true);
+    if config.group {
+        match models.kws_dir.clone() {
+            Some(dir) => match blocking(move || KeywordSpotter::load(&dir)).await {
+                Ok(spotter) => {
+                    input.spotter = Some(spotter);
+                    input.set_wake_words(names.as_deref().unwrap_or_default(), &wake_words);
+                }
+                Err(err) => tracing::warn!(error = %err, "voice cascade keyword spotter did not load"),
+            },
+            None => tracing::warn!("voice cascade has no keyword spotter model (kws_dir): wake words go by the transcripts"),
+        }
+    }
     let mut listener = Listener::default();
 
     loop {
         tokio::select! {
             message = inbound.recv() => match message {
                 None | Some(Inbound::Event(ClientEvent::SessionStop)) => break,
+                Some(Inbound::Event(ClientEvent::SessionUpdate { config: update })) => {
+                    if let Some(on) = update.wake {
+                        wake = config.group && on;
+                        tracing::info!(wake, "voice cascade session updated");
+                    }
+                    if update.aliases.is_some() || update.wake_words.is_some() {
+                        if let (Some(aliases), Some(names)) = (update.aliases, names.as_mut()) {
+                            names.truncate(1);
+                            names.extend(aliases);
+                        }
+                        if let Some(words) = update.wake_words {
+                            wake_words = words;
+                        }
+                        input.set_wake_words(names.as_deref().unwrap_or_default(), &wake_words);
+                    }
+                }
                 Some(Inbound::Event(ClientEvent::SessionStart { .. })) => {
                     shared.emit(ServerEvent::Error { message: "session already started".to_string() });
                 }
@@ -530,7 +580,14 @@ async fn converse(
                 }
             },
             Some(utterance) = heard_rx.recv() => {
-                heard(&shared, utterance, names.as_deref(), &mut listener);
+                // Only what calls the bot wants a reply: by the spotter (or,
+                // without one, by its names in the transcript).
+                let gate = match (wake, input.spotter.is_some()) {
+                    (false, _) => Gate::Open,
+                    (true, true) => Gate::WakeWords,
+                    (true, false) => Gate::Names,
+                };
+                heard(&shared, utterance, names.as_deref(), gate, &mut listener);
             }
         }
     }
@@ -589,6 +646,10 @@ struct Input {
     /// short.
     pieces_sent: bool,
     barged: bool,
+    /// The wake words' spotter (in a group), and where (samples) wake words
+    /// were heard lately.
+    spotter: Option<KeywordSpotter>,
+    wakes: VecDeque<(usize, usize)>,
 }
 
 impl Input {
@@ -610,6 +671,24 @@ impl Input {
             utterance_start: 0,
             pieces_sent: false,
             barged: false,
+            spotter: None,
+            wakes: VecDeque::new(),
+        }
+    }
+
+    /// The spotter listens for the bot's `names` and `words` from now on.
+    fn set_wake_words(&mut self, names: &[String], words: &[String]) {
+        let Some(spotter) = self.spotter.as_mut() else {
+            return;
+        };
+        let all: Vec<String> = names.iter().chain(words).cloned().collect();
+        let unread = spotter.set_keywords(&all);
+        tracing::info!(words = ?spotter.keywords(), "voice cascade wake words");
+        if !unread.is_empty() {
+            tracing::warn!(
+                ?unread,
+                "voice cascade wake words without a reading (add how they are said)"
+            );
         }
     }
 
@@ -630,6 +709,7 @@ impl Input {
         while self.pending.len() >= WINDOW {
             let window: Vec<f32> = self.pending.drain(..WINDOW).collect();
             self.pcm.extend_from_slice(&window);
+            self.spot(&window, shared);
             let probability = match self.vad.probability(&window) {
                 Ok(probability) => probability,
                 Err(err) => {
@@ -692,6 +772,37 @@ impl Input {
         }
     }
 
+    /// Wake words in `window` (the input's next samples).
+    fn spot(&mut self, window: &[f32], shared: &Shared) {
+        let Some(spotter) = self.spotter.as_mut() else {
+            return;
+        };
+        match spotter.accept(window) {
+            Ok(found) => {
+                for wake in found {
+                    tracing::info!(word = %wake.keyword, score = wake.score, at = seconds(wake.start), "voice cascade wake word");
+                    self.wakes.push_back((wake.start, wake.end));
+                    shared.emit(ServerEvent::Wake {
+                        word: wake.keyword,
+                        score: wake.score,
+                    });
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "voice cascade keyword spotter failed; wake words go by the transcripts");
+                self.spotter = None;
+            }
+        }
+        let now = self.iterator.position();
+        while self
+            .wakes
+            .front()
+            .is_some_and(|w| w.1 + WAKE_KEPT_SAMPLES < now)
+        {
+            self.wakes.pop_front();
+        }
+    }
+
     /// Sends input `from..to`: a piece (`continues`) or the end of an
     /// utterance. False when it is not sent (too short: noise).
     fn send(&mut self, from: usize, to: usize, continues: bool) -> bool {
@@ -700,13 +811,19 @@ impl Input {
         if !(continues || after_pieces || samples.len() >= MIN_UTTERANCE_SAMPLES) {
             return false;
         }
+        let start = self.utterance_start;
+        let called = self
+            .wakes
+            .iter()
+            .any(|&(w_start, w_end)| w_end > start && w_start < to);
         let _ = self.asr.send(Utterance {
-            start: self.utterance_start,
+            start,
             end: to,
             samples,
             text: String::new(),
             continues,
             barged: self.barged,
+            called,
         });
         true
     }
@@ -722,12 +839,27 @@ struct Utterance {
     continues: bool,
     /// It stopped the bot (one to one, by talking over it long enough).
     barged: bool,
+    /// A wake word was heard in it (this piece or the utterance so far).
+    called: bool,
+}
+
+/// Which utterances in a group want a reply.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Gate {
+    /// Any (one other person to talk with): the reply decides.
+    Open,
+    /// Those a wake word was spotted in.
+    WakeWords,
+    /// Those with the bot's name in the transcript (no spotter).
+    Names,
 }
 
 #[derive(Default)]
 struct Listener {
     /// Pieces of a long utterance still going on.
     held: String,
+    /// One of them was called.
+    held_called: bool,
     last: Option<LastUtterance>,
 }
 
@@ -740,6 +872,8 @@ struct LastUtterance {
     message: u64,
     /// A reply to it was asked for.
     answered: bool,
+    /// A wake word was heard in it.
+    called: bool,
 }
 
 /// `a` and `b` as one text (a space between words of a spaced script).
@@ -754,10 +888,12 @@ fn heard(
     shared: &Arc<Shared>,
     utterance: Utterance,
     names: Option<&[String]>,
+    gate: Gate,
     listener: &mut Listener,
 ) {
     let piece = utterance.text.trim();
     if utterance.continues {
+        listener.held_called |= utterance.called;
         if !piece.is_empty() {
             listener.held = join_text(&listener.held, piece);
             shared.emit(ServerEvent::Transcript {
@@ -766,6 +902,7 @@ fn heard(
                 id: None,
                 replaces: None,
                 respond: None,
+                called: None,
             });
         }
         return;
@@ -779,6 +916,7 @@ fn heard(
     }
     let _taken_in = TakenIn(&shared.listening);
     let held = std::mem::take(&mut listener.held);
+    let mut called = utterance.called || std::mem::take(&mut listener.held_called);
     let mut text = join_text(&held, piece);
     if text.is_empty() {
         return;
@@ -791,10 +929,15 @@ fn heard(
         // told apart: only a short call (a bare "<name>,") is continued;
         // what follows a longer utterance is likely someone else.
         let continues = names.is_none() || previous.short;
-        if continues && utterance.start.saturating_sub(previous.end) < JOIN_SAMPLES {
+        let gap = utterance.start.saturating_sub(previous.end);
+        if continues && gap < JOIN_SAMPLES {
             // The utterance replaces the last one.
             text = join_text(&previous.text, &text);
             joined = Some((previous.message, previous.answered));
+            called |= previous.called;
+        } else if previous.short && previous.called && gap < CALL_FOLLOW_SAMPLES {
+            // The request after a bare call ("<name>," ... "what is ...").
+            called = true;
         }
     }
     let skip = text.chars().count().saturating_sub(MAX_UTTERANCE_CHARS);
@@ -803,7 +946,11 @@ fn heard(
         shared.player.speaking() || shared.generating.load(Ordering::SeqCst) || shared.responding();
     let restarts = matches!(joined, Some((_, true)));
     // A barge-in is answered: it cut the bot, and whatever started since.
-    let answer = restarts || utterance.barged || !busy || takes_floor(&text, names);
+    let answer = match gate {
+        Gate::Open => restarts || utterance.barged || !busy || takes_floor(&text, names),
+        Gate::WakeWords => restarts || called,
+        Gate::Names => restarts || takes_floor(&text, names),
+    };
     tracing::info!(
         text,
         joined = joined.is_some(),
@@ -827,6 +974,7 @@ fn heard(
             .filter(|_| shared.audio)
             .map(|(replaced, _)| replaced),
         respond: shared.audio.then_some(answer),
+        called: (shared.audio && names.is_some()).then_some(called),
     });
     if !answer && names.is_none() {
         // A backchannel while the bot speaks.
@@ -840,6 +988,7 @@ fn heard(
             short: joined.is_none() && utterance.end - utterance.start < CALL_SAMPLES,
             message: id,
             answered: answer,
+            called,
         });
         return;
     }
@@ -857,6 +1006,7 @@ fn heard(
         short: joined.is_none() && utterance.end - utterance.start < CALL_SAMPLES,
         message,
         answered: answer,
+        called,
     });
     if answer {
         let due = Counted::new(&shared.replies_due);
@@ -1330,7 +1480,9 @@ impl Shared {
                     message: "tool.result and note are for cascade mode sessions".to_string(),
                 });
             }
-            ClientEvent::SessionStart { .. } | ClientEvent::SessionStop => {}
+            ClientEvent::SessionStart { .. }
+            | ClientEvent::SessionUpdate { .. }
+            | ClientEvent::SessionStop => {}
         }
     }
 
@@ -2394,6 +2546,74 @@ mod tests {
                 Outbound::Audio(_) => None,
             })
             .collect()
+    }
+
+    fn utterance(start: f64, end: f64, text: &str, called: bool) -> Utterance {
+        let at = |s: f64| (s * INPUT_RATE as f64) as usize;
+        Utterance {
+            start: at(start),
+            end: at(end),
+            samples: Vec::new(),
+            text: text.to_string(),
+            continues: false,
+            barged: false,
+            called,
+        }
+    }
+
+    #[test]
+    fn in_a_group_only_what_calls_the_bot_wants_a_reply() {
+        let (shared, mut out, _clauses) = audio_shared();
+        let names = vec!["Jarvis".to_string()];
+        let mut listener = Listener::default();
+        for u in [
+            utterance(0.0, 2.0, "今天吃什么", false),
+            // The wake word at the end.
+            utterance(3.0, 5.0, "我觉得火锅不错吧Jarvis", true),
+            // A bare call, then the request after a pause.
+            utterance(8.0, 8.6, "Jarvis", true),
+            utterance(10.5, 12.0, "帮我查一下明天的天气", false),
+            utterance(20.0, 22.0, "随便聊聊", false),
+        ] {
+            shared.listening.fetch_add(1, Ordering::SeqCst);
+            heard(&shared, u, Some(&names), Gate::WakeWords, &mut listener);
+        }
+        let heard: Vec<(bool, bool)> = events(&mut out)
+            .iter()
+            .filter(|e| e["type"] == "input.transcript")
+            .map(|e| (e["respond"] == true, e["called"] == true))
+            .collect();
+        assert_eq!(
+            heard,
+            vec![
+                (false, false),
+                (true, true),
+                (true, true),
+                (true, true),
+                (false, false)
+            ]
+        );
+    }
+
+    #[test]
+    fn with_one_other_person_everything_may_get_a_reply() {
+        let (shared, mut out, _clauses) = audio_shared();
+        let names = vec!["Jarvis".to_string()];
+        let mut listener = Listener::default();
+        shared.listening.fetch_add(1, Ordering::SeqCst);
+        heard(
+            &shared,
+            utterance(0.0, 2.0, "今天吃什么", false),
+            Some(&names),
+            Gate::Open,
+            &mut listener,
+        );
+        let respond: Vec<bool> = events(&mut out)
+            .iter()
+            .filter(|e| e["type"] == "input.transcript")
+            .map(|e| e["respond"] == true)
+            .collect();
+        assert_eq!(respond, vec![true]);
     }
 
     fn delta(id: &str, text: &str) -> ClientEvent {

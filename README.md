@@ -158,7 +158,7 @@ curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
 - `mmarco-minilm-l12-onnx`
 - `indextts-1.5-onnx`
 - `indextts-2.5-onnx`（FP16，约 2.8 GB）
-- `voice-cascade`（只下载 Silero VAD；对话所用的 ASR、对话与 TTS 模型需各自下载或导出，默认 ASR `sensevoice-small-fp16-onnx` 需本地导出，见上文）
+- `voice-cascade`（只下载 Silero VAD；对话所用的 ASR、对话与 TTS 模型需各自下载或导出，默认 ASR `sensevoice-small-fp16-onnx` 需本地导出，见上文；群聊唤醒词模型用 `python -m scripts.local.fetch_kws_model` 放到 `voice-cascade/kws`）
 
 `depth-anything-v2-metric-indoor-small-onnx` 与 `sensevoice-small-fp16-onnx` 没有发布的包，按上文的导出命令本地导出。
 
@@ -260,6 +260,7 @@ python -m scripts.local.smoke --tests mcp \
 | Depth Anything V2 Metric Indoor Small（本地导出 ONNX 的源模型） | [depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf](https://huggingface.co/depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf) | `8078d68a9c75a972131914f6afd0c1723be0da7f` |
 | SenseVoiceSmall（本地导出 float16 ONNX 的源模型） | [FunAudioLLM/SenseVoiceSmall](https://huggingface.co/FunAudioLLM/SenseVoiceSmall) | `3847d57b6bdf2dd8875cb1508d2af43d80a16bf7` |
 | Silero VAD v6.2.3 | [snakers4/silero-vad](https://github.com/snakers4/silero-vad) | `5cd7945676eb32225748052e2e6a0580e4686a08` |
+| sherpa-onnx KWS zipformer zh-en 3M（唤醒词） | [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models) | `sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20` |
 
 实际下载文件、revision 与 SHA-256 以 [`configs/providers`](configs/providers)（按分类分目录）中的配置为准：Hugging Face 工件固定到 commit，URL 工件附带 SHA-256，`local-registry` 的测试会检查这两点。IndexTTS 1.5 与 2.5 的配置都会把中文前端（`ModaLeap/zh-tts-frontend`，约 177 MB，各文件许可见其 `NOTICE`）下载到各自模型目录下的 `zh-tts-frontend/`；也可用 `scripts/local/zh_frontend_export.py` 本地重新生成。
 

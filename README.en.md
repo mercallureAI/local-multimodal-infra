@@ -158,7 +158,7 @@ Other default model IDs:
 - `mmarco-minilm-l12-onnx`
 - `indextts-1.5-onnx`
 - `indextts-2.5-onnx` (FP16, about 2.8 GB)
-- `voice-cascade` (downloads only Silero VAD; the ASR, chat and TTS models the conversation uses are downloaded or exported separately, the default ASR `sensevoice-small-fp16-onnx` being a local export, see above)
+- `voice-cascade` (downloads only Silero VAD; the ASR, chat and TTS models the conversation uses are downloaded or exported separately, the default ASR `sensevoice-small-fp16-onnx` being a local export, see above; the group wake word model goes in `voice-cascade/kws` with `python -m scripts.local.fetch_kws_model`)
 
 `depth-anything-v2-metric-indoor-small-onnx` and `sensevoice-small-fp16-onnx` have no published package; export them locally with the commands above.
 
@@ -260,6 +260,7 @@ Both `rpc` and `mcp` include OCR (`--tests ocr` runs it alone); it is reported a
 | Depth Anything V2 Metric Indoor Small (source of the local ONNX export) | [depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf](https://huggingface.co/depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf) | `8078d68a9c75a972131914f6afd0c1723be0da7f` |
 | SenseVoiceSmall (source of the local float16 ONNX export) | [FunAudioLLM/SenseVoiceSmall](https://huggingface.co/FunAudioLLM/SenseVoiceSmall) | `3847d57b6bdf2dd8875cb1508d2af43d80a16bf7` |
 | Silero VAD v6.2.3 | [snakers4/silero-vad](https://github.com/snakers4/silero-vad) | `5cd7945676eb32225748052e2e6a0580e4686a08` |
+| sherpa-onnx KWS zipformer zh-en 3M (wake words) | [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models) | `sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20` |
 
 The exact files, revisions and SHA-256 sums are the ones in [`configs/providers`](configs/providers) (one directory per category): Hugging Face artifacts are pinned to a commit and URL artifacts carry a SHA-256, which the `local-registry` tests check. The IndexTTS 1.5 and 2.5 configs both download the Mandarin frontend (`ModaLeap/zh-tts-frontend`, about 177 MB; per-file licenses in its `NOTICE`) into `zh-tts-frontend/` inside their model directories; `scripts/local/zh_frontend_export.py` can also rebuild it locally.
 

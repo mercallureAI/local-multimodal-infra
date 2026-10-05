@@ -36,6 +36,37 @@ bot is always answered), in a group only when the bot's name is said. A stop
 ends the bot's speech and its generation, and the server sends
 `response.cut` so the client drops the little audio it has buffered.
 
+## Wake words
+
+In a group most talk is not for the bot, and asking a model about every
+utterance only to stay silent keeps it busy when it is called. So a group
+session also runs its input through a **keyword spotter**: k2-fsa's
+open-vocabulary zipformer transducer KWS model for Chinese and English
+(`sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20`, Apache-2.0, 3.3M
+parameters; the `local-adapter-kws-zipformer` crate ports sherpa-onnx's
+keyword spotter: Kaldi fbank, the streaming encoder in 320 ms chunks, a
+beam search boosted along the keywords). It runs on the CPU beside the VAD,
+about 2 % of a core, and spots a wake word 0.2–0.6 s after it is said, before
+the utterance it is in has ended.
+
+The wake words are the bot's `name`, its `aliases` and `wake_words`, written
+as text: Chinese characters are read in pinyin, English words with the
+model's dictionary, a short run of letters also letter by letter ("M" is
+"EH1 M") and digits in Chinese (each, and as a number) and in English ("M42"
+is "M 四二", "M 四十二", "M forty-two"), every combination one way to say the
+word. A word with letters on both sides of a digit ("Mon3tr") has no reading
+to guess: give how it is said as other words ("monster", "梦三特").
+
+With `wake` on (the default in a group) only an utterance a wake word was
+spoken in (anywhere: "<name>, ..." or "..., <name>?"), or one that starts
+within 5 s of a bare call ("<name>" alone), wants a reply; the others are
+context (`respond: false`). With `wake` off (one other person to talk with)
+every utterance may get one, as before. `session.update` turns it on and off
+mid-conversation (a room that fills up or empties). The model replying may
+still stay silent. Without the spotter's model (`<models>/voice-cascade/kws`,
+see `python -m scripts.local.fetch_kws_model`) the bot's name in the
+transcript is what calls it.
+
 The chat, ASR and TTS models are named by the `voice-cascade` model
 (`configs/providers/realtime/voice-cascade.yaml`, whose artifact is the VAD model) and
 must be enabled (`tts_model` defaults to `qwen3-tts-0.6b-onnx`, a local
@@ -128,6 +159,7 @@ clients are not browsers.
 | `response.delta` | `response_id`, `text` | Audio: text to speak, streamed. |
 | `response.end` | `response_id` | Audio: the response's text is complete. |
 | `response.cancel` | `response_id`? | Audio: stops the bot (that response, or whatever it says). |
+| `session.update` | `config` | Changes a running session: `wake`, `aliases`, `wake_words`. |
 | `session.stop` | | Ends the conversation. |
 
 `session.start.config`:
@@ -138,6 +170,8 @@ clients are not browsers.
 | `name` | (required) | The bot's name. |
 | `aliases` | `[]` | Other names (homophones) that address it. |
 | `group` | `false` | Several people talk with each other (a channel), rather than one person with the bot. |
+| `wake` | `true` in a group | Only what calls the bot by a wake word wants a reply (see Wake words). |
+| `wake_words` | `[]` | More wake words besides `name` and `aliases`. |
 | `speaker` | | Cascade: the person talking, one to one. |
 | `instructions` | | Cascade: a persona appended to the bot's instructions. |
 | `ref_audio` | model's `default_reference_audio` | The voice: a WAV file, base64. |
@@ -157,7 +191,8 @@ clients are not browsers.
 | --- | --- | --- |
 | `session.started` | `input_rate`, `output_rate` | Models loaded; audio may flow. |
 | `input.speech_started` / `input.speech_stopped` | | VAD edges. |
-| `input.transcript` | `text`, `partial`?, `id`?, `replaces`?, `respond`? | An utterance (joined when the speaker only paused); `partial`: a piece of a long one still going on. `id`, `replaces`, `respond`: audio mode. |
+| `input.transcript` | `text`, `partial`?, `id`?, `replaces`?, `respond`?, `called`? | An utterance (joined when the speaker only paused); `partial`: a piece of a long one still going on. `id`, `replaces`, `respond`: audio mode; `called` (audio, group): a wake word was spoken in it. |
+| `input.wake` | `word`, `score` | A wake word was heard (its utterance may still go on). |
 | `state` | `speaking`, `listening` | Audio: sent when either changes. |
 | `response.text` | `text`, `response_id`? | A clause the bot is about to say. |
 | `response.cut` | `response_id`? | The bot was stopped: drop its buffered audio. |

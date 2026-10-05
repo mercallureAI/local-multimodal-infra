@@ -46,8 +46,22 @@ pub enum ClientEvent {
         #[serde(default)]
         response_id: Option<String>,
     },
+    /// Changes settings of the running session.
+    #[serde(rename = "session.update")]
+    SessionUpdate { config: SessionUpdate },
     #[serde(rename = "session.stop")]
     SessionStop,
+}
+
+/// Settings a running session takes (`session.update`); those left out stay.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SessionUpdate {
+    #[serde(default)]
+    pub wake: Option<bool>,
+    #[serde(default)]
+    pub aliases: Option<Vec<String>>,
+    #[serde(default)]
+    pub wake_words: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -72,6 +86,16 @@ pub struct SessionConfig {
     /// person with the bot (a call, a whisper).
     #[serde(default)]
     pub group: bool,
+    /// In a group: only what calls the bot by a wake word (its name, an
+    /// alias, `wake_words`, spotted in the audio) wants a reply; the rest is
+    /// context. False: every utterance may (one other person in the room).
+    /// Default: on in a group.
+    #[serde(default)]
+    pub wake: Option<bool>,
+    /// More wake words besides the name and the aliases (e.g. how a name of
+    /// letters and digits is said: "monster", "梦三特" for "Mon3tr").
+    #[serde(default)]
+    pub wake_words: Vec<String>,
     /// The person talking, one to one (cascade).
     #[serde(default)]
     pub speaker: Option<String>,
@@ -155,7 +179,15 @@ pub enum ServerEvent {
         /// (one to one).
         #[serde(skip_serializing_if = "Option::is_none")]
         respond: Option<bool>,
+        /// Audio, in a group: a wake word was spoken in it (or it follows
+        /// a bare call).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        called: Option<bool>,
     },
+    /// A wake word was heard (as soon as it is: its utterance may still go
+    /// on).
+    #[serde(rename = "input.wake")]
+    Wake { word: String, score: f32 },
     /// Audio: sent when either changes. `speaking`: the bot speaks or has
     /// speech on its way; `listening`: someone is in the middle of an
     /// utterance (or it is being recognised).

@@ -1,0 +1,15 @@
+[package]
+name = "local-adapter-kws-zipformer"
+description = "Open-vocabulary wake word spotting with the sherpa-onnx zipformer transducer KWS models"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+kaldi-native-fbank = "0.1.0"
+local-backend-ort.workspace = true
+local-error.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+hound.workspace = true

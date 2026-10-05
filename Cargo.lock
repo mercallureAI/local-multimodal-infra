@@ -1413,6 +1413,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "local-adapter-kws-zipformer"
+version = "0.1.0"
+dependencies = [
+ "hound",
+ "kaldi-native-fbank",
+ "local-backend-ort",
+ "local-error",
+ "tracing",
+]
+
+[[package]]
 name = "local-adapter-mmarco-reranker"
 version = "0.1.0"
 dependencies = [
@@ -1772,6 +1783,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "hound",
+ "local-adapter-kws-zipformer",
  "local-adapter-silero-vad",
  "local-core",
  "local-error",

@@ -53,3 +53,7 @@ metadata:
   # rest.
   tts_emotion: calm
   tts_emotion_strength: 0.8
+  # The wake word spotter's model, beside the VAD model (group sessions):
+  # python -m scripts.local.fetch_kws_model. Missing: the bot's name in the
+  # transcript calls it.
+  kws_dir: kws
