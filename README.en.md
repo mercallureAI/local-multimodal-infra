@@ -32,6 +32,7 @@ Models and input files are not baked into the images. Local configs bind to loop
 | Object detection | `yolo11n.onnx` | Enabled by default | Classes, confidences, bounding boxes |
 | Monocular metric depth | `depth-anything-v2-metric-indoor-small-onnx` | Enabled after a local export | A grid of mean depths (metres) |
 | Document OCR | `unlimited-ocr-onnx` | Enabled after a local export (int8 experts, NVIDIA GPU required) | Page text (Markdown/HTML tables) with layout categories and boxes |
+| Text lines OCR | `ppocrv5-mobile-onnx` | Enabled by default | Each line's text, confidence and pixel box (scene text, UI, name tags) |
 | Speech recognition | `sensevoice-small-onnx` | Enabled by default | Text, timeline, language, emotion, speaker |
 | Speech recognition (low latency) | `sensevoice-small-fp16-onnx` | Enabled after a local export | The same; a float16 graph, ~40-90 ms per utterance on CUDA |
 | Speech synthesis | `indextts-1.5-onnx` | Enabled by default | WAV audio |
@@ -41,6 +42,7 @@ Models and input files are not baked into the images. Local configs bind to loop
 | Reranking | `mmarco-minilm-l12-onnx` | Enabled by default | Document relevance order and scores |
 | Chat completion | `qwen3-4b-instruct-2507-int4-onnx` | Enabled after a local export | Streaming text and tool calls (Qwen3 template, KV prefix reuse) |
 | Realtime voice | `voice-cascade` | Enabled by default; needs the ASR, chat and TTS models | `/v1/realtime` WebSocket voice conversation (Silero VAD + SenseVoice + Qwen3 + Qwen3-TTS, or IndexTTS for TTS, see `docs/realtime-voice.md`) |
+| Wake words | Built into realtime voice (sherpa-onnx KWS zipformer zh-en 3M) | Enabled once `scripts.local.fetch_kws_model` has put the model in place | Spots the bot's name and other wake words in group sessions (`input.wake`); only what calls it goes to the chat |
 
 All models run on ONNX Runtime (the official ONNX Runtime 1.30, loaded at run time; see `docs/implementation-notes.md`). Model configs ask for CUDA first with CPU fallback; the provider actually used still depends on the build, the environment and each model's operator support.
 
@@ -51,6 +53,8 @@ Text lines in pictures (scene text, UI labels, name tags) use PaddleOCR's PP-OCR
 Monocular metric depth uses Depth Anything V2 Metric Indoor Small (ViT-S fine-tuned on indoor Hypersim, up to 20 m, Apache-2.0), exported from a pinned revision to a fixed-input-size ONNX (~99 MB) by `python -m scripts.local.depth_anything_export --size 308x546 --output-dir <models>/depth-anything-v2-metric-indoor-small-onnx`. Images are stretched to that size, so the export suits 16:9 frames (1280x720 game frames); other aspect ratios come out distorted, their depth biased: export for theirs (`--size`). The frame-by-frame `POST /v1/depth[?model=&cols=&rows=]` (default 64x36) answers `{"cols", "rows", "max_depth", "depth": [metres, row by row from the top]}`, each cell the mean depth of its area; the generic `depth.estimate` task (upload `image`, `params.cols/rows`) works too. A 1280x720 frame takes ~30 ms on an RTX 4090 (decoding included).
 
 Low-latency speech recognition `sensevoice-small-fp16-onnx` is the same SenseVoiceSmall as `sensevoice-small-onnx`: the latter's int8 graph has 281 `DynamicQuantizeLinear` nodes that fall back to the CPU under the CUDA provider, each layer going back and forth, ~200-350 ms per utterance; the float16 graph runs on the GPU throughout, ~40-90 ms, the same transcripts. `python -m scripts.local.sensevoice_fp16_export --base-dir <models>/sensevoice-small-onnx --output-dir <models>/sensevoice-small-fp16-onnx` exports it from a pinned revision (~470 MB), the other files taken from `sensevoice-small-onnx`; the metadata `asr_model_file` names the graph in `asr/`. The realtime voice cascade picks it in `voice-cascade.yaml`'s `asr_model` (the default; where it is not exported, a session falls back to `asr_fallback_model`, `sensevoice-small-onnx`, when it starts).
+
+Group sessions of realtime voice answer only what calls the bot by a wake word: k2-fsa's open-vocabulary zipformer transducer KWS model for Chinese and English (`sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20`, Apache-2.0, 3.3M parameters, about 13 MB as the fp32 chunk-16 export), run on the CPU by `local-adapter-kws-zipformer`, a port of sherpa-onnx's keyword spotter (Kaldi fbank, the streaming encoder in 320 ms chunks, a beam search boosted along the wake words): about 2 % of a core per stream, a word spotted 0.2-0.6 s after it is said. Wake words are written as text (the bot's name, aliases, `wake_words`): Chinese read in pinyin, English with the model's dictionary, letters and digits each their own way. `python -m scripts.local.fetch_kws_model` downloads and checks the release archive and lays it out in `<models>/voice-cascade/kws`. See Wake words in `docs/realtime-voice.md`.
 
 SenseVoice ASR includes FSMN-VAD and CAM++ speaker identification. By default it returns plain text, `timestamped_text` at about 10-second granularity, `segments[].speaker` and `speakers[]`. Use `timestamps`, `timestamp_granularity_sec`, `token_timestamps` and `speaker_diarization` to adjust or turn off these results.
 
@@ -275,6 +279,9 @@ The exact files, revisions and SHA-256 sums are the ones in [`configs/providers`
 - [DakeQQ/Text-to-Speech-TTS-ONNX](https://github.com/DakeQQ/Text-to-Speech-TTS-ONNX): reference for IndexTTS ONNX export and inference;
 - [QwenLM/Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS): the official Qwen3-TTS implementation (`qwen-tts`), reference for the export and its checks;
 - [snakers4/silero-vad](https://github.com/snakers4/silero-vad): the Silero VAD model for realtime voice;
+- [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx): the wake word model's release, reference for the keyword spotter port (streaming zipformer2, keyword-boosted beam search, ContextGraph);
+- [k2-fsa/icefall](https://github.com/k2-fsa/icefall): the wake word model's training recipe and results;
+- [DepthAnything/Depth-Anything-V2](https://github.com/DepthAnything/Depth-Anything-V2): the Depth Anything V2 metric depth models and official implementation;
 - [microsoft/onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai): Qwen3 INT4 ONNX export (`models.builder`);
 - [microsoft/onnxruntime](https://github.com/microsoft/onnxruntime): CPU / CUDA inference runtime;
 - [modelcontextprotocol/rust-sdk](https://github.com/modelcontextprotocol/rust-sdk): the standard MCP Rust SDK.

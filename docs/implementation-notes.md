@@ -14,7 +14,7 @@ On Windows, never rely on the search path: `C:\Windows\System32\onnxruntime.dll`
 `backend-ort` exposes `ProviderKind::{Cpu,Cuda,Dml,Trt}`, `ProviderOptions`, and `ProviderSelection`.
 
 - CPU: the portable fallback in the shared checked-in model specs.
-- CUDA: preferred by shared YOLO, Qwen ASR, IndexTTS, E5 embedding, and mMARCO reranker specs when runtime availability confirms it.
+- CUDA: preferred by shared YOLO, SenseVoice ASR, IndexTTS, E5 embedding, and mMARCO reranker specs when runtime availability confirms it.
 - DML: configurable as an opt-in provider on Windows builds with the backend feature enabled. Failures return an explicit reason and can fall back to CPU when configured.
 - TensorRT: an existing optional backend feature, but it is not enabled, configured, or included by the NVIDIA Compose deployment.
 
@@ -154,11 +154,6 @@ ORT keeps CUDA graphs per thread, so the adapter runs its sessions on a thread o
 
 Opt-in real-model test: `LOCAL_QWEN3_TTS_MODEL_DIR=<abs dir> LOCAL_QWEN3_TTS_REFERENCE=<abs wav> ORT_DYLIB_PATH=<onnxruntime 1.30> cargo test --release -p local-adapter-qwen3-tts --features cuda real_model_smoke_if_env_set -- --nocapture`.
 
-## Qwen ASR limitations
-
-The adapter validates the known `qwen3-asr-0.6b-onnx` artifact layout and establishes interfaces for WAV read/resampling, 128-bin feature extraction, tokenizer JSON loading, embeddings/KV-cache, and decoder loop orchestration. INT4 artifacts may require ORT contrib/custom-op support for `MatMulNBits`; use `LOCAL_QWEN_ASR_MODEL_DIR=<model-dir> cargo test -p local-adapter-qwen-asr real_model_smoke_if_env_set -- --nocapture` as an opt-in real-artifact smoke test.
-
-
 ## IndexTTS FP32 and text normalization boundary
 
 IndexTTS ONNX support uses root FP32 artifacts with CUDA-first, CPU-fallback intent. The default catalog downloads the explicit `IndexTTS_A.onnx` through `IndexTTS_F.onnx` (no separate E-prefill graph: `IndexTTS_E.onnx` performs the prompt prefill when fed zero-length KV caches), `bpe.model`, and manifest files from `ModaLeap/indextts-1.5-onnx` into `workdir/models/indextts-1.5-onnx`; export/package tooling can also write the same root layout. Runtime validation loads that root directly and no longer auto-selects `fp16/` for CUDA or `q4/` for CPU. Existing `q4/` or `fp16/` model caches may remain on disk but are ignored by current code and docs. All six A, B, C, D, E, and F sessions are loaded from one `OrtBackend` built from `spec.runtime.provider_order` and are included in its provider report; code/policy support is present, while real NVIDIA hardware validation is not.
@@ -181,7 +176,7 @@ The Rust adapter frontend follows the official structure without vendoring pynin
 
 For official parity research without starting services, run `python -m scripts.local.indextts_text_parity --text "你好 OpenAI"`. The helper imports the official source tree from `workdir/models/index-tts-v1.5`, prefers `workdir/models/IndexTTS-1.5/bpe.model` and falls back to `workdir/models/indextts-1.5-onnx/bpe.model`, runs the non-service Rust dump binary, and writes normalized/tokenized/token-id equality plus summary counts under `workdir/data/indextts-text-parity-<timestamp>.json`. It supports repeated `--text`, `--input-json` (including stdin with `-`), and `--batch-file`; use `--no-rust-frontend` to skip the Rust comparator. If dependencies are missing, normal runs still write a missing-dependency report with setup hints; use `--fail-on-missing` in CI. On Windows, `pynini`/WeTextProcessing installation is commonly limited, so prefer Linux/WSL or conda-forge (`conda install -c conda-forge pynini`, then install the official project requirements) when exact official TN is required.
 
-Optional IndexTTS ASR cross-validation lives in the Python harness, not in ad-hoc curl scripts. Run `python -m scripts.local.smoke --tests indextts_asr --indextts-frontend auto --workdir ./workdir --model-dir ./workdir/models` or add `--indextts-asr-check` to an existing smoke run. The flow enables IndexTTS, uses the Rust frontend by default (official Python only when explicitly requested), synthesizes a WAV through generic `create_task`/upload/`start_task`, transcribes that WAV with the Qwen ASR generic task path, and saves `workdir/data/smoke-indextts-asr-<timestamp>.json` containing the source text, frontend mode, token-id source, normalized expected text, WAV path/URL, ASR text, simple similarity/coverage, and missing/extra character summaries.
+Optional IndexTTS ASR cross-validation lives in the Python harness, not in ad-hoc curl scripts. Run `python -m scripts.local.smoke --tests indextts_asr --indextts-frontend auto --workdir ./workdir --model-dir ./workdir/models` or add `--indextts-asr-check` to an existing smoke run. The flow enables IndexTTS, uses the Rust frontend by default (official Python only when explicitly requested), synthesizes a WAV through generic `create_task`/upload/`start_task`, transcribes that WAV with the SenseVoice ASR generic task path, and saves `workdir/data/smoke-indextts-asr-<timestamp>.json` containing the source text, frontend mode, token-id source, normalized expected text, WAV path/URL, ASR text, simple similarity/coverage, and missing/extra character summaries.
 
 ## Mandarin text frontend (zh-tts-frontend)
 
@@ -242,11 +237,11 @@ python -m scripts.local.smoke --tests all --workdir ./workdir --model-dir ./work
 
 - `mcp` expands to standard MCP SDK coverage on `/mcp/admin` and `/mcp/infer`: authentication, isolated tool listings, admin/catalog/assets, generic task flow, and direct inference where local resources/artifacts are available.
 - `all` expands both groups and still respects sensible skip flags.
-- `qwen-asr` is the canonical Qwen ASR smoke alias.
+- `sensevoice-asr` is the SenseVoice ASR smoke test.
 
 
 ```bash
-python -m scripts.local.smoke --tests qwen-asr --workdir ./workdir --model-dir ./workdir/models
+python -m scripts.local.smoke --tests sensevoice-asr --workdir ./workdir --model-dir ./workdir/models
 ```
 
 ## Model catalog, SQLite, and workdir layout
@@ -274,14 +269,21 @@ The controller depends on the store for metadata/status only. It still does not 
 
 ## Default model choices
 
-- ASR: `andrewleech/qwen3-asr-0.6b-onnx` at revision `4fc24a1402e74db89c4d2ef256875e71680128c4`; enabled because it is ONNX/ORT. The int4 file subset is downloaded into `<model_dir>/qwen3-asr-0.6b-onnx`. The real CPU ORT encoder/decoder/tokenizer path is implemented; real INT4 execution still depends on ORT contrib `MatMulNBits` support and should be verified with the `LOCAL_QWEN_ASR_MODEL_DIR`-gated smoke test.
+Every model in `configs/providers` (one directory per category), with where it comes from:
+
+- ASR: `sensevoice-small-onnx`, SenseVoiceSmall int8 from `haixuantao/SenseVoiceSmall-onnx` at revision `c4c8747214bed7ebbf2557e0412c19efa540023c`, with FSMN-VAD (`funasr/fsmn-vad-onnx`) and CAM++ speaker embeddings (`welcomyou/campplus-3dspeaker-200k-onnx`); enabled. (An earlier Qwen3-ASR adapter has been removed.)
+- ASR, low latency: `sensevoice-small-fp16-onnx`, a local artifact exported with `scripts/local/sensevoice_fp16_export.py` from `FunAudioLLM/SenseVoiceSmall` at revision `3847d57b6bdf2dd8875cb1508d2af43d80a16bf7`: the same model as `sensevoice-small-onnx` as a float16 graph that stays on the GPU (the int8 graph's `DynamicQuantizeLinear` nodes run on the CPU under CUDA), ~40-90 ms per utterance against ~200-350 ms; the realtime cascade's default `asr_model`.
 - Object detection: `aaurelions/yolo11n.onnx` at revision `f46d9b72aa9a0f02bc00484446e2310b1a549bce`; enabled. The model file downloads to `<model_dir>/yolo11n.onnx/yolo11n.onnx`. COCO labels are a separate URL artifact from Ultralytics raw GitHub because the HF repository does not provide labels.
 - OCR: `unlimited-ocr-onnx`, a local artifact exported with `scripts/local/unlimited_ocr_export.py` from `baidu/Unlimited-OCR` at revision `07dea832e22aefee32ad281d4b80551282e1c168` (no published download yet); enabled, CUDA required for the int8 experts.
 - Text lines: `ppocrv5-mobile-onnx`, PP-OCRv5 mobile detection and recognition from `ilaylow/PP_OCRv5_mobile_onnx` at revision `f97b337b3ac256f9dffcac5fc53955082d919d58` (dictionary from PaddleOCR at `a38c087bcb2579f9ccc2068aea02ec893b1c2311`); enabled, behind `POST /v1/ocr/lines`. Detection at 1280 px on the long side, recognition in one batch of up to 32 lines.
 - Metric depth: `depth-anything-v2-metric-indoor-small-onnx`, a local artifact exported with `scripts/local/depth_anything_export.py` from `depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf` at revision `8078d68a9c75a972131914f6afd0c1723be0da7f` for a fixed 308x546 input; behind `POST /v1/depth`.
-- ASR, low latency: `sensevoice-small-fp16-onnx`, a local artifact exported with `scripts/local/sensevoice_fp16_export.py` from `FunAudioLLM/SenseVoiceSmall` at revision `3847d57b6bdf2dd8875cb1508d2af43d80a16bf7`: the same model as `sensevoice-small-onnx` as a float16 graph that stays on the GPU (the int8 graph's `DynamicQuantizeLinear` nodes run on the CPU under CUDA), ~40-90 ms per utterance against ~200-350 ms; the realtime cascade's default `asr_model`.
-- TTS/IndexTTS: `ModaLeap/indextts-1.5-onnx`; enabled. The explicit A-F ONNX, `bpe.model`, `manifest.yaml`, and `manifest.json` subset downloads to `<model_dir>/indextts-1.5-onnx`.
+- TTS/IndexTTS 1.5: `indextts-1.5-onnx` from `ModaLeap/indextts-1.5-onnx` at revision `3f1a422cd97a0b7dbb9b6ad4698dc0fde66796d1`; enabled. The explicit A-F ONNX, `bpe.model`, `manifest.yaml`, and `manifest.json` subset downloads to `<model_dir>/indextts-1.5-onnx`, with the Mandarin frontend (`ModaLeap/zh-tts-frontend` at `ba6b85aeb17ebc58d2d3d73121096f9495ee710e`) in its `zh-tts-frontend/`.
+- TTS/IndexTTS 2.5: `indextts-2.5-onnx` from `ModaLeap/indextts-2.5-onnx` at revision `fd246cb6c2cf046113cd3400565edf681ac1b68b` (FP16, about 2.8 GB, emotion control), with the same Mandarin frontend; enabled.
 - TTS/Qwen3-TTS: `qwen3-tts-0.6b-onnx`, a local artifact exported with `scripts/local/qwen3_tts_export.py` from `Qwen/Qwen3-TTS-12Hz-0.6B-Base` at revision `5d83992436eae1d760afd27aff78a71d676296fc` (no published download yet); enabled, and the realtime cascade's default `tts_model`.
+- Embedding: `multilingual-e5-small-onnx` from `intfloat/multilingual-e5-small` at revision `614241f622f53c4eeff9890bdc4f31cfecc418b3`; enabled.
+- Reranking: `mmarco-minilm-l12-onnx` from `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` at revision `1427fd652930e4ba29e8149678df786c240d8825`; enabled.
+- Chat: `qwen3-4b-instruct-2507-int4-onnx`, a local INT4 artifact built with onnxruntime-genai's `models.builder` from `Qwen/Qwen3-4B-Instruct-2507` at revision `cdbee75f17c01a7cc42f958dc650907174af0554` (the command is in `configs/providers/chat/qwen3-chat.yaml`); enabled, the realtime cascade's chat model.
+- Realtime voice: `voice-cascade`, whose artifact is Silero VAD v6.2.3 (`snakers4/silero-vad` at `5cd7945676eb32225748052e2e6a0580e4686a08`, SHA-256 pinned) and whose metadata names the ASR, chat and TTS models above. Its wake word spotter (group sessions) is k2-fsa's `sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20` (Apache-2.0), laid out by `scripts/local/fetch_kws_model.py` (release archive SHA-256 pinned) in `<model_dir>/voice-cascade/kws` (`kws_dir`); without it the bot's name in the transcript calls it.
 
 Remote downloads use Hugging Face resolve URLs or direct URLs. `HF_TOKEN`/`HUGGINGFACE_HUB_TOKEN` is used for Hugging Face metadata and file requests when present. Explicit HF `files` remain supported; `allow_patterns` are expanded by reading HF model metadata siblings and matching simple `*`/`?` globs. SHA-256 is verified only when configured; otherwise status explicitly records that verification was skipped. No Candle/Python/C++/sidecar path is implemented.
 

@@ -32,6 +32,7 @@
 | 图片目标检测 | `yolo11n.onnx` | 默认启用 | 目标类别、置信度、边界框 |
 | 单目米制深度 | `depth-anything-v2-metric-indoor-small-onnx` | 本地导出后启用 | 每格平均深度（米）的网格 |
 | 文档 OCR | `unlimited-ocr-onnx` | 本地导出后启用（int8 专家，需 NVIDIA GPU） | 页面文本（Markdown/HTML 表格），带版面类别与坐标 |
+| 画面文字行 OCR | `ppocrv5-mobile-onnx` | 默认启用 | 每行文字、置信度与像素框（场景文字、界面、名牌） |
 | 语音识别 | `sensevoice-small-onnx` | 默认启用 | 文本、时间轴、语言、情绪、发言人 |
 | 语音识别（低延迟） | `sensevoice-small-fp16-onnx` | 本地导出后启用 | 同上；float16 图，CUDA 上每句约 40–90 ms |
 | 语音合成 | `indextts-1.5-onnx` | 默认启用 | WAV 音频 |
@@ -41,6 +42,7 @@
 | 文本重排 | `mmarco-minilm-l12-onnx` | 默认启用 | 文档相关性排序与分数 |
 | 对话补全 | `qwen3-4b-instruct-2507-int4-onnx` | 本地导出后启用 | 流式文本与工具调用（Qwen3 模板，KV 前缀复用） |
 | 实时语音 | `voice-cascade` | 默认启用，依赖 ASR、对话与 TTS 模型 | `/v1/realtime` WebSocket 语音对话（Silero VAD + SenseVoice + Qwen3 + Qwen3-TTS，TTS 也可换成 IndexTTS，见 `docs/realtime-voice.md`） |
+| 唤醒词 | 实时语音内置（sherpa-onnx KWS zipformer zh-en 3M） | 模型用 `scripts.local.fetch_kws_model` 放入后启用 | 群聊会话中检出机器人名字等唤醒词（`input.wake`），只把叫到它的话交给对话 |
 
 所有模型均通过 ONNX Runtime 运行（运行时加载官方 ONNX Runtime 1.30，见 `docs/implementation-notes.md`）。模型配置表达 CUDA 优先、CPU 回退；实际 provider 仍取决于构建方式、运行环境和具体模型算子支持情况。
 
@@ -51,6 +53,8 @@
 单目米制深度使用 Depth Anything V2 Metric Indoor Small（ViT-S，室内 Hypersim 微调，最大 20 m，Apache-2.0），由 `python -m scripts.local.depth_anything_export --size 308x546 --output-dir <models>/depth-anything-v2-metric-indoor-small-onnx` 从固定 revision 导出为固定输入尺寸的 ONNX（约 99 MB）；图片被拉伸到该尺寸，因此按 16:9 画面（如 1280×720 游戏画面）导出，其他宽高比的图片会变形、深度有偏差，需按其宽高比另行导出（`--size`）。逐帧接口 `POST /v1/depth[?model=&cols=&rows=]`（默认 64×36）返回 `{"cols", "rows", "max_depth", "depth": [米，自上而下逐行]}`，每格是该区域的平均深度；通用任务 `depth.estimate`（上传 `image`，`params.cols/rows`）同样可用。RTX 4090 上一帧 1280×720 约 30 ms（含解码）。
 
 低延迟语音识别 `sensevoice-small-fp16-onnx` 与 `sensevoice-small-onnx` 是同一个 SenseVoiceSmall：后者的 int8 图里 281 个 `DynamicQuantizeLinear` 在 CUDA provider 下回落到 CPU，每层在 CPU 与 GPU 间往返，一句话约 200–350 ms；float16 图全程在 GPU 上，约 40–90 ms，转写相同。由 `python -m scripts.local.sensevoice_fp16_export --base-dir <models>/sensevoice-small-onnx --output-dir <models>/sensevoice-small-fp16-onnx` 从固定 revision 导出（约 470 MB），其余文件取自 `sensevoice-small-onnx`；元数据 `asr_model_file` 指定 `asr/` 中的图。实时语音级联在 `voice-cascade.yaml` 的 `asr_model` 中选用；默认即为它，未导出时会话启动时自动改用 `asr_fallback_model`（`sensevoice-small-onnx`）。
+
+实时语音的群聊会话用唤醒词决定哪些话要回应：k2-fsa 开放词表的中英混合 zipformer transducer 唤醒词模型（`sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20`，Apache-2.0，3.3M 参数，fp32 chunk-16 约 13 MB），由 `local-adapter-kws-zipformer` 移植 sherpa-onnx 的检测流程（Kaldi fbank、320 ms 一块的流式编码器、沿唤醒词加分的束搜索）在 CPU 上运行，每路约占 2% 的核，词说完后 0.2–0.6 s 检出。唤醒词直接写文字（机器人名字、别名、`wake_words`），中文按拼音、英文按模型词典、字母与数字各有读法；用 `python -m scripts.local.fetch_kws_model` 下载并校验发布包，放到 `<models>/voice-cascade/kws`。详见 `docs/realtime-voice.md` 的 Wake words。
 
 SenseVoice ASR 集成 FSMN-VAD 和 CAM++ 发言人识别，默认返回纯文本、约 10 秒粒度的 `timestamped_text`、`segments[].speaker` 和 `speakers[]`。可通过 `timestamps`、`timestamp_granularity_sec`、`token_timestamps`、`speaker_diarization` 调整或关闭这些结果。
 
@@ -275,6 +279,9 @@ python -m scripts.local.smoke --tests mcp \
 - [DakeQQ/Text-to-Speech-TTS-ONNX](https://github.com/DakeQQ/Text-to-Speech-TTS-ONNX)：IndexTTS ONNX 导出与推理参考；
 - [QwenLM/Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)：Qwen3-TTS 官方实现（`qwen-tts`），导出与对齐的参考；
 - [snakers4/silero-vad](https://github.com/snakers4/silero-vad)：实时语音的 Silero VAD 模型；
+- [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)：唤醒词模型的发布包，关键词检测（流式 zipformer2、关键词加分束搜索、ContextGraph）的移植参考；
+- [k2-fsa/icefall](https://github.com/k2-fsa/icefall)：唤醒词模型的训练配方与评测结果；
+- [DepthAnything/Depth-Anything-V2](https://github.com/DepthAnything/Depth-Anything-V2)：Depth Anything V2 米制深度模型与官方实现；
 - [microsoft/onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai)：Qwen3 INT4 ONNX 导出（`models.builder`）；
 - [microsoft/onnxruntime](https://github.com/microsoft/onnxruntime)：CPU / CUDA 推理运行时；
 - [modelcontextprotocol/rust-sdk](https://github.com/modelcontextprotocol/rust-sdk)：标准 MCP Rust SDK。
