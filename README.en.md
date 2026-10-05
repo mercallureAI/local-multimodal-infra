@@ -42,7 +42,7 @@ Models and input files are not baked into the images. Local configs bind to loop
 | Reranking | `mmarco-minilm-l12-onnx` | Enabled by default | Document relevance order and scores |
 | Chat completion | `qwen3-4b-instruct-2507-int4-onnx` | Enabled after a local export | Streaming text and tool calls (Qwen3 template, KV prefix reuse) |
 | Realtime voice | `voice-cascade` | Enabled by default; needs the ASR, chat and TTS models | `/v1/realtime` WebSocket voice conversation (Silero VAD + SenseVoice + Qwen3 + Qwen3-TTS, or IndexTTS for TTS, see `docs/realtime-voice.md`) |
-| Wake words | Built into realtime voice (sherpa-onnx KWS zipformer zh-en 3M) | Enabled once `scripts.local.fetch_kws_model` has put the model in place | Spots the bot's name and other wake words in group sessions (`input.wake`); only what calls it goes to the chat |
+| Wake words | Built into realtime voice (sherpa-onnx KWS zipformer zh-en 3M) | Enabled once `scripts.local.fetch_kws_model` has put the model in place | Spots the bot's name and other wake words in group sessions (`input.wake`); only what calls it wants a reply, the rest is context |
 
 All models run on ONNX Runtime (the official ONNX Runtime 1.30, loaded at run time; see `docs/implementation-notes.md`). Model configs ask for CUDA first with CPU fallback; the provider actually used still depends on the build, the environment and each model's operator support.
 

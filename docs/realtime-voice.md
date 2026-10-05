@@ -46,26 +46,32 @@ open-vocabulary zipformer transducer KWS model for Chinese and English
 parameters; the `local-adapter-kws-zipformer` crate ports sherpa-onnx's
 keyword spotter: Kaldi fbank, the streaming encoder in 320 ms chunks, a
 beam search boosted along the keywords). It runs on the CPU beside the VAD,
-about 2 % of a core, and spots a wake word 0.2–0.6 s after it is said, before
-the utterance it is in has ended.
+about 2 % of a core, and spots a wake word 0.2–0.6 s after it is said. A
+recognised utterance no wake word was spotted in yet (and not otherwise
+answered) waits for the spotter to get a little past its end, at most 0.8 s:
+a wake word that ends it ("..., <name>?") is spotted only after the VAD has
+ended it.
 
 The wake words are the bot's `name`, its `aliases` and `wake_words`, written
-as text: Chinese characters are read in pinyin, English words with the
-model's dictionary, a short run of letters also letter by letter ("M" is
-"EH1 M") and digits in Chinese (each, and as a number) and in English ("M42"
-is "M 四二", "M 四十二", "M forty-two"), every combination one way to say the
-word. A word with letters on both sides of a digit ("Mon3tr") has no reading
-to guess: give how it is said as other words ("monster", "梦三特").
+as text: Chinese characters are read in pinyin, English words with the model's
+dictionary, a short run of letters (or capitals the dictionary does not have:
+an acronym) letter by letter ("M" is "EH1 M"; a longer word the dictionary
+does not have is not guessed: it is reported as unread) and digits in Chinese
+(each, and as a number) and in English ("M42" is "M 四二", "M 四十二", "M
+forty-two"), every combination one way to say the word. A word with letters on
+both sides of a digit ("Mon3tr") has no reading to guess: give how it is said
+as other words ("monster", "梦三特").
 
 With `wake` on (the default in a group) only an utterance a wake word was
 spoken in (anywhere: "<name>, ..." or "..., <name>?"), or one that starts
-within 5 s of a bare call ("<name>" alone), wants a reply; the others are
-context (`respond: false`). With `wake` off (one other person to talk with)
-every utterance may get one, as before. `session.update` turns it on and off
-mid-conversation (a room that fills up or empties). The model replying may
-still stay silent. Without the spotter's model (`<models>/voice-cascade/kws`,
-see `python -m scripts.local.fetch_kws_model`) the bot's name in the
-transcript is what calls it.
+within 5 s of a bare call ("<name>" alone, or after a short "嗯"; not what
+follows that), wants a
+reply; the others are context (`respond: false`). With `wake` off (one other
+person to talk with) every utterance may get one, as before. `session.update`
+turns it on and off mid-conversation (a room that fills up or empties). The
+model replying may still stay silent. Without the spotter's model
+(`<models>/voice-cascade/kws`, see `python -m scripts.local.fetch_kws_model`)
+the bot's name in the transcript is what calls it.
 
 The chat, ASR and TTS models are named by the `voice-cascade` model
 (`configs/providers/realtime/voice-cascade.yaml`, whose artifact is the VAD model) and
@@ -191,7 +197,7 @@ clients are not browsers.
 | --- | --- | --- |
 | `session.started` | `input_rate`, `output_rate` | Models loaded; audio may flow. |
 | `input.speech_started` / `input.speech_stopped` | | VAD edges. |
-| `input.transcript` | `text`, `partial`?, `id`?, `replaces`?, `respond`?, `called`? | An utterance (joined when the speaker only paused); `partial`: a piece of a long one still going on. `id`, `replaces`, `respond`: audio mode; `called` (audio, group): a wake word was spoken in it. |
+| `input.transcript` | `text`, `partial`?, `id`?, `replaces`?, `respond`?, `called`? | An utterance (joined when the speaker only paused); `partial`: a piece of a long one still going on. `id`, `replaces`, `respond`: audio mode; `called` (audio, group): it calls the bot (a wake word in it, or without the spotter its name; or it follows a bare call, or continues a called one). |
 | `input.wake` | `word`, `score` | A wake word was heard (its utterance may still go on). |
 | `state` | `speaking`, `listening` | Audio: sent when either changes. |
 | `response.text` | `text`, `response_id`? | A clause the bot is about to say. |

@@ -42,7 +42,7 @@
 | 文本重排 | `mmarco-minilm-l12-onnx` | 默认启用 | 文档相关性排序与分数 |
 | 对话补全 | `qwen3-4b-instruct-2507-int4-onnx` | 本地导出后启用 | 流式文本与工具调用（Qwen3 模板，KV 前缀复用） |
 | 实时语音 | `voice-cascade` | 默认启用，依赖 ASR、对话与 TTS 模型 | `/v1/realtime` WebSocket 语音对话（Silero VAD + SenseVoice + Qwen3 + Qwen3-TTS，TTS 也可换成 IndexTTS，见 `docs/realtime-voice.md`） |
-| 唤醒词 | 实时语音内置（sherpa-onnx KWS zipformer zh-en 3M） | 模型用 `scripts.local.fetch_kws_model` 放入后启用 | 群聊会话中检出机器人名字等唤醒词（`input.wake`），只把叫到它的话交给对话 |
+| 唤醒词 | 实时语音内置（sherpa-onnx KWS zipformer zh-en 3M） | 模型用 `scripts.local.fetch_kws_model` 放入后启用 | 群聊会话中检出机器人名字等唤醒词（`input.wake`），只有叫到它的话要回应，其余作为上下文 |
 
 所有模型均通过 ONNX Runtime 运行（运行时加载官方 ONNX Runtime 1.30，见 `docs/implementation-notes.md`）。模型配置表达 CUDA 优先、CPU 回退；实际 provider 仍取决于构建方式、运行环境和具体模型算子支持情况。
 

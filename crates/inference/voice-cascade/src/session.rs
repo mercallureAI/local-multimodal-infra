@@ -58,6 +58,12 @@ const CALL_SAMPLES: usize = INPUT_RATE as usize * 3 / 2;
 const CALL_FOLLOW_SAMPLES: usize = INPUT_RATE as usize * 5;
 /// Wake words heard this long ago are forgotten.
 const WAKE_KEPT_SAMPLES: usize = INPUT_RATE as usize * 60;
+/// A wake word at the very end of an utterance is spotted a little after
+/// the VAD ends it (the encoder's lookahead and chunks): an utterance no
+/// wake word was spotted in yet waits until the spotter has gone this far
+/// past its end, or SPOT_WAIT.
+const SPOT_MARGIN_SAMPLES: usize = INPUT_RATE as usize / 4;
+const SPOT_WAIT: Duration = Duration::from_millis(800);
 /// Shorter speech is noise (a click, a cough cut short).
 const MIN_UTTERANCE_SAMPLES: usize = INPUT_RATE as usize / 4;
 /// Longer speech is recognised in pieces of this length, answered once it
@@ -519,8 +525,12 @@ async fn converse(
         }
     }
     let mut listener = Listener::default();
+    // Recognised utterances, in order, each until when it may wait for the
+    // spotter.
+    let mut waiting: VecDeque<(Utterance, tokio::time::Instant)> = VecDeque::new();
 
     loop {
+        let wait_until = waiting.front().map(|w| w.1);
         tokio::select! {
             message = inbound.recv() => match message {
                 None | Some(Inbound::Event(ClientEvent::SessionStop)) => break,
@@ -577,19 +587,15 @@ async fn converse(
                     *shared.audio_at.lock().unwrap() = Instant::now();
                     // The VAD runs ONNX Runtime: off the async threads' turn.
                     tokio::task::block_in_place(|| input.feed(&bytes, &shared, names.is_none()));
+                    take_in(&shared, &mut waiting, &input, wake, names.as_deref(), &mut listener);
                 }
             },
             Some(utterance) = heard_rx.recv() => {
-                // Only what calls the bot wants a reply: by the spotter (or,
-                // without one or any word it can read, by its names in the
-                // transcript).
-                let spotting = input.spotter.as_ref().is_some_and(|s| !s.keywords().is_empty());
-                let gate = match (wake, spotting) {
-                    (false, _) => Gate::Open,
-                    (true, true) => Gate::WakeWords,
-                    (true, false) => Gate::Names,
-                };
-                heard(&shared, utterance, names.as_deref(), gate, &mut listener);
+                waiting.push_back((utterance, tokio::time::Instant::now() + SPOT_WAIT));
+                take_in(&shared, &mut waiting, &input, wake, names.as_deref(), &mut listener);
+            }
+            _ = tokio::time::sleep_until(wait_until.unwrap_or_else(tokio::time::Instant::now)), if wait_until.is_some() => {
+                take_in(&shared, &mut waiting, &input, wake, names.as_deref(), &mut listener);
             }
         }
     }
@@ -598,6 +604,55 @@ async fn converse(
         task.abort();
     }
     Ok(())
+}
+
+/// Takes in the waiting utterances, in order, as far as the spotter has
+/// had its say on them: only what calls the bot wants a reply (by the
+/// spotter, or without one or any word it can read, by the bot's names in
+/// the transcript).
+fn take_in(
+    shared: &Arc<Shared>,
+    waiting: &mut VecDeque<(Utterance, tokio::time::Instant)>,
+    input: &Input,
+    wake: bool,
+    names: Option<&[String]>,
+    listener: &mut Listener,
+) {
+    let spotter = input.spotter.as_ref().filter(|s| !s.keywords().is_empty());
+    let gate = match (wake, spotter.is_some()) {
+        (false, _) => Gate::Open,
+        (true, true) => Gate::WakeWords,
+        (true, false) => Gate::Names,
+    };
+    loop {
+        // Where the next utterance starts (queued, or going on now).
+        let next = waiting
+            .get(1)
+            .map(|w| w.0.start)
+            .or(input.speech_start.map(|_| input.utterance_start));
+        let Some((utterance, until)) = waiting.front_mut() else {
+            return;
+        };
+        // A wake word spotted since the VAD ended it (one ending it may be
+        // placed a little after its end; not into the next utterance).
+        let reach = utterance.end + SPOT_MARGIN_SAMPLES;
+        let reach = next.map_or(reach, |n| n.clamp(utterance.end, reach));
+        utterance.called |= input.called(utterance.start, reach);
+        // Nothing to wait for: pieces (their utterance's end is judged
+        // whole), and what gets a reply anyway (after a bare call, or going
+        // on with what was answered).
+        let undecided = gate == Gate::WakeWords
+            && !utterance.called
+            && !utterance.continues
+            && !listener.follows_call(utterance)
+            && !listener.continues_answered(utterance)
+            && spotter.is_some_and(|s| s.decoded_to() < utterance.end + SPOT_MARGIN_SAMPLES);
+        if undecided && tokio::time::Instant::now() < *until {
+            return;
+        }
+        let (utterance, _) = waiting.pop_front().expect("the front");
+        heard(shared, utterance, names, gate, listener);
+    }
 }
 
 fn user_message(text: String) -> ChatMessage {
@@ -774,6 +829,13 @@ impl Input {
         }
     }
 
+    /// Whether a wake word was heard in input `start..end`.
+    fn called(&self, start: usize, end: usize) -> bool {
+        self.wakes
+            .iter()
+            .any(|&(w_start, w_end)| w_end > start && w_start < end)
+    }
+
     /// Wake words in `window` (the input's next samples).
     fn spot(&mut self, window: &[f32], shared: &Shared) {
         let Some(spotter) = self.spotter.as_mut() else {
@@ -814,10 +876,7 @@ impl Input {
             return false;
         }
         let start = self.utterance_start;
-        let called = self
-            .wakes
-            .iter()
-            .any(|&(w_start, w_end)| w_end > start && w_start < to);
+        let called = self.called(start, to);
         let _ = self.asr.send(Utterance {
             start,
             end: to,
@@ -863,6 +922,25 @@ struct Listener {
     /// One of them was called.
     held_called: bool,
     last: Option<LastUtterance>,
+    /// Where the last utterance ended, if it was a bare call ("<name>,"
+    /// alone, called by itself): what starts soon after is called too.
+    bare_call: Option<usize>,
+}
+
+impl Listener {
+    /// `utterance` starts soon after a bare call: it is called.
+    fn follows_call(&self, utterance: &Utterance) -> bool {
+        self.bare_call
+            .is_some_and(|end| utterance.start.saturating_sub(end) < CALL_FOLLOW_SAMPLES)
+    }
+
+    /// `utterance` continues (in a group) a short one that was answered:
+    /// it restarts the reply.
+    fn continues_answered(&self, utterance: &Utterance) -> bool {
+        self.last.as_ref().is_some_and(|last| {
+            last.short && last.answered && utterance.start.saturating_sub(last.end) < JOIN_SAMPLES
+        })
+    }
 }
 
 struct LastUtterance {
@@ -918,11 +996,23 @@ fn heard(
     }
     let _taken_in = TakenIn(&shared.listening);
     let held = std::mem::take(&mut listener.held);
-    let mut called = utterance.called || std::mem::take(&mut listener.held_called);
     let mut text = join_text(&held, piece);
+    // Called by itself: a wake word in it, or (no spotter) a name.
+    let own_called = utterance.called
+        || std::mem::take(&mut listener.held_called)
+        || (gate == Gate::Names && takes_floor(&text, names));
+    let mut called = own_called;
+    let after_call = listener.follows_call(&utterance);
+    let short = utterance.end - utterance.start < CALL_SAMPLES;
     if text.is_empty() {
+        // A bare call the recogniser made nothing of still calls; noise it
+        // made nothing of leaves the last call as it was.
+        if own_called && short {
+            listener.bare_call = Some(utterance.end);
+        }
         return;
     }
+    listener.bare_call = None;
     // The utterance continues the last one (its message, and whether a
     // reply to it was asked for).
     let mut joined = None;
@@ -937,10 +1027,18 @@ fn heard(
             text = join_text(&previous.text, &text);
             joined = Some((previous.message, previous.answered));
             called |= previous.called;
-        } else if previous.short && previous.called && gap < CALL_FOLLOW_SAMPLES {
-            // The request after a bare call ("<name>," ... "what is ...").
-            called = true;
         }
+    }
+    if after_call {
+        // The request after a bare call ("<name>," ... "what is ..."), also
+        // joined to something short before the call; only a call's own: not
+        // on to what follows that.
+        called = true;
+    }
+    if short && own_called {
+        // A bare call, also one joined to something short before it ("嗯,
+        // <name>"): what follows it is called.
+        listener.bare_call = Some(utterance.end);
     }
     let skip = text.chars().count().saturating_sub(MAX_UTTERANCE_CHARS);
     let text: String = text.chars().skip(skip).collect();
@@ -950,8 +1048,7 @@ fn heard(
     // A barge-in is answered: it cut the bot, and whatever started since.
     let answer = match gate {
         Gate::Open => restarts || utterance.barged || !busy || takes_floor(&text, names),
-        Gate::WakeWords => restarts || called,
-        Gate::Names => restarts || takes_floor(&text, names),
+        Gate::WakeWords | Gate::Names => restarts || called,
     };
     tracing::info!(
         text,
@@ -987,7 +1084,7 @@ fn heard(
         listener.last = Some(LastUtterance {
             end: utterance.end,
             text: text.clone(),
-            short: joined.is_none() && utterance.end - utterance.start < CALL_SAMPLES,
+            short: short && (joined.is_none() || own_called),
             message: id,
             answered: answer,
             called,
@@ -1005,7 +1102,7 @@ fn heard(
     listener.last = Some(LastUtterance {
         end: utterance.end,
         text: text.clone(),
-        short: joined.is_none() && utterance.end - utterance.start < CALL_SAMPLES,
+        short: short && (joined.is_none() || own_called),
         message,
         answered: answer,
         called,
@@ -2595,6 +2692,125 @@ mod tests {
                 (false, false)
             ]
         );
+    }
+
+    #[test]
+    fn a_bare_call_calls_what_follows_it_not_what_follows_that() {
+        let (shared, mut out, _clauses) = audio_shared();
+        let names = vec!["Jarvis".to_string()];
+        let mut listener = Listener::default();
+        for u in [
+            utterance(0.0, 0.6, "Jarvis", true),
+            utterance(2.5, 3.0, "嗯嗯", false),
+            utterance(5.5, 6.0, "哈哈", false),
+            utterance(8.5, 9.0, "对啊", false),
+        ] {
+            shared.listening.fetch_add(1, Ordering::SeqCst);
+            heard(&shared, u, Some(&names), Gate::WakeWords, &mut listener);
+        }
+        let respond: Vec<bool> = events(&mut out)
+            .iter()
+            .filter(|e| e["type"] == "input.transcript")
+            .map(|e| e["respond"] == true)
+            .collect();
+        assert_eq!(respond, vec![true, true, false, false]);
+    }
+
+    #[test]
+    fn noise_after_a_bare_call_does_not_lose_it() {
+        let (shared, mut out, _clauses) = audio_shared();
+        let names = vec!["Jarvis".to_string()];
+        let mut listener = Listener::default();
+        for u in [
+            utterance(0.0, 0.6, "Jarvis", true),
+            // A cough the recogniser made nothing of.
+            utterance(1.0, 1.4, "", false),
+            utterance(3.0, 4.5, "明天天气怎么样", false),
+        ] {
+            shared.listening.fetch_add(1, Ordering::SeqCst);
+            heard(&shared, u, Some(&names), Gate::WakeWords, &mut listener);
+        }
+        let respond: Vec<bool> = events(&mut out)
+            .iter()
+            .filter(|e| e["type"] == "input.transcript")
+            .map(|e| e["respond"] == true)
+            .collect();
+        assert_eq!(respond, vec![true, true]);
+    }
+
+    #[test]
+    fn a_call_after_something_short_still_calls_what_follows() {
+        let names = vec!["Jarvis".to_string()];
+        // The call recognised as nothing, the request joined to the "嗯"
+        // before it; then the call joined to the "嗯", the request after.
+        for calls in [
+            [
+                utterance(0.0, 0.5, "嗯", false),
+                utterance(0.7, 1.2, "", true),
+                utterance(1.6, 3.0, "明天天气怎么样", false),
+            ],
+            [
+                utterance(0.0, 0.5, "嗯", false),
+                utterance(0.7, 1.2, "Jarvis", true),
+                utterance(3.0, 4.5, "明天天气怎么样", false),
+            ],
+            // The request right after it: joined, one message.
+            [
+                utterance(0.0, 0.5, "嗯", false),
+                utterance(0.7, 1.2, "Jarvis", true),
+                utterance(1.6, 3.0, "明天天气怎么样", false),
+            ],
+        ] {
+            let (shared, mut out, _clauses) = audio_shared();
+            let mut listener = Listener::default();
+            for u in calls {
+                shared.listening.fetch_add(1, Ordering::SeqCst);
+                heard(&shared, u, Some(&names), Gate::WakeWords, &mut listener);
+            }
+            let respond: Vec<bool> = events(&mut out)
+                .iter()
+                .filter(|e| e["type"] == "input.transcript")
+                .map(|e| e["respond"] == true)
+                .collect();
+            assert_eq!(respond.last(), Some(&true), "{respond:?}");
+        }
+        let (shared, mut out, _clauses) = audio_shared();
+        let mut listener = Listener::default();
+        for u in [
+            utterance(0.0, 0.5, "嗯", false),
+            utterance(0.7, 1.2, "Jarvis", true),
+            utterance(1.6, 3.0, "明天天气怎么样", false),
+        ] {
+            shared.listening.fetch_add(1, Ordering::SeqCst);
+            heard(&shared, u, Some(&names), Gate::WakeWords, &mut listener);
+        }
+        let last = events(&mut out)
+            .into_iter()
+            .filter(|e| e["type"] == "input.transcript")
+            .last()
+            .unwrap();
+        assert!(last["replaces"].is_u64(), "{last}");
+    }
+
+    #[test]
+    fn without_a_spotter_a_name_calls_and_so_does_its_follow_up() {
+        let (shared, mut out, _clauses) = audio_shared();
+        let names = vec!["Jarvis".to_string()];
+        let mut listener = Listener::default();
+        for u in [
+            utterance(0.0, 0.6, "Jarvis", false),
+            utterance(2.5, 4.0, "帮我查明天天气", false),
+            utterance(10.0, 12.0, "随便聊聊", false),
+        ] {
+            shared.listening.fetch_add(1, Ordering::SeqCst);
+            heard(&shared, u, Some(&names), Gate::Names, &mut listener);
+        }
+        let heard: Vec<(bool, bool)> = events(&mut out)
+            .iter()
+            .filter(|e| e["type"] == "input.transcript")
+            .map(|e| (e["respond"] == true, e["called"] == true))
+            .collect();
+        assert_eq!(heard, vec![(true, true), (true, true), (false, false)]);
     }
 
     #[test]

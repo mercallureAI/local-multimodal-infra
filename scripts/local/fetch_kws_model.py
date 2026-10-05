@@ -71,12 +71,18 @@ def main() -> int:
             print(f"{archive}: sha256 {digest}, expected {SHA256}", file=sys.stderr)
             return 1
         with tarfile.open(archive, "r:bz2") as tar:
-            tar.extractall(tmp, filter="data")
+            try:
+                tar.extractall(tmp, filter="data")
+            except TypeError:  # Python before extraction filters: the checksum vouches for it
+                tar.extractall(tmp)
         source = Path(tmp) / NAME
         dest.mkdir(parents=True, exist_ok=True)
-        for name, original in FILES.items():
-            shutil.copyfile(source / original, dest / name)
-    shutil.copyfile(pinyin, dest / "pinyin.tsv")
+        # Each file whole or not at all: an interrupted copy leaves no
+        # half model to load.
+        for name, original in [*FILES.items(), ("pinyin.tsv", pinyin)]:
+            part = dest / f"{name}.part"
+            shutil.copyfile(source / original, part)
+            part.replace(dest / name)
     print(f"wake word model in {dest}")
     return 0
 

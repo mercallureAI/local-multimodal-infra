@@ -55,7 +55,8 @@ pub const SHORT_THRESHOLD: f32 = 0.3;
 const SHORT_TOKENS: usize = 4;
 /// After this much trailing silence the search starts over (sherpa: 1.5 s).
 const RESET_AFTER_MS: usize = 1500;
-/// Feature frames kept before the features start over (at a reset).
+/// Feature frames kept before the features start over (seamlessly: the
+/// encoder goes on where it was).
 const MAX_FRAMES: usize = 30 * 100;
 /// ln(FLT_EPSILON): Kaldi's floor of the log mel energies.
 const LOG_FLOOR: f32 = -15.942_385;
@@ -266,6 +267,12 @@ impl KeywordSpotter {
         &self.keywords
     }
 
+    /// Input samples the search has gone past: a wake word ending before
+    /// this (by a little: it waits for a blank after it) has been spotted.
+    pub fn decoded_to(&self) -> usize {
+        self.fbank_base + self.processed * FRAME_SHIFT
+    }
+
     /// Takes `samples` (16 kHz, -1..1); returns the wake words heard.
     pub fn accept(&mut self, samples: &[f32]) -> Result<Vec<Detection>> {
         self.fbank.accept_waveform(SAMPLE_RATE as f32, samples);
@@ -277,6 +284,9 @@ impl KeywordSpotter {
         }
         let mut found = Vec::new();
         while self.processed + self.chunk < self.fbank.num_frames_ready() {
+            if self.processed > MAX_FRAMES {
+                self.restart_features();
+            }
             if let Some(detection) = self.decode_chunk()? {
                 found.push(detection);
             }
@@ -437,8 +447,31 @@ impl KeywordSpotter {
         Ok(found)
     }
 
-    /// Fresh encoder caches and search; the features start over too once
-    /// they have grown long.
+    /// The features start over from where the encoder stands, so that they
+    /// do not grow without end. Frames are not snipped at the edges: frame
+    /// `i` of a stream starts 120 samples before `i` * 160, so frame 2 of
+    /// features started 320 samples before the next frame to encode sees
+    /// exactly its samples, and the encoder goes on as if nothing happened.
+    fn restart_features(&mut self) {
+        let next = self.fbank_base + self.processed * FRAME_SHIFT;
+        let held_from = self.taken - self.recent.len();
+        let Some(from) = next
+            .checked_sub(2 * FRAME_SHIFT)
+            .filter(|&f| f >= held_from)
+        else {
+            return; // not held (more taken at once than kept): next chunk
+        };
+        let Ok(mut fbank) = new_fbank() else {
+            return;
+        };
+        let rest: Vec<f32> = self.recent.iter().skip(from - held_from).copied().collect();
+        fbank.accept_waveform(SAMPLE_RATE as f32, &rest);
+        self.fbank = fbank;
+        self.fbank_base = from;
+        self.processed = 2;
+    }
+
+    /// Fresh encoder caches and search.
     fn reset(&mut self) {
         self.states = self
             .state_inputs
@@ -453,19 +486,6 @@ impl KeywordSpotter {
             })
             .collect();
         self.hyps = vec![Hyp::start()];
-        if self.processed > MAX_FRAMES {
-            if let Ok(fbank) = new_fbank() {
-                // From where the encoder stands, with what is still held.
-                let from = self.fbank_base + self.processed * FRAME_SHIFT;
-                let held_from = self.taken - self.recent.len();
-                let skip = from.saturating_sub(held_from).min(self.recent.len());
-                self.fbank = fbank;
-                self.fbank_base = held_from + skip;
-                let rest: Vec<f32> = self.recent.iter().skip(skip).copied().collect();
-                self.fbank.accept_waveform(SAMPLE_RATE as f32, &rest);
-                self.processed = 0;
-            }
-        }
     }
 }
 

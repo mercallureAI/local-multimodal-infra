@@ -19,6 +19,8 @@ use std::{collections::HashMap, fs, path::Path};
 const MAX_VARIANTS: usize = 16;
 /// Letter runs this short are also spelled letter by letter.
 const SPELL_UP_TO: usize = 3;
+/// Capitals up to this many, not in the dictionary, are spelled ("GPTX").
+const ACRONYM_UP_TO: usize = 6;
 
 const LETTERS: [&str; 26] = [
     "EY1",
@@ -184,16 +186,20 @@ impl Lexicon {
                         readings.push(split(phones));
                     }
                 }
-                if upper.len() <= SPELL_UP_TO || readings.is_empty() {
-                    let spelled: Vec<String> = upper
-                        .bytes()
-                        .flat_map(|b| split(LETTERS[(b - b'A') as usize]))
-                        .collect();
-                    if upper.len() <= SPELL_UP_TO || readings.is_empty() {
-                        readings.push(spelled);
-                    }
+                // Letter by letter: a short run ("M"), or capitals not in
+                // the dictionary (an acronym). A longer word the dictionary
+                // has no reading for is said some way this cannot guess
+                // ("Astrbot"): not read, so it is reported.
+                let acronym = *text == upper && upper.len() <= ACRONYM_UP_TO && readings.is_empty();
+                if upper.len() <= SPELL_UP_TO || acronym {
+                    readings.push(
+                        upper
+                            .bytes()
+                            .flat_map(|b| split(LETTERS[(b - b'A') as usize]))
+                            .collect(),
+                    );
                 }
-                Some(readings)
+                (!readings.is_empty()).then_some(readings)
             }
             Run::Digits(digits) => {
                 let mut readings = Vec::new();
@@ -462,6 +468,13 @@ mod tests {
         assert_eq!(
             lex.variants("小M").iter().map(spelled).collect::<Vec<_>>(),
             vec!["x iǎo EH1 M"]
+        );
+        // A word not in the dictionary is not spelled out (nobody says
+        // it so): it has no reading. Capitals are an acronym.
+        assert!(lex.variants("Astrbot").is_empty());
+        assert_eq!(
+            lex.variants("MMMM").iter().map(spelled).collect::<Vec<_>>(),
+            vec!["EH1 M EH1 M EH1 M EH1 M"]
         );
         assert_eq!(
             lex.variants("monster")
