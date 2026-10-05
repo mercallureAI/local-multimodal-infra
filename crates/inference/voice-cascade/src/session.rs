@@ -581,8 +581,10 @@ async fn converse(
             },
             Some(utterance) = heard_rx.recv() => {
                 // Only what calls the bot wants a reply: by the spotter (or,
-                // without one, by its names in the transcript).
-                let gate = match (wake, input.spotter.is_some()) {
+                // without one or any word it can read, by its names in the
+                // transcript).
+                let spotting = input.spotter.as_ref().is_some_and(|s| !s.keywords().is_empty());
+                let gate = match (wake, spotting) {
                     (false, _) => Gate::Open,
                     (true, true) => Gate::WakeWords,
                     (true, false) => Gate::Names,
