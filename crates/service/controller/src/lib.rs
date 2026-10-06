@@ -227,6 +227,7 @@ impl ControllerState {
         ));
         let realtime = Router::new()
             .route("/v1/realtime", get(realtime::realtime))
+            .route("/v1/inferences", get(recent_inferences))
             .route(
                 "/v1/ocr/lines",
                 post(ocr_lines).layer(DefaultBodyLimit::max(DIRECT_IMAGE_MAX_BYTES)),
@@ -1458,6 +1459,86 @@ impl IntoResponse for UploadResponse {
             Self::Result(result) => (StatusCode::OK, Json(json!(result))).into_response(),
         }
     }
+}
+
+/// The latest inferences of every worker (and pipeline spans such as a
+/// voice turn's stages), newest first: `limit` (default 100, at most 1000),
+/// `kind` (only these kinds, comma separated: `asr.transcribe,voice.turn`),
+/// `exclude` (not these kinds or models: `ocr.lines` keeps the frequent
+/// out).
+async fn recent_inferences(
+    State(state): State<ControllerState>,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> impl IntoResponse {
+    let list = |key: &str| -> Vec<String> {
+        query
+            .get(key)
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (only, exclude) = (list("kind"), list("exclude"));
+    let limit = query
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(100)
+        .min(1000);
+    let workers: Vec<(String, Option<String>)> = {
+        let nodes = state.nodes.read().await;
+        let tokens = state.worker_session_tokens.read().await;
+        nodes
+            .iter()
+            .map(|(id, node)| {
+                (
+                    node.registration.base_url.trim_end_matches('/').to_string(),
+                    tokens.get(id).cloned(),
+                )
+            })
+            .collect()
+    };
+    let mut records: Vec<serde_json::Value> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for (base, token) in &workers {
+        let Some(token) = token else { continue };
+        let got = state
+            .http
+            .get(format!("{base}/internal/inferences"))
+            .header(WORKER_TOKEN_HEADER, token)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await;
+        match got {
+            Ok(response) if response.status().is_success() => {
+                match response.json::<Vec<serde_json::Value>>().await {
+                    Ok(list) => records.extend(list),
+                    Err(err) => errors.push(format!("{base}: {err}")),
+                }
+            }
+            Ok(response) => errors.push(format!("{base}: HTTP {}", response.status())),
+            Err(err) => errors.push(format!("{base}: {err}")),
+        }
+    }
+    let field = |r: &serde_json::Value, k: &str| {
+        r.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    records.retain(|r| {
+        let (kind, model) = (field(r, "kind"), field(r, "model"));
+        (only.is_empty() || only.contains(&kind))
+            && !exclude.contains(&kind)
+            && !exclude.contains(&model)
+    });
+    records.sort_by_key(|r| {
+        std::cmp::Reverse(r.get("started_at_ms").and_then(|v| v.as_u64()).unwrap_or(0))
+    });
+    records.truncate(limit);
+    Json(serde_json::json!({ "inferences": records, "workers": workers.len(), "errors": errors }))
 }
 
 async fn health() -> impl IntoResponse {

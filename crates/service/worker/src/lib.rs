@@ -77,7 +77,8 @@ impl WorkerState {
         let router = Router::new()
             .route("/health", get(health))
             .route("/internal/infer", post(infer))
-            .route("/internal/infer_stream", post(infer_stream));
+            .route("/internal/infer_stream", post(infer_stream))
+            .route("/internal/inferences", get(inferences));
         #[cfg(feature = "realtime")]
         let router = router.route("/internal/realtime", get(realtime::realtime));
         router.with_state(self)
@@ -215,6 +216,15 @@ pub(crate) fn unauthorized() -> axum::response::Response {
         Json(json!({ "error": "missing or invalid worker session token" })),
     )
         .into_response()
+}
+
+/// The latest inferences of this worker (and its pipelines' spans), newest
+/// first; the controller merges the workers' (`GET /v1/inferences`).
+async fn inferences(State(state): State<WorkerState>, headers: HeaderMap) -> impl IntoResponse {
+    if !authorized(&state, &headers).await {
+        return unauthorized();
+    }
+    (StatusCode::OK, Json(json!(state.runtime.recent()))).into_response()
 }
 
 async fn infer(

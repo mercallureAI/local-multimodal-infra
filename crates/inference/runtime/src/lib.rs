@@ -51,6 +51,10 @@ use std::{
 };
 use tokio::sync::{mpsc, Mutex, Semaphore};
 
+pub mod recent;
+
+pub use recent::InferenceRecord;
+
 pub const DEFAULT_IDLE_UNLOAD_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Adapters this build can load: those of the model categories it was built
@@ -128,6 +132,15 @@ pub struct RuntimeManager {
     config: RuntimeManagerConfig,
     queued_jobs: Arc<AtomicUsize>,
     active_jobs: Arc<AtomicUsize>,
+    recent: recent::Recent,
+}
+
+/// When an inference's stages ended (set on the blocking thread).
+#[derive(Default)]
+struct Stages {
+    load: Duration,
+    execution: Duration,
+    first_output: Option<Duration>,
 }
 
 impl RuntimeManager {
@@ -141,7 +154,18 @@ impl RuntimeManager {
             config,
             queued_jobs: Arc::new(AtomicUsize::new(0)),
             active_jobs: Arc::new(AtomicUsize::new(0)),
+            recent: recent::Recent::default(),
         }
+    }
+
+    /// The latest inferences (and pipeline spans), newest first.
+    pub fn recent(&self) -> Vec<InferenceRecord> {
+        self.recent.list()
+    }
+
+    /// Keeps a pipeline's own record (a voice turn) with the inferences.
+    pub fn record(&self, record: InferenceRecord) {
+        self.recent.push(record);
     }
 
     pub async fn infer(&self, task: InferenceTask) -> Result<InferenceOutput> {
@@ -190,6 +214,11 @@ impl RuntimeManager {
         text: Option<std::sync::mpsc::Receiver<TextPiece>>,
     ) -> Result<InferenceOutput> {
         let total_started = Instant::now();
+        let started_at_ms = recent::now_ms();
+        let kind = serde_json::to_value(task.kind)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
         let spec = self.resolve_spec(&task)?;
         let model_id = spec.id.clone();
         let slot = {
@@ -214,6 +243,8 @@ impl RuntimeManager {
         let request_id = task.id;
         let completed_model_id = model_id.clone();
         let execution_started = Instant::now();
+        let stages = Arc::new(StdMutex::new(Stages::default()));
+        let stages_in = stages.clone();
         let result = tokio::task::spawn_blocking(move || {
             let _active = active;
             let _permit = permit;
@@ -233,7 +264,9 @@ impl RuntimeManager {
             })?;
             loaded.state = ModelState::Busy;
             let infer_started = Instant::now();
+            let mut first_output = None;
             let mut sink = |event: InferenceEvent| {
+                first_output.get_or_insert_with(|| infer_started.elapsed());
                 events
                     .as_ref()
                     .is_none_or(|events| events.blocking_send(event).is_ok())
@@ -241,6 +274,13 @@ impl RuntimeManager {
             let (result, panicked) =
                 infer_model_catching_panic(loaded, &task, &model_id, &mut sink, text);
             let execution = infer_started.elapsed();
+            if let Ok(mut s) = stages_in.lock() {
+                *s = Stages {
+                    load,
+                    execution,
+                    first_output,
+                };
+            }
             tracing::info!(
                 request_id = %request_id,
                 model_id,
@@ -272,6 +312,27 @@ impl RuntimeManager {
             success = result.is_ok(),
             "runtime inference completed"
         );
+        let s = stages
+            .lock()
+            .map(|s| (s.load, s.execution, s.first_output))
+            .unwrap_or_default();
+        let mut stages_ms = std::collections::BTreeMap::new();
+        stages_ms.insert("queue".to_string(), queue_wait.as_millis() as u64);
+        stages_ms.insert("load".to_string(), s.0.as_millis() as u64);
+        stages_ms.insert("execution".to_string(), s.1.as_millis() as u64);
+        if let Some(first) = s.2 {
+            stages_ms.insert("first_output".to_string(), first.as_millis() as u64);
+        }
+        self.recent.push(InferenceRecord {
+            id: request_id.to_string(),
+            kind,
+            model: completed_model_id,
+            started_at_ms,
+            ended_at_ms: recent::now_ms(),
+            total_ms: total_started.elapsed().as_millis() as u64,
+            stages_ms,
+            ok: result.is_ok(),
+        });
         result
     }
 

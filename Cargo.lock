@@ -1754,6 +1754,7 @@ dependencies = [
  "local-backend-ort",
  "local-core",
  "local-error",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

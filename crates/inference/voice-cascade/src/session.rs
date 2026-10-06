@@ -441,6 +441,7 @@ async fn converse(
         jobs: Mutex::new(Vec::new()),
         last_task: Mutex::new(None),
         speech_ended_at: Mutex::new(None),
+        turn: Mutex::new(None),
         listening: AtomicUsize::new(0),
         replies_due: Arc::new(AtomicUsize::new(0)),
         clauses: AtomicUsize::new(0),
@@ -877,6 +878,13 @@ impl Input {
         }
         let start = self.utterance_start;
         let called = self.called(start, to);
+        // The VAD ends an utterance a pad and its silence after the speech.
+        let now = Instant::now();
+        let lag = self.iterator.position().saturating_sub(to)
+            + SPEECH_PAD_MS * INPUT_RATE as usize / 1000;
+        let spoken_at = now
+            .checked_sub(Duration::from_secs_f64(lag as f64 / INPUT_RATE as f64))
+            .unwrap_or(now);
         let _ = self.asr.send(Utterance {
             start,
             end: to,
@@ -885,6 +893,9 @@ impl Input {
             continues,
             barged: self.barged,
             called,
+            spoken_at,
+            sent_at: now,
+            recognized_at: None,
         });
         true
     }
@@ -902,6 +913,22 @@ struct Utterance {
     barged: bool,
     /// A wake word was heard in it (this piece or the utterance so far).
     called: bool,
+    /// When its speech ended (the VAD's end less its lag), when it was sent
+    /// to be recognised, and when it was: a voice turn's first stages.
+    spoken_at: Instant,
+    sent_at: Instant,
+    recognized_at: Option<Instant>,
+}
+
+/// A reply asked for, timed until its first audio (`voice.turn` records).
+struct Turn {
+    utterance: u64,
+    spoken_at: Instant,
+    sent_at: Instant,
+    recognized_at: Instant,
+    taken_at: Instant,
+    /// The first of its text (a response delta, or a clause to speak).
+    text_at: Option<Instant>,
 }
 
 /// Which utterances in a group want a reply.
@@ -1075,6 +1102,17 @@ fn heard(
         respond: shared.audio.then_some(answer),
         called: (shared.audio && names.is_some()).then_some(called),
     });
+    if answer {
+        let now = Instant::now();
+        *shared.turn.lock().unwrap() = Some(Turn {
+            utterance: id,
+            spoken_at: utterance.spoken_at,
+            sent_at: utterance.sent_at,
+            recognized_at: utterance.recognized_at.unwrap_or(now),
+            taken_at: now,
+            text_at: None,
+        });
+    }
     if !answer && names.is_none() {
         // A backchannel while the bot speaks.
         return;
@@ -1371,6 +1409,8 @@ struct Shared {
     last_task: Mutex<Option<Instant>>,
     /// When the last utterance ended, until its answer starts playing.
     speech_ended_at: Mutex<Option<Instant>>,
+    /// The reply asked for last, until its first audio.
+    turn: Mutex<Option<Turn>>,
     /// Utterances begun and not yet taken in by `heard` (spoken, or being
     /// recognised): a relay waits for them.
     listening: AtomicUsize,
@@ -1471,6 +1511,7 @@ impl Shared {
         if epoch != self.current_epoch() {
             return None;
         }
+        self.turn_text();
         let (tx, rx) = std::sync::mpsc::channel();
         let said = Arc::new(Mutex::new(String::new()));
         self.clauses.fetch_add(1, Ordering::SeqCst);
@@ -1534,6 +1575,7 @@ impl Shared {
             response_id: response.map(str::to_string),
         });
         self.clauses.fetch_add(1, Ordering::SeqCst);
+        self.turn_text();
         let _ = self.speech.send(Clause {
             epoch,
             text,
@@ -1549,9 +1591,56 @@ impl Shared {
     }
 
     /// Audio: a client event (other than `session.*`).
+    /// The reply's first text came (the turn's LLM stage ends).
+    fn turn_text(&self) {
+        if let Some(turn) = self.turn.lock().unwrap().as_mut() {
+            turn.text_at.get_or_insert_with(Instant::now);
+        }
+    }
+
+    /// The reply's first audio went out: the turn's stages, logged and kept
+    /// with the inferences (`GET /v1/inferences?kind=voice.turn`).
+    fn turn_spoken(&self) {
+        let Some(turn) = self.turn.lock().unwrap().take() else {
+            return;
+        };
+        let now = Instant::now();
+        let text_at = turn.text_at.unwrap_or(now);
+        let ms = |a: Instant, b: Instant| b.saturating_duration_since(a).as_millis() as u64;
+        let mut stages = std::collections::BTreeMap::new();
+        stages.insert("vad".to_string(), ms(turn.spoken_at, turn.sent_at));
+        stages.insert("asr".to_string(), ms(turn.sent_at, turn.recognized_at));
+        stages.insert("gate".to_string(), ms(turn.recognized_at, turn.taken_at));
+        stages.insert("llm".to_string(), ms(turn.taken_at, text_at));
+        stages.insert("tts".to_string(), ms(text_at, now));
+        let total = ms(turn.spoken_at, now);
+        tracing::info!(
+            utterance = turn.utterance,
+            total_ms = total,
+            vad_ms = stages["vad"],
+            asr_ms = stages["asr"],
+            gate_ms = stages["gate"],
+            llm_ms = stages["llm"],
+            tts_ms = stages["tts"],
+            "voice cascade turn"
+        );
+        let started_at_ms = local_runtime::recent::now_ms().saturating_sub(total);
+        self.runtime.record(local_runtime::InferenceRecord {
+            id: format!("turn-{}", turn.utterance),
+            kind: "voice.turn".to_string(),
+            model: self.asr_model.lock().unwrap().clone(),
+            started_at_ms,
+            ended_at_ms: local_runtime::recent::now_ms(),
+            total_ms: total,
+            stages_ms: stages,
+            ok: true,
+        });
+    }
+
     fn audio_event(&self, event: ClientEvent) {
         match event {
             ClientEvent::ResponseDelta { response_id, text } => {
+                self.turn_text();
                 self.response_text(&response_id, &text, false);
             }
             ClientEvent::ResponseEnd { response_id } => {
@@ -1927,6 +2016,7 @@ async fn recognize_utterances(
         if samples.len() < MIN_UTTERANCE_SAMPLES {
             // The short end of a long utterance: nothing to recognise, but
             // it ends the utterance.
+            utterance.recognized_at = Some(Instant::now());
             let _ = heard.send(utterance);
             continue;
         }
@@ -1937,6 +2027,7 @@ async fn recognize_utterances(
         match result {
             Ok(text) => {
                 utterance.text = text;
+                utterance.recognized_at = Some(Instant::now());
                 let _ = heard.send(utterance);
             }
             Err(err) => {
@@ -2358,6 +2449,7 @@ async fn play(shared: Arc<Shared>) {
                 "voice cascade answer starts playing"
             );
         }
+        shared.turn_spoken();
     }
 }
 
@@ -2601,6 +2693,7 @@ mod tests {
             jobs: Mutex::new(Vec::new()),
             last_task: Mutex::new(None),
             speech_ended_at: Mutex::new(None),
+            turn: Mutex::new(None),
             listening: AtomicUsize::new(0),
             replies_due: Arc::new(AtomicUsize::new(0)),
             clauses: AtomicUsize::new(0),
@@ -2657,6 +2750,38 @@ mod tests {
             continues: false,
             barged: false,
             called,
+            spoken_at: Instant::now(),
+            sent_at: Instant::now(),
+            recognized_at: Some(Instant::now()),
+        }
+    }
+
+    #[test]
+    fn a_turn_is_timed_from_the_speech_to_its_first_audio() {
+        let (shared, _out, _clauses) = audio_shared();
+        let names = vec!["Jarvis".to_string()];
+        let mut listener = Listener::default();
+        shared.listening.fetch_add(1, Ordering::SeqCst);
+        heard(
+            &shared,
+            utterance(0.0, 1.0, "Jarvis 你好", true),
+            Some(&names),
+            Gate::WakeWords,
+            &mut listener,
+        );
+        assert!(shared.turn.lock().unwrap().is_some());
+        shared.turn_text();
+        shared.turn_spoken();
+        assert!(shared.turn.lock().unwrap().is_none());
+        let turns: Vec<_> = shared
+            .runtime
+            .recent()
+            .into_iter()
+            .filter(|r| r.kind == "voice.turn")
+            .collect();
+        assert_eq!(turns.len(), 1);
+        for stage in ["vad", "asr", "gate", "llm", "tts"] {
+            assert!(turns[0].stages_ms.contains_key(stage), "{stage}");
         }
     }
 
