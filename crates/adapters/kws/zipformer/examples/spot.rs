@@ -3,6 +3,9 @@
 //!
 //!     cargo run --release -p local-adapter-kws-zipformer --example spot -- \
 //!         <model dir> <words: "M3,小M" or @keywords.txt> <wav>...
+//!
+//! `KWS_LEVEL=0` turns the input leveling off; `KWS_TUNE=<boost>,<threshold>,
+//! <short threshold>` sets the keywords' (words only, not keywords.txt).
 
 use local_adapter_kws_zipformer::KeywordSpotter;
 use std::time::Instant;
@@ -35,6 +38,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|s| s.map(|v| v as f32 / 32768.0))
             .collect::<Result<_, _>>()?;
         let mut spotter = KeywordSpotter::load(std::path::Path::new(dir))?;
+        if std::env::var("KWS_LEVEL").is_ok_and(|v| v == "0") {
+            spotter.set_leveling(false);
+        }
+        if let Some(tb) = std::env::var("KWS_TB").ok().and_then(|v| v.parse().ok()) {
+            spotter.set_trailing_blanks(tb);
+        }
+        if let Ok(tune) = std::env::var("KWS_TUNE") {
+            let v: Vec<f32> = tune
+                .split(',')
+                .filter_map(|x| x.trim().parse().ok())
+                .collect();
+            if let [boost, threshold, short] = v[..] {
+                spotter.tune(boost, threshold, short);
+            }
+        }
         match words.strip_prefix('@') {
             Some(file) => {
                 let lines: Vec<String> = std::fs::read_to_string(file)?

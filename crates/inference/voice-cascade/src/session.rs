@@ -20,7 +20,7 @@ use crate::{
     history::History,
     prompt,
     protocol::{ClientEvent, ServerEvent, SessionConfig, SessionMode, INPUT_RATE, OUTPUT_RATE},
-    text::{live_prefix, speakable, takes_floor, ClauseSplitter},
+    text::{calls_by_name, live_prefix, speakable, takes_floor, ClauseSplitter},
 };
 use base64::Engine;
 use local_adapter_kws_zipformer::KeywordSpotter;
@@ -652,7 +652,7 @@ fn take_in(
             return;
         }
         let (utterance, _) = waiting.pop_front().expect("the front");
-        heard(shared, utterance, names, gate, listener);
+        heard(shared, utterance, names, gate, listener, &input.callers);
     }
 }
 
@@ -704,6 +704,9 @@ struct Input {
     /// short.
     pieces_sent: bool,
     barged: bool,
+    /// What calls the bot (its names, aliases, other wake words): an
+    /// utterance whose transcript starts or ends with one is called too.
+    callers: Vec<String>,
     /// The wake words' spotter (in a group), and where (samples) wake words
     /// were heard lately.
     spotter: Option<KeywordSpotter>,
@@ -729,6 +732,7 @@ impl Input {
             utterance_start: 0,
             pieces_sent: false,
             barged: false,
+            callers: Vec::new(),
             spotter: None,
             wakes: VecDeque::new(),
         }
@@ -736,10 +740,11 @@ impl Input {
 
     /// The spotter listens for the bot's `names` and `words` from now on.
     fn set_wake_words(&mut self, names: &[String], words: &[String]) {
+        let all: Vec<String> = names.iter().chain(words).cloned().collect();
+        self.callers = all.clone();
         let Some(spotter) = self.spotter.as_mut() else {
             return;
         };
-        let all: Vec<String> = names.iter().chain(words).cloned().collect();
         let unread = spotter.set_keywords(&all);
         tracing::info!(words = ?spotter.keywords(), "voice cascade wake words");
         if !unread.is_empty() {
@@ -997,6 +1002,7 @@ fn heard(
     names: Option<&[String]>,
     gate: Gate,
     listener: &mut Listener,
+    callers: &[String],
 ) {
     let piece = utterance.text.trim();
     if utterance.continues {
@@ -1024,9 +1030,16 @@ fn heard(
     let _taken_in = TakenIn(&shared.listening);
     let held = std::mem::take(&mut listener.held);
     let mut text = join_text(&held, piece);
-    // Called by itself: a wake word in it, or (no spotter) a name.
+    // Called by itself: a wake word in it, or (no spotter) a name; or the
+    // transcript starts or ends with a name (the recogniser hears a name
+    // the spotter missed: in a room, 165 named, 50 spotted).
+    let by_name = gate == Gate::WakeWords && !utterance.called && calls_by_name(&text, callers);
+    if by_name {
+        tracing::info!(text, "voice cascade called by name in the transcript");
+    }
     let own_called = utterance.called
         || std::mem::take(&mut listener.held_called)
+        || by_name
         || (gate == Gate::Names && takes_floor(&text, names));
     let mut called = own_called;
     let after_call = listener.follows_call(&utterance);
@@ -2768,6 +2781,7 @@ mod tests {
             Some(&names),
             Gate::WakeWords,
             &mut listener,
+            &[],
         );
         assert!(shared.turn.lock().unwrap().is_some());
         shared.turn_text();
@@ -2800,7 +2814,14 @@ mod tests {
             utterance(20.0, 22.0, "随便聊聊", false),
         ] {
             shared.listening.fetch_add(1, Ordering::SeqCst);
-            heard(&shared, u, Some(&names), Gate::WakeWords, &mut listener);
+            heard(
+                &shared,
+                u,
+                Some(&names),
+                Gate::WakeWords,
+                &mut listener,
+                &[],
+            );
         }
         let heard: Vec<(bool, bool)> = events(&mut out)
             .iter()
@@ -2831,7 +2852,14 @@ mod tests {
             utterance(8.5, 9.0, "对啊", false),
         ] {
             shared.listening.fetch_add(1, Ordering::SeqCst);
-            heard(&shared, u, Some(&names), Gate::WakeWords, &mut listener);
+            heard(
+                &shared,
+                u,
+                Some(&names),
+                Gate::WakeWords,
+                &mut listener,
+                &[],
+            );
         }
         let respond: Vec<bool> = events(&mut out)
             .iter()
@@ -2853,7 +2881,14 @@ mod tests {
             utterance(3.0, 4.5, "明天天气怎么样", false),
         ] {
             shared.listening.fetch_add(1, Ordering::SeqCst);
-            heard(&shared, u, Some(&names), Gate::WakeWords, &mut listener);
+            heard(
+                &shared,
+                u,
+                Some(&names),
+                Gate::WakeWords,
+                &mut listener,
+                &[],
+            );
         }
         let respond: Vec<bool> = events(&mut out)
             .iter()
@@ -2890,7 +2925,14 @@ mod tests {
             let mut listener = Listener::default();
             for u in calls {
                 shared.listening.fetch_add(1, Ordering::SeqCst);
-                heard(&shared, u, Some(&names), Gate::WakeWords, &mut listener);
+                heard(
+                    &shared,
+                    u,
+                    Some(&names),
+                    Gate::WakeWords,
+                    &mut listener,
+                    &[],
+                );
             }
             let respond: Vec<bool> = events(&mut out)
                 .iter()
@@ -2907,7 +2949,14 @@ mod tests {
             utterance(1.6, 3.0, "明天天气怎么样", false),
         ] {
             shared.listening.fetch_add(1, Ordering::SeqCst);
-            heard(&shared, u, Some(&names), Gate::WakeWords, &mut listener);
+            heard(
+                &shared,
+                u,
+                Some(&names),
+                Gate::WakeWords,
+                &mut listener,
+                &[],
+            );
         }
         let last = events(&mut out)
             .into_iter()
@@ -2928,7 +2977,7 @@ mod tests {
             utterance(10.0, 12.0, "随便聊聊", false),
         ] {
             shared.listening.fetch_add(1, Ordering::SeqCst);
-            heard(&shared, u, Some(&names), Gate::Names, &mut listener);
+            heard(&shared, u, Some(&names), Gate::Names, &mut listener, &[]);
         }
         let heard: Vec<(bool, bool)> = events(&mut out)
             .iter()
@@ -2950,6 +2999,7 @@ mod tests {
             Some(&names),
             Gate::Open,
             &mut listener,
+            &[],
         );
         let respond: Vec<bool> = events(&mut out)
             .iter()

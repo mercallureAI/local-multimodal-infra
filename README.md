@@ -56,7 +56,7 @@
 
 低延迟语音识别 `sensevoice-small-fp16-onnx` 与 `sensevoice-small-onnx` 是同一个 SenseVoiceSmall：后者的 int8 图里 281 个 `DynamicQuantizeLinear` 在 CUDA provider 下回落到 CPU，每层在 CPU 与 GPU 间往返，一句话约 200–350 ms；float16 图全程在 GPU 上，约 40–90 ms，转写相同。由 `python -m scripts.local.sensevoice_fp16_export --base-dir <models>/sensevoice-small-onnx --output-dir <models>/sensevoice-small-fp16-onnx` 从固定 revision 导出（约 470 MB），其余文件取自 `sensevoice-small-onnx`；元数据 `asr_model_file` 指定 `asr/` 中的图。实时语音级联在 `voice-cascade.yaml` 的 `asr_model` 中选用；默认即为它，未导出时会话启动时自动改用 `asr_fallback_model`（`sensevoice-small-onnx`）。
 
-实时语音的群聊会话用唤醒词决定哪些话要回应：k2-fsa 开放词表的中英混合 zipformer transducer 唤醒词模型（`sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20`，Apache-2.0，3.3M 参数，fp32 chunk-16 约 13 MB），由 `local-adapter-kws-zipformer` 移植 sherpa-onnx 的检测流程（Kaldi fbank、320 ms 一块的流式编码器、沿唤醒词加分的束搜索）在 CPU 上运行，每路约占 2% 的核，词说完后 0.2–0.6 s 检出。唤醒词直接写文字（机器人名字、别名、`wake_words`），中文按拼音、英文按模型词典、字母与数字各有读法；用 `python -m scripts.local.fetch_kws_model` 下载并校验发布包，放到 `<models>/voice-cascade/kws`。详见 `docs/realtime-voice.md` 的 Wake words。
+实时语音的群聊会话用唤醒词决定哪些话要回应：k2-fsa 开放词表的中英混合 zipformer transducer 唤醒词模型（`sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20`，Apache-2.0，3.3M 参数，fp32 chunk-16 约 13 MB），由 `local-adapter-kws-zipformer` 移植 sherpa-onnx 的检测流程（Kaldi fbank、320 ms 一块的流式编码器、沿唤醒词加分的束搜索）在 CPU 上运行，每路约占 2% 的核，词说完后 0.2–0.6 s 检出，输入先做音量归一；转写中某句以唤醒词开头或结尾的话也算叫到（ASR 能听出检测器漏掉的名字）。唤醒词直接写文字（机器人名字、别名、`wake_words`），中文按拼音、英文按模型词典、字母与数字各有读法；用 `python -m scripts.local.fetch_kws_model` 下载并校验发布包，放到 `<models>/voice-cascade/kws`。详见 `docs/realtime-voice.md` 的 Wake words。
 
 SenseVoice ASR 集成 FSMN-VAD 和 CAM++ 发言人识别，默认返回纯文本、约 10 秒粒度的 `timestamped_text`、`segments[].speaker` 和 `speakers[]`。可通过 `timestamps`、`timestamp_granularity_sec`、`token_timestamps`、`speaker_diarization` 调整或关闭这些结果。
 

@@ -53,6 +53,23 @@ pub const BOOST: f32 = 1.0;
 pub const THRESHOLD: f32 = 0.25;
 pub const SHORT_THRESHOLD: f32 = 0.3;
 const SHORT_TOKENS: usize = 4;
+/// The input's level as the spotter hears it (`Leveler`): speech is
+/// brought to about TARGET_RMS (a close, clear recording's: -25 dBFS), by
+/// at most MAX_GAIN (+30 dB) up and MIN_GAIN (-6 dB) down. The model's
+/// features are log energies: quiet speech (another player's voice across
+/// a VRChat room, -20 to -35 dB under a close one) lost the short wake
+/// words (a recording at -24 dB: "monster" missed, "M3" 0.68 -> 0.42).
+const TARGET_RMS: f32 = 0.056;
+const MAX_GAIN: f32 = 31.6;
+const MIN_GAIN: f32 = 0.5;
+/// The speech level follows a louder 10 ms block at once (half the way)
+/// and falls back with this half-life; never under LEVEL_FLOOR (-60 dBFS:
+/// silence is not brought up).
+const LEVEL_HALF_LIFE_S: f32 = 4.0;
+const LEVEL_FLOOR: f32 = 0.001;
+/// The gain moves toward the wanted one this share a 10 ms block.
+const GAIN_SMOOTHING: f32 = 0.2;
+
 /// After this much trailing silence the search starts over (sherpa: 1.5 s).
 const RESET_AFTER_MS: usize = 1500;
 /// Feature frames kept before the features start over (seamlessly: the
@@ -105,6 +122,69 @@ pub struct KeywordSpotter {
     hyps: Vec<Hyp>,
     /// Milliseconds per encoder output frame (40: four feature frames).
     frame_ms: usize,
+    /// The input's level, brought to the model's (none: as it comes).
+    leveler: Option<Leveler>,
+    /// Keywords' boost and thresholds (long, short) for `set_keywords`.
+    boost: f32,
+    threshold: f32,
+    short_threshold: f32,
+    /// Blanks after a keyword's last token before it counts.
+    trailing_blanks: usize,
+}
+
+/// An automatic gain for the spotter's input: a peak-following speech level
+/// (up at once, down slowly), the gain bringing it to TARGET_RMS within
+/// MIN_GAIN..MAX_GAIN, changing smoothly.
+#[derive(Debug, Clone)]
+pub struct Leveler {
+    level: f32,
+    gain: f32,
+    pending: Vec<f32>,
+}
+
+impl Default for Leveler {
+    fn default() -> Self {
+        Leveler {
+            level: TARGET_RMS,
+            gain: 1.0,
+            pending: Vec::new(),
+        }
+    }
+}
+
+impl Leveler {
+    /// `samples` (16 kHz) at the level the model wants; a 10 ms block is
+    /// held until whole (the output lags the input by less than 10 ms).
+    pub fn apply(&mut self, samples: &[f32]) -> Vec<f32> {
+        self.pending.extend_from_slice(samples);
+        let whole = self.pending.len() / FRAME_SHIFT * FRAME_SHIFT;
+        let decay = 0.5f32.powf(FRAME_SHIFT as f32 / SAMPLE_RATE as f32 / LEVEL_HALF_LIFE_S);
+        let mut out = Vec::with_capacity(whole);
+        for block in self.pending[..whole].chunks(FRAME_SHIFT) {
+            let rms = (block.iter().map(|v| v * v).sum::<f32>() / block.len() as f32).sqrt();
+            self.level = if rms > self.level {
+                self.level + (rms - self.level) * 0.5
+            } else {
+                (self.level * decay).max(rms)
+            };
+            self.level = self.level.max(LEVEL_FLOOR);
+            let want = (TARGET_RMS / self.level).clamp(MIN_GAIN, MAX_GAIN);
+            let from = self.gain;
+            self.gain += (want - self.gain) * GAIN_SMOOTHING;
+            let n = block.len() as f32;
+            out.extend(block.iter().enumerate().map(|(i, v)| {
+                let g = from + (self.gain - from) * (i as f32 + 1.0) / n;
+                (v * g).clamp(-1.0, 1.0)
+            }));
+        }
+        self.pending.drain(..whole);
+        out
+    }
+
+    /// The gain now (for logs).
+    pub fn gain(&self) -> f32 {
+        self.gain
+    }
 }
 
 impl KeywordSpotter {
@@ -171,9 +251,36 @@ impl KeywordSpotter {
             states: Vec::new(),
             hyps: Vec::new(),
             frame_ms: 40,
+            leveler: Some(Leveler::default()),
+            boost: BOOST,
+            threshold: THRESHOLD,
+            short_threshold: SHORT_THRESHOLD,
+            trailing_blanks: TRAILING_BLANKS,
         };
         spotter.reset();
         Ok(spotter)
+    }
+
+    /// Brings the input to the model's level (on by default) or not.
+    pub fn set_leveling(&mut self, on: bool) {
+        self.leveler = on.then(Leveler::default);
+    }
+
+    /// The input gain now (1 without leveling).
+    pub fn gain(&self) -> f32 {
+        self.leveler.as_ref().map_or(1.0, Leveler::gain)
+    }
+
+    /// Blanks (40 ms each) that must follow a keyword's last token, more
+    /// than this many.
+    pub fn set_trailing_blanks(&mut self, blanks: usize) {
+        self.trailing_blanks = blanks;
+    }
+
+    /// The boost and thresholds (long, short words) `set_keywords` gives
+    /// from now on.
+    pub fn tune(&mut self, boost: f32, threshold: f32, short_threshold: f32) {
+        (self.boost, self.threshold, self.short_threshold) = (boost, threshold, short_threshold);
     }
 
     /// Spots `words` from now on (in place of any before); returns those it
@@ -195,13 +302,13 @@ impl KeywordSpotter {
             self.keywords.push(word.to_string());
             for tokens in variants {
                 let threshold = if tokens.len() <= SHORT_TOKENS {
-                    SHORT_THRESHOLD
+                    self.short_threshold
                 } else {
-                    THRESHOLD
+                    self.threshold
                 };
                 entries.push(KeywordTokens {
                     tokens,
-                    boost: BOOST,
+                    boost: self.boost,
                     threshold,
                     phrase,
                 });
@@ -275,6 +382,14 @@ impl KeywordSpotter {
 
     /// Takes `samples` (16 kHz, -1..1); returns the wake words heard.
     pub fn accept(&mut self, samples: &[f32]) -> Result<Vec<Detection>> {
+        let leveled;
+        let samples = match self.leveler.as_mut() {
+            Some(leveler) => {
+                leveled = leveler.apply(samples);
+                &leveled[..]
+            }
+            None => samples,
+        };
         self.fbank.accept_waveform(SAMPLE_RATE as f32, samples);
         self.taken += samples.len();
         self.recent.extend(samples);
@@ -439,7 +554,7 @@ impl KeywordSpotter {
                 vocab: self.vocab,
                 unk: self.unk,
                 max_paths: MAX_ACTIVE_PATHS,
-                trailing_blanks: TRAILING_BLANKS,
+                trailing_blanks: self.trailing_blanks,
             },
             at,
         );

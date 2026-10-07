@@ -116,6 +116,100 @@ pub fn takes_floor(text: &str, names: Option<&[String]>) -> bool {
     false
 }
 
+/// Words said before or after a call ("嗯，M3 ……", "…… 吧，M3。"): left
+/// out when looking for a name at an utterance's start or end.
+const CALL_FILLERS: &[&str] = &[
+    "嗯", "啊", "哦", "噢", "喂", "诶", "欸", "哎", "呃", "额", "对", "好", "那", "吧", "呀", "啦",
+    "吗", "嘛", "呢", "ok", "okay", "hey", "hi", "um", "uh",
+];
+
+/// `text` lowercased, Chinese numerals as digits ("M四十二" is "m42", "M三"
+/// "m3"), only letters and digits kept.
+fn call_form(text: &str) -> String {
+    const DIGITS: &str = "零一二三四五六七八九";
+    let chars: Vec<char> = text.to_lowercase().chars().collect();
+    let digit = |c: char| match c {
+        '〇' | '零' => Some(0),
+        '两' => Some(2),
+        _ => DIGITS.chars().position(|d| d == c).map(|p| p as u32),
+    };
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '十' {
+            // 十 (10), 四十 (40: the 4 already out), 十二 (12), 四十二 (42).
+            let before = out.chars().last().is_some_and(|p| p.is_ascii_digit());
+            if !before {
+                out.push('1');
+            }
+            match chars.get(i + 1).copied().and_then(digit) {
+                Some(d) => {
+                    out.push(char::from_digit(d, 10).unwrap());
+                    i += 1;
+                }
+                None => out.push('0'),
+            }
+        } else if let Some(d) = digit(c) {
+            out.push(char::from_digit(d, 10).unwrap());
+        } else if c.is_alphanumeric() {
+            out.push(c);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Whether one of the recogniser's sentences in `text` starts or ends with
+/// one of `callers` (the bot's names, its aliases, other wake words): the
+/// bot was called, whether the keyword spotter heard it or not ("M42跳一下",
+/// "坐下吧，M3", "嗯嗯。M3去查一下"). Sentences end at `SENTENCE_END` (and
+/// ". "), not at pauses: a name inside one ("我说M3它……") is talked about,
+/// not called. A few words said around a call ("嗯", "对", "吧") are passed
+/// over.
+pub fn calls_by_name(text: &str, callers: &[String]) -> bool {
+    text.replace(". ", "\n")
+        .split(|c: char| SENTENCE_END.contains(&c))
+        .any(|sentence| sentence_calls(sentence, callers))
+}
+
+fn sentence_calls(text: &str, callers: &[String]) -> bool {
+    let mut rest = call_form(text);
+    let names: Vec<String> = callers
+        .iter()
+        .map(|c| call_form(c))
+        .filter(|c| !c.is_empty())
+        .collect();
+    if names.is_empty() || rest.is_empty() {
+        return false;
+    }
+    let fillers: Vec<String> = CALL_FILLERS.iter().map(|f| call_form(f)).collect();
+    // From the start, past fillers.
+    let mut head = rest.clone();
+    loop {
+        if names.iter().any(|n| head.starts_with(n.as_str())) {
+            return true;
+        }
+        match fillers.iter().find(|f| head.starts_with(f.as_str())) {
+            Some(f) => head.drain(..f.len()),
+            None => break,
+        };
+    }
+    // From the end, past fillers.
+    loop {
+        if names.iter().any(|n| rest.ends_with(n.as_str())) {
+            return true;
+        }
+        match fillers.iter().find(|f| rest.ends_with(f.as_str())) {
+            Some(f) => {
+                let keep = rest.len() - f.len();
+                rest.truncate(keep);
+            }
+            None => return false,
+        }
+    }
+}
+
 /// The part of a clause still being written that is sure to stay in it: a
 /// first clause with neither pause nor sentence end is cut near its
 /// `MAX_CHUNK_UNITS`th unit (`cut_long_sentence`), and text past that goes to
@@ -351,6 +445,88 @@ impl ClauseSplitter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn calls_by_name_at_the_start_or_the_end() {
+        use super::calls_by_name;
+        let callers: Vec<String> = ["Mon3tr", "M3", "M42", "monster", "梦三特"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // As the recogniser wrote calls the spotter missed (the room's log).
+        for said in [
+            "M42跳一下。",
+            "M42，你好。",
+            "M42在吗？",
+            "对M42继续走离开楼梯。",
+            "坐下吧，M3。",
+            "然后坐下M42。",
+            "M三收到没有？",
+            "嗯，M42向右移动20厘米左右吧。",
+            "M四十二开启跟随",
+            "Monster, come here.",
+            "梦三特过来",
+            "M42。",
+        ] {
+            assert!(calls_by_name(said, &callers), "{said}");
+        }
+        // A sentence of several starting with it.
+        assert!(calls_by_name(
+            "うんうん。M3去查一下刚刚的免费模型。",
+            &callers
+        ));
+        assert!(calls_by_name(
+            "把房间里的玩家都打个招呼。M3。我刚刚充了电。",
+            &callers
+        ));
+        // The name in the middle, or not at all: not a call.
+        for said in [
+            "你叫他M3M32都可以。",
+            "其实我M42它的巡逻原理就和UTK差不多。",
+            "什么意思？",
+            "我们三个人一起去",
+            "M",
+        ] {
+            assert!(!calls_by_name(said, &callers), "{said}");
+        }
+        assert!(!calls_by_name("M42跳一下", &[]));
+    }
+
+    /// Replays transcripts (`LOCAL_CALL_REPLAY`: lines `<spotted 0|1><TAB>
+    /// <text>`) against the callers in `LOCAL_CALL_NAMES` (comma separated):
+    /// how many the spotter and the transcripts each call.
+    #[test]
+    fn replay_calls_if_env_set() {
+        use super::calls_by_name;
+        let (Ok(file), Ok(names)) = (
+            std::env::var("LOCAL_CALL_REPLAY"),
+            std::env::var("LOCAL_CALL_NAMES"),
+        ) else {
+            return;
+        };
+        let callers: Vec<String> = names.split(',').map(|s| s.trim().to_string()).collect();
+        let (mut both, mut spot_only, mut name_only, mut total) = (0, 0, 0, 0);
+        for line in std::fs::read_to_string(file).unwrap().lines() {
+            let Some((spotted, text)) = line.split_once('\t') else {
+                continue;
+            };
+            total += 1;
+            let by_name = calls_by_name(text, &callers);
+            match (spotted == "1", by_name) {
+                (true, true) => both += 1,
+                (true, false) => {
+                    spot_only += 1;
+                    println!("SPOT ONLY\t{text}");
+                }
+                (false, true) => {
+                    name_only += 1;
+                    println!("NAME ONLY\t{text}");
+                }
+                _ => {}
+            }
+        }
+        println!("utterances {total}: both {both}, spotter only {spot_only}, transcript only {name_only}");
+    }
+
     use super::*;
 
     #[test]

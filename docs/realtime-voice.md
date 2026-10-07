@@ -50,7 +50,11 @@ about 2 % of a core, and spots a wake word 0.2–0.6 s after it is said. A
 recognised utterance no wake word was spotted in yet (and not otherwise
 answered) waits for the spotter to get a little past its end, at most 0.8 s:
 a wake word that ends it ("..., <name>?") is spotted only after the VAD has
-ended it.
+ended it. The spotter hears its input brought to a steady level first (a
+gain following the speech's peaks over a few seconds, 0.5x to 31.6x): it
+misses far more of a quiet or loud voice than of the same voice at a usual
+level (recorded calls through a game client: 62 % spotted as heard, 71 %
+levelled, no more false calls in 19 minutes of other speech).
 
 The wake words are the bot's `name`, its `aliases` and `wake_words`, written
 as text: Chinese characters are read in pinyin, English words with the model's
@@ -66,7 +70,13 @@ With `wake` on (the default in a group) only an utterance a wake word was
 spoken in (anywhere: "<name>, ..." or "..., <name>?"), or one that starts
 within 5 s of a bare call ("<name>" alone, or after a short "嗯"; not what
 follows that), wants a
-reply; the others are context (`respond: false`). With `wake` off (one other
+reply; the others are context (`respond: false`). So does one whose
+transcript has a sentence starting or ending with a wake word ("M42跳一下",
+"坐下吧，M3。", "嗯嗯。M3去查一下"; a few words around it like "嗯", "吧"
+passed over, case, punctuation and Chinese numerals not minded): the
+recogniser hears names the spotter missed (in a game room, 165 utterances
+named the bot, the spotter caught 50; with the transcript 161). A name in
+the middle of a sentence ("我说M3它……") is talked about, not called. With `wake` off (one other
 person to talk with) every utterance may get one, as before. `session.update`
 turns it on and off mid-conversation (a room that fills up or empties). The
 model replying may still stay silent. Without the spotter's model
