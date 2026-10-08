@@ -62,6 +62,38 @@ pub struct SessionUpdate {
     pub aliases: Option<Vec<String>>,
     #[serde(default)]
     pub wake_words: Option<Vec<String>>,
+    /// Who said a stretch of the input, as the client tells (e.g. by where
+    /// the voice came from).
+    #[serde(default)]
+    pub speaker: Option<SpeakerSpan>,
+}
+
+/// A speaker's label for input samples `start..end` (16 kHz, counted since
+/// the session's first audio: the clock of the utterances). A later label
+/// with the same `start` replaces it (a speech segment still growing, then
+/// `final`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct SpeakerSpan {
+    /// None: someone not recognised.
+    #[serde(default)]
+    pub name: Option<String>,
+    pub start: u64,
+    pub end: u64,
+    /// The segment is over: this is its last label.
+    #[serde(default, rename = "final")]
+    pub done: bool,
+    /// How likely each one is to have said it, likeliest first (`name`
+    /// None: someone not recognised). Empty: only `name`, sure.
+    #[serde(default)]
+    pub candidates: Vec<SpeakerCandidate>,
+}
+
+/// One of the people a speaker label may be, and how likely (0..1).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct SpeakerCandidate {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub p: f64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -183,6 +215,13 @@ pub enum ServerEvent {
         /// a bare call).
         #[serde(skip_serializing_if = "Option::is_none")]
         called: Option<bool>,
+        /// Who said it, by the client's labels (`session.update`
+        /// `speaker`): the likeliest name (None: someone not recognised,
+        /// or no label). Once labels came in the session, `text` starts
+        /// with who said it (`Who::said`: `"<name>: "`, `"[<name> 62% /
+        /// someone 30%]: "` or `"[unknown speaker]: "`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        speaker: Option<String>,
     },
     /// A wake word was heard (as soon as it is: its utterance may still go
     /// on).

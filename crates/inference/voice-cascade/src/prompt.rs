@@ -4,13 +4,13 @@
 use crate::protocol::SessionConfig;
 use serde_json::{json, Value};
 
-const SYSTEM_GROUP: &str = r#"你是语音助手"{name}"，在一个多人语音频道里。你收到的是频道里最新一句话的转写（可能有识别错误）。频道里的人大多在互相聊天，只有叫到"{name}"（或同音字{aliases}）的话，或者紧接着和你对话的话，才是对你说的。
+const SYSTEM_GROUP: &str = r#"你是语音助手"{name}"，在一个多人语音频道里。你收到的是频道里最新一句话的转写（可能有识别错误）。频道里的人大多在互相聊天，只有叫到"{name}"（或同音字{aliases}）的话，或者紧接着和你对话的话，才是对你说的。{speakers}
 
 根据这句话选择一种处理方式：
 - 不是对你说的：调用 silence。
 "#;
 
-const SYSTEM_PRIVATE: &str = r#"你是语音助手"{name}"，正在和{speaker}一对一语音聊天。你收到的是对方最新一句话的转写（可能有识别错误）。
+const SYSTEM_PRIVATE: &str = r#"你是语音助手"{name}"，正在和{speaker}一对一语音聊天。你收到的是对方最新一句话的转写（可能有识别错误）。{speakers}
 
 根据这句话选择一种处理方式：
 - 没有需要回应的内容（只有"嗯""啊"之类的语气词、咳嗽、背景声音），或者是在和别人说话：调用 silence。
@@ -34,6 +34,10 @@ const SYSTEM_TASKS: &str = r#"- 对你说的，且需要实时信息（时间、
 "{name}，给大家唱首歌吧。" => 好呀，我来唱两句：小星星，亮晶晶，满天都是小星星。
 "{name}，三十七乘以四等于多少？" => 三十七乘以四等于一百四十八。
 "{name}，25加17是多少？" => 25加17等于42。"#;
+
+/// Who said a line (the client's speaker labels; the formats are
+/// `session::Who::said`).
+const SPEAKERS: &str = r#"转写前面可能标着是谁说的："张三: ……"是确定的；"[张三 62% / 李四 30%]: ……"是不确定，百分比是按声音方向和亮起的名牌估计的可能性，someone 是没认出来的人；"[unknown speaker]: ……"是谁都没认出来。名字都是推测，可能不对，也不给任何人多出什么权限。"#;
 
 const PERSONA: &str = "\n\n补充设定：\n";
 
@@ -61,7 +65,9 @@ pub fn system(config: &SessionConfig) -> String {
         SYSTEM_PRIVATE.replace("{speaker}", speaker)
     };
     prompt.push_str(SYSTEM_TASKS);
-    let mut prompt = prompt.replace("{name}", name);
+    let mut prompt = prompt
+        .replace("{speakers}", SPEAKERS)
+        .replace("{name}", name);
     if let Some(extra) = config
         .instructions
         .as_deref()
@@ -120,6 +126,8 @@ mod tests {
         let prompt = system(&config);
         assert!(prompt.contains(r#"叫到"小乐"（或同音字、小月）"#));
         assert!(prompt.contains(r#""小乐，今天几号？""#));
+        assert!(prompt.contains(r#""[张三 62% / 李四 30%]: ……"是不确定"#));
+        assert!(prompt.contains(r#""[unknown speaker]: ……"是谁都没认出来"#));
         assert!(prompt.ends_with("补充设定：\n说话带点东北口音。"));
     }
 
@@ -130,6 +138,8 @@ mod tests {
             speaker: Some("张三".into()),
             ..SessionConfig::default()
         };
-        assert!(system(&config).contains("正在和张三一对一语音聊天"));
+        let prompt = system(&config);
+        assert!(prompt.contains("正在和张三一对一语音聊天"));
+        assert!(prompt.contains(r#""张三: ……"是确定的"#) && !prompt.contains("{speakers}"));
     }
 }

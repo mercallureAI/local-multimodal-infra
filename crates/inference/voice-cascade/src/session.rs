@@ -19,7 +19,9 @@
 use crate::{
     history::History,
     prompt,
-    protocol::{ClientEvent, ServerEvent, SessionConfig, SessionMode, INPUT_RATE, OUTPUT_RATE},
+    protocol::{
+        ClientEvent, ServerEvent, SessionConfig, SessionMode, SpeakerSpan, INPUT_RATE, OUTPUT_RATE,
+    },
     text::{calls_by_name, live_prefix, speakable, takes_floor, ClauseSplitter},
 };
 use base64::Engine;
@@ -64,6 +66,30 @@ const WAKE_KEPT_SAMPLES: usize = INPUT_RATE as usize * 60;
 /// past its end, or SPOT_WAIT.
 const SPOT_MARGIN_SAMPLES: usize = INPUT_RATE as usize / 4;
 const SPOT_WAIT: Duration = Duration::from_millis(800);
+/// The client's speaker labels (`session.update` `speaker`) kept: this long
+/// before the latest input, at most this many.
+const SPEAKER_KEPT_SAMPLES: u64 = INPUT_RATE as u64 * 60;
+const SPEAKER_KEPT_SPANS: usize = 512;
+/// Labels say who said an utterance when they cover at least this share of
+/// it (the client's speech segments and the VAD's do not quite line up).
+const SPEAKER_COVER: f64 = 0.3;
+/// Who said it is sure (`"<name>: "`) when the likeliest is at least this
+/// likely and this far ahead of the next; else the likeliest few are
+/// listed with their chances, those at least SPEAKER_LISTED_P, at most
+/// SPEAKER_LISTED (`Who`).
+const SPEAKER_SURE_P: f64 = 0.75;
+const SPEAKER_SURE_LEAD: f64 = 0.3;
+const SPEAKER_LISTED_P: f64 = 0.1;
+const SPEAKER_LISTED: usize = 3;
+/// Once labels have come in this session, an utterance they do not reach yet
+/// (to within SPEAKER_SLACK_SAMPLES of its end: the client relabels a
+/// growing segment every 250 ms) waits for its own until SPEAKER_WAIT after
+/// the VAD ended it.
+const SPEAKER_SLACK_SAMPLES: u64 = INPUT_RATE as u64 / 4;
+const SPEAKER_WAIT: Duration = Duration::from_millis(500);
+/// A joined utterance's stretches of speech kept for who said it (the
+/// latest).
+const STRETCHES_KEPT: usize = 16;
 /// Shorter speech is noise (a click, a cough cut short).
 const MIN_UTTERANCE_SAMPLES: usize = INPUT_RATE as usize / 4;
 /// Longer speech is recognised in pieces of this length, answered once it
@@ -531,7 +557,12 @@ async fn converse(
     let mut waiting: VecDeque<(Utterance, tokio::time::Instant)> = VecDeque::new();
 
     loop {
-        let wait_until = waiting.front().map(|w| w.1);
+        let wait_until = waiting.front().map(|w| {
+            listener
+                .speakers
+                .wait_until(&w.0)
+                .map_or(w.1, |at| at.min(w.1))
+        });
         tokio::select! {
             message = inbound.recv() => match message {
                 None | Some(Inbound::Event(ClientEvent::SessionStop)) => break,
@@ -549,6 +580,11 @@ async fn converse(
                             wake_words = words;
                         }
                         input.set_wake_words(names.as_deref().unwrap_or_default(), &wake_words);
+                    }
+                    if let Some(span) = update.speaker {
+                        listener.speakers.label(span, input.iterator.position() as u64);
+                        // An utterance waiting for it goes on.
+                        take_in(&shared, &mut waiting, &input, wake, names.as_deref(), &mut listener);
                     }
                 }
                 Some(Inbound::Event(ClientEvent::SessionStart { .. })) => {
@@ -649,6 +685,10 @@ fn take_in(
             && !listener.continues_answered(utterance)
             && spotter.is_some_and(|s| s.decoded_to() < utterance.end + SPOT_MARGIN_SAMPLES);
         if undecided && tokio::time::Instant::now() < *until {
+            return;
+        }
+        // Its speaker's label is on its way (a little behind the audio).
+        if listener.speakers.wait_until(utterance).is_some() {
             return;
         }
         let (utterance, _) = waiting.pop_front().expect("the front");
@@ -957,6 +997,189 @@ struct Listener {
     /// Where the last utterance ended, if it was a bare call ("<name>,"
     /// alone, called by itself): what starts soon after is called too.
     bare_call: Option<usize>,
+    /// Who spoke when, by the client's labels.
+    speakers: Speakers,
+}
+
+/// The client's speaker labels (`session.update` `speaker`): the latest of
+/// each speech segment (by its start), on the input clock.
+#[derive(Default)]
+struct Speakers {
+    spans: BTreeMap<u64, SpeakerSpan>,
+    /// Labels came in this session: an utterance may wait for its own.
+    seen: bool,
+    /// The latest label's end: how far the labels have come.
+    reach: u64,
+}
+
+impl Speakers {
+    /// Takes a label, `now` being the input's latest sample.
+    fn label(&mut self, mut span: SpeakerSpan, now: u64) {
+        span.end = span.end.max(span.start);
+        let clean = |name: Option<String>| {
+            name.map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+        };
+        span.name = clean(span.name.take());
+        for c in span.candidates.iter_mut() {
+            c.name = clean(c.name.take());
+            c.p = if c.p.is_finite() {
+                c.p.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+        }
+        tracing::debug!(
+            name = ?span.name,
+            candidates = span.candidates.len(),
+            start = span.start as f64 / INPUT_RATE as f64,
+            end = span.end as f64 / INPUT_RATE as f64,
+            done = span.done,
+            "voice cascade speaker"
+        );
+        self.seen = true;
+        self.reach = self.reach.max(span.end);
+        self.spans.insert(span.start, span);
+        let horizon = now.max(self.reach).saturating_sub(SPEAKER_KEPT_SAMPLES);
+        self.spans.retain(|_, span| span.end >= horizon);
+        while self.spans.len() > SPEAKER_KEPT_SPANS {
+            self.spans.pop_first();
+        }
+    }
+
+    /// Who said the input `stretches` (each `start..end`, in order and not
+    /// overlapping: a joined utterance's parts without the pauses between
+    /// them): each label's candidates (or its name alone, sure), weighed by
+    /// how much of the stretches it covers, over all the labels cover. No
+    /// one when they cover less than SPEAKER_COVER of it.
+    fn who(&self, stretches: &[(usize, usize)]) -> Who {
+        let length: u64 = stretches
+            .iter()
+            .map(|&(start, end)| end.saturating_sub(start) as u64)
+            .sum();
+        if length == 0 {
+            return Who::Unknown;
+        }
+        let mut covered = 0u64;
+        // In the order first met: the first of equals is the earliest.
+        let mut mass: Vec<(Option<&str>, f64)> = Vec::new();
+        for span in self.spans.values() {
+            let overlap: u64 = stretches
+                .iter()
+                .map(|&(start, end)| {
+                    span.end
+                        .min(end as u64)
+                        .saturating_sub(span.start.max(start as u64))
+                })
+                .sum();
+            if overlap == 0 {
+                continue;
+            }
+            covered += overlap;
+            let alone = [(span.name.as_deref(), 1.0)];
+            let listed: Vec<(Option<&str>, f64)> = span
+                .candidates
+                .iter()
+                .map(|c| (c.name.as_deref(), c.p))
+                .collect();
+            let candidates = if listed.is_empty() {
+                &alone[..]
+            } else {
+                &listed[..]
+            };
+            for &(name, p) in candidates {
+                let weight = overlap as f64 * p;
+                match mass.iter_mut().find(|(n, _)| *n == name) {
+                    Some((_, total)) => *total += weight,
+                    None => mass.push((name, weight)),
+                }
+            }
+        }
+        if (covered as f64) < SPEAKER_COVER * length as f64 {
+            return Who::Unknown;
+        }
+        let mut ranked: Vec<(Option<String>, f64)> = mass
+            .into_iter()
+            .map(|(name, weight)| (name.map(str::to_string), weight / covered as f64))
+            .collect();
+        // Stable: equals keep the order first met.
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let Some((Some(top), p)) = ranked.first().cloned() else {
+            return Who::Unknown;
+        };
+        let next = ranked.get(1).map_or(0.0, |r| r.1);
+        if p >= SPEAKER_SURE_P && p - next >= SPEAKER_SURE_LEAD {
+            return Who::Sure(top);
+        }
+        ranked.retain(|r| r.1 >= SPEAKER_LISTED_P);
+        ranked.truncate(SPEAKER_LISTED);
+        if ranked.is_empty() {
+            return Who::Unknown;
+        }
+        Who::Unsure(ranked)
+    }
+
+    /// Until when `utterance` waits for its label: labels came in this
+    /// session (its text then says who said it) but not yet as far as its
+    /// end (None: it need not wait, or no longer).
+    fn wait_until(&self, utterance: &Utterance) -> Option<tokio::time::Instant> {
+        if !self.seen
+            || utterance.continues
+            || utterance.text.trim().is_empty()
+            || self.reach + SPEAKER_SLACK_SAMPLES >= utterance.end as u64
+        {
+            return None;
+        }
+        let until = tokio::time::Instant::from_std(utterance.sent_at + SPEAKER_WAIT);
+        (tokio::time::Instant::now() < until).then_some(until)
+    }
+}
+
+/// Who said an utterance, by the client's labels (`Speakers::who`), and
+/// how the text the model reads says so (`said`).
+#[derive(Debug, Clone, PartialEq)]
+enum Who {
+    /// No label covers enough of it, or the likeliest is someone not
+    /// recognised: `"[unknown speaker]: <text>"`.
+    Unknown,
+    /// One name, sure enough: `"<name>: <text>"`.
+    Sure(String),
+    /// The likeliest few and their chances (0..1; None: someone not
+    /// recognised), likeliest first, the first a name:
+    /// `"[Alice 62% / someone 30%]: <text>"`.
+    Unsure(Vec<(Option<String>, f64)>),
+}
+
+impl Who {
+    /// The likeliest name (the transcript's `speaker`).
+    fn name(&self) -> Option<String> {
+        match self {
+            Who::Unknown => None,
+            Who::Sure(name) => Some(name.clone()),
+            Who::Unsure(ranked) => ranked.first().and_then(|r| r.0.clone()),
+        }
+    }
+
+    /// `text` as the model reads it: who said it first.
+    fn said(&self, text: &str) -> String {
+        match self {
+            Who::Unknown => format!("[unknown speaker]: {text}"),
+            Who::Sure(name) => format!("{name}: {text}"),
+            Who::Unsure(ranked) => {
+                let listed: Vec<String> = ranked
+                    .iter()
+                    .map(|(name, p)| {
+                        format!(
+                            "{} {}%",
+                            name.as_deref().unwrap_or("someone"),
+                            (p * 100.0).round() as u32
+                        )
+                    })
+                    .collect();
+                format!("[{}]: {text}", listed.join(" / "))
+            }
+        }
+    }
 }
 
 impl Listener {
@@ -976,7 +1199,13 @@ impl Listener {
 }
 
 struct LastUtterance {
+    /// Where it starts (with what it continues).
+    start: usize,
     end: usize,
+    /// Its stretches of speech (with what it continues), without the
+    /// pauses between them: who said it goes by these.
+    stretches: Vec<(usize, usize)>,
+    /// As heard, without its speaker.
     text: String,
     /// A short call (a bare "<name>,") that what follows continues.
     short: bool,
@@ -1016,6 +1245,7 @@ fn heard(
                 replaces: None,
                 respond: None,
                 called: None,
+                speaker: None,
             });
         }
         return;
@@ -1056,6 +1286,8 @@ fn heard(
     // The utterance continues the last one (its message, and whether a
     // reply to it was asked for).
     let mut joined = None;
+    let mut from = utterance.start;
+    let mut stretches = vec![(utterance.start, utterance.end)];
     if let Some(previous) = listener.last.as_ref() {
         // One to one, the speaker only paused. In a group, voices are not
         // told apart: only a short call (a bare "<name>,") is continued;
@@ -1066,6 +1298,14 @@ fn heard(
             // The utterance replaces the last one.
             text = join_text(&previous.text, &text);
             joined = Some((previous.message, previous.answered));
+            from = previous.start;
+            // Not the pause between (a bare call, a pause, the request: the
+            // pause would thin out the labels' share).
+            let first = utterance.start.max(previous.end);
+            stretches = previous.stretches.clone();
+            stretches.push((first, utterance.end.max(first)));
+            let keep = stretches.len().saturating_sub(STRETCHES_KEPT);
+            stretches.drain(..keep);
             called |= previous.called;
         }
     }
@@ -1082,6 +1322,17 @@ fn heard(
     }
     let skip = text.chars().count().saturating_sub(MAX_UTTERANCE_CHARS);
     let text: String = text.chars().skip(skip).collect();
+    // Who said it (all of it, joined, without the pauses), by the client's
+    // labels. Once labels came in this session (in a group and one to one
+    // alike) the text passed on says so, sure or not; the text the gate and
+    // joins go by does not.
+    let who = listener.speakers.who(&stretches);
+    let speaker = who.name();
+    let said = if listener.speakers.seen {
+        who.said(&text)
+    } else {
+        text.clone()
+    };
     let busy =
         shared.player.speaking() || shared.generating.load(Ordering::SeqCst) || shared.responding();
     let restarts = matches!(joined, Some((_, true)));
@@ -1092,6 +1343,7 @@ fn heard(
     };
     tracing::info!(
         text,
+        speaker = speaker.as_deref(),
         joined = joined.is_some(),
         answer,
         start = seconds(utterance.start),
@@ -1106,7 +1358,7 @@ fn heard(
     }
     let id = shared.next_utterance.fetch_add(1, Ordering::SeqCst);
     shared.emit(ServerEvent::Transcript {
-        text: text.clone(),
+        text: said.clone(),
         partial: false,
         id: shared.audio.then_some(id),
         replaces: joined
@@ -1114,6 +1366,7 @@ fn heard(
             .map(|(replaced, _)| replaced),
         respond: shared.audio.then_some(answer),
         called: (shared.audio && names.is_some()).then_some(called),
+        speaker,
     });
     if answer {
         let now = Instant::now();
@@ -1133,7 +1386,9 @@ fn heard(
     if shared.audio {
         // The client keeps the conversation: the utterance is its message.
         listener.last = Some(LastUtterance {
+            start: from,
             end: utterance.end,
+            stretches,
             text: text.clone(),
             short: short && (joined.is_none() || own_called),
             message: id,
@@ -1148,10 +1403,12 @@ fn heard(
         if let Some((replaced, _)) = joined {
             history.remove_utterance(replaced);
         }
-        history.push(user_message(text.clone()))
+        history.push(user_message(said.clone()))
     };
     listener.last = Some(LastUtterance {
+        start: from,
         end: utterance.end,
+        stretches,
         text: text.clone(),
         short: short && (joined.is_none() || own_called),
         message,
@@ -1165,7 +1422,7 @@ fn heard(
         shared.spawn(async move {
             let _due = due;
             let _turn = shared_.replies.lock().await;
-            reply(shared_.clone(), Steer::Free, Some((message, text)), epoch).await;
+            reply(shared_.clone(), Steer::Free, Some((message, said)), epoch).await;
         });
     }
 }
@@ -2544,6 +2801,7 @@ fn read_wav(path: &Path) -> Result<Vec<f32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::SpeakerCandidate;
 
     #[test]
     fn a_live_clause_holds_back_a_word_that_may_be_a_url() {
@@ -2985,6 +3243,383 @@ mod tests {
             .map(|e| (e["respond"] == true, e["called"] == true))
             .collect();
         assert_eq!(heard, vec![(true, true), (true, true), (false, false)]);
+    }
+
+    /// A label of input `start..end` seconds.
+    fn span(name: Option<&str>, start: f64, end: f64, done: bool) -> SpeakerSpan {
+        let at = |s: f64| (s * INPUT_RATE as f64) as u64;
+        SpeakerSpan {
+            name: name.map(str::to_string),
+            start: at(start),
+            end: at(end),
+            done,
+            candidates: Vec::new(),
+        }
+    }
+
+    /// A label of input `start..end` seconds with its candidates.
+    fn unsure(candidates: &[(Option<&str>, f64)], start: f64, end: f64) -> SpeakerSpan {
+        SpeakerSpan {
+            candidates: candidates
+                .iter()
+                .map(|&(name, p)| SpeakerCandidate {
+                    name: name.map(str::to_string),
+                    p,
+                })
+                .collect(),
+            ..span(candidates[0].0, start, end, true)
+        }
+    }
+
+    #[test]
+    fn who_said_it_reads_short() {
+        assert_eq!(Who::Sure("xkeyC".into()).said("你好"), "xkeyC: 你好");
+        assert_eq!(
+            Who::Unsure(vec![
+                (Some("xkeyC".into()), 0.62),
+                (Some("Bob".into()), 0.3)
+            ])
+            .said("你好"),
+            "[xkeyC 62% / Bob 30%]: 你好"
+        );
+        assert_eq!(
+            Who::Unsure(vec![(Some("xkeyC".into()), 0.554), (None, 0.446)]).said("hi"),
+            "[xkeyC 55% / someone 45%]: hi"
+        );
+        assert_eq!(Who::Unknown.said("你好"), "[unknown speaker]: 你好");
+        assert_eq!(
+            Who::Unsure(vec![(Some("xkeyC".into()), 0.6)])
+                .name()
+                .as_deref(),
+            Some("xkeyC")
+        );
+        assert_eq!(Who::Unknown.name(), None);
+    }
+
+    #[test]
+    fn the_candidates_are_weighed_by_how_much_each_label_covers() {
+        let at = |s: f64| (s * INPUT_RATE as f64) as usize;
+        let mut speakers = Speakers::default();
+        // Sure: one candidate far ahead.
+        speakers.label(unsure(&[(Some("Ann"), 0.9), (None, 0.1)], 0.0, 1.0), 0);
+        assert_eq!(speakers.who(&[(at(0.0), at(1.0))]), Who::Sure("Ann".into()));
+        // A guess by direction alone (the bridge caps it): unsure.
+        speakers.label(unsure(&[(Some("Bob"), 0.55), (None, 0.45)], 2.0, 3.0), 0);
+        assert_eq!(
+            speakers.who(&[(at(2.0), at(3.0))]),
+            Who::Unsure(vec![(Some("Bob".into()), 0.55), (None, 0.45)])
+        );
+        // Over both, by how much of it each covers: Ann's label 3/4 of the
+        // speech (0.9), Bob's 1/4 (0.55): Ann 0.68, someone 0.19, Bob 0.14.
+        let who = speakers.who(&[(at(0.0), at(1.0)), (at(2.0), at(2.33))]);
+        let Who::Unsure(ranked) = &who else {
+            panic!("{who:?}")
+        };
+        assert_eq!(
+            ranked.iter().map(|r| r.0.as_deref()).collect::<Vec<_>>(),
+            vec![Some("Ann"), None, Some("Bob")]
+        );
+        assert!((ranked[0].1 - 0.9 * 0.75).abs() < 0.01, "{ranked:?}");
+        // Someone not recognised likeliest: unknown, whoever is listed next.
+        speakers.label(unsure(&[(None, 0.6), (Some("Cid"), 0.4)], 5.0, 6.0), 0);
+        assert_eq!(speakers.who(&[(at(5.0), at(6.0))]), Who::Unknown);
+        // Not covered enough: unknown.
+        assert_eq!(speakers.who(&[(at(5.9), at(9.0))]), Who::Unknown);
+        // Two close: unsure, at most SPEAKER_LISTED of at least
+        // SPEAKER_LISTED_P.
+        speakers.label(
+            unsure(
+                &[
+                    (Some("Ann"), 0.4),
+                    (Some("Bob"), 0.35),
+                    (Some("Cid"), 0.12),
+                    (Some("Dan"), 0.11),
+                    (None, 0.02),
+                ],
+                8.0,
+                9.0,
+            ),
+            0,
+        );
+        let Who::Unsure(ranked) = speakers.who(&[(at(8.0), at(9.0))]) else {
+            panic!()
+        };
+        assert_eq!(ranked.len(), SPEAKER_LISTED);
+        assert!(ranked.iter().all(|r| r.1 >= SPEAKER_LISTED_P));
+        // Sure needs a lead too.
+        speakers.label(
+            unsure(&[(Some("Ann"), 0.76), (Some("Bob"), 0.5)], 10.0, 11.0),
+            0,
+        );
+        assert!(matches!(
+            speakers.who(&[(at(10.0), at(11.0))]),
+            Who::Unsure(_)
+        ));
+    }
+
+    #[test]
+    fn an_utterance_is_who_covers_most_of_it() {
+        let at = |s: f64| (s * INPUT_RATE as f64) as usize;
+        let mut speakers = Speakers::default();
+        assert_eq!(speakers.who(&[(at(0.0), at(2.0))]), Who::Unknown);
+        speakers.label(span(Some("Alice"), 0.0, 0.5, false), 0);
+        // A later label of the same segment replaces it.
+        speakers.label(span(Some("Bob"), 0.0, 1.2, true), 0);
+        speakers.label(span(Some("Alice"), 1.3, 2.0, true), 0);
+        assert_eq!(speakers.spans.len(), 2);
+        // Bob 1.2 s of it, Alice 0.7 s: Bob, not surely.
+        let who = speakers.who(&[(at(0.0), at(2.0))]);
+        assert_eq!(who.name().as_deref(), Some("Bob"));
+        assert_eq!(who.said("hi"), "[Bob 63% / Alice 37%]: hi");
+        assert_eq!(
+            speakers.who(&[(at(1.2), at(2.1))]),
+            Who::Sure("Alice".into())
+        );
+        // Too little of it labelled.
+        assert_eq!(speakers.who(&[(at(1.9), at(4.0))]), Who::Unknown);
+        // Someone not recognised covers most of it: no name.
+        speakers.label(span(None, 3.0, 6.0, true), 0);
+        speakers.label(span(Some("Bob"), 5.5, 6.0, true), 0);
+        assert_eq!(speakers.who(&[(at(3.0), at(6.0))]), Who::Unknown);
+        // Old labels go.
+        speakers.label(span(Some("Carol"), 70.0, 71.0, true), at(71.0) as u64);
+        assert_eq!(speakers.spans.len(), 1);
+    }
+
+    #[test]
+    fn an_utterance_waits_for_its_label_only_once_labels_came() {
+        let mut speakers = Speakers::default();
+        let u = utterance(0.0, 2.0, "你好", false);
+        assert!(speakers.wait_until(&u).is_none(), "no labels: no wait");
+        speakers.label(span(Some("Alice"), 0.0, 1.0, false), 0);
+        // In a group and one to one alike: the text says who said it.
+        let until = speakers
+            .wait_until(&u)
+            .expect("its end is not labelled yet");
+        assert!(until <= tokio::time::Instant::now() + SPEAKER_WAIT);
+        speakers.label(span(Some("Alice"), 0.0, 1.9, true), 0);
+        assert!(speakers.wait_until(&u).is_none(), "labelled to its end");
+        // Not past SPEAKER_WAIT after the VAD ended it.
+        let mut late = utterance(0.0, 5.0, "你好", false);
+        late.sent_at = Instant::now() - SPEAKER_WAIT;
+        assert!(speakers.wait_until(&late).is_none());
+    }
+
+    #[test]
+    fn in_a_group_the_transcript_says_who_said_it() {
+        let (shared, mut out, _clauses) = audio_shared();
+        let names = vec!["Jarvis".to_string()];
+        let mut listener = Listener::default();
+        listener
+            .speakers
+            .label(span(Some("Alice"), 0.0, 0.7, true), 0);
+        listener
+            .speakers
+            .label(span(Some("Alice"), 1.5, 3.0, true), 0);
+        for u in [
+            // A bare call, and the request it is joined to.
+            utterance(0.0, 0.6, "Jarvis", true),
+            utterance(1.6, 3.0, "明天天气怎么样", false),
+            // Nobody's label.
+            utterance(10.0, 12.0, "随便聊聊", false),
+        ] {
+            shared.listening.fetch_add(1, Ordering::SeqCst);
+            heard(
+                &shared,
+                u,
+                Some(&names),
+                Gate::WakeWords,
+                &mut listener,
+                &[],
+            );
+        }
+        let heard: Vec<(String, serde_json::Value)> = events(&mut out)
+            .into_iter()
+            .filter(|e| e["type"] == "input.transcript")
+            .map(|e| {
+                (
+                    e["text"].as_str().unwrap().to_string(),
+                    e["speaker"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            heard,
+            vec![
+                ("Alice: Jarvis".to_string(), "Alice".into()),
+                ("Alice: Jarvis明天天气怎么样".to_string(), "Alice".into()),
+                (
+                    "[unknown speaker]: 随便聊聊".to_string(),
+                    serde_json::Value::Null
+                ),
+            ]
+        );
+        // Joins go by what was said, without the name.
+        assert_eq!(
+            listener.last.as_ref().map(|l| l.text.as_str()),
+            Some("随便聊聊")
+        );
+    }
+
+    #[test]
+    fn a_call_a_pause_and_the_request_are_named_without_the_pause() {
+        let at = |s: f64| (s * INPUT_RATE as f64) as usize;
+        let (shared, mut out, _clauses) = audio_shared();
+        let names = vec!["Jarvis".to_string()];
+        let mut listener = Listener::default();
+        // The call labelled; of the request after a 1.4 s pause only the
+        // start so far (its label grows every 250 ms). From the call's start
+        // to the request's end, 0.75 s of 2.9 s are labelled (under
+        // SPEAKER_COVER); of the speech alone, 0.75 s of 1.5 s.
+        listener
+            .speakers
+            .label(span(Some("Alice"), 0.0, 0.5, true), 0);
+        listener
+            .speakers
+            .label(span(Some("Alice"), 1.9, 2.15, false), 0);
+        for u in [
+            utterance(0.0, 0.5, "Jarvis", true),
+            utterance(1.9, 2.9, "明天天气怎么样", false),
+        ] {
+            shared.listening.fetch_add(1, Ordering::SeqCst);
+            heard(
+                &shared,
+                u,
+                Some(&names),
+                Gate::WakeWords,
+                &mut listener,
+                &[],
+            );
+        }
+        let last = events(&mut out)
+            .into_iter()
+            .filter(|e| e["type"] == "input.transcript")
+            .last()
+            .unwrap();
+        assert_eq!(last["text"], "Alice: Jarvis明天天气怎么样");
+        assert_eq!(last["speaker"], "Alice");
+        assert_eq!(
+            listener.last.as_ref().map(|l| l.stretches.clone()),
+            Some(vec![(at(0.0), at(0.5)), (at(1.9), at(2.9))])
+        );
+        // Still whose voice most of the speech is: someone not recognised
+        // saying the request after Alice's call gets no name.
+        let mut speakers = Speakers::default();
+        speakers.label(span(Some("Alice"), 0.0, 0.5, true), 0);
+        speakers.label(span(None, 1.9, 2.9, true), 0);
+        assert_eq!(
+            speakers.who(&[(at(0.0), at(0.5)), (at(1.9), at(2.9))]),
+            Who::Unknown
+        );
+        // Unsure over a joined utterance: the whole of it is said once.
+        let (shared, mut out, _clauses) = audio_shared();
+        let mut listener = Listener::default();
+        listener
+            .speakers
+            .label(unsure(&[(Some("Alice"), 0.6), (None, 0.4)], 0.0, 0.5), 0);
+        listener
+            .speakers
+            .label(unsure(&[(Some("Alice"), 0.6), (None, 0.4)], 1.9, 2.9), 0);
+        for u in [
+            utterance(0.0, 0.5, "Jarvis", true),
+            utterance(1.9, 2.9, "明天天气怎么样", false),
+        ] {
+            shared.listening.fetch_add(1, Ordering::SeqCst);
+            heard(
+                &shared,
+                u,
+                Some(&names),
+                Gate::WakeWords,
+                &mut listener,
+                &[],
+            );
+        }
+        let last = events(&mut out)
+            .into_iter()
+            .filter(|e| e["type"] == "input.transcript")
+            .last()
+            .unwrap();
+        assert_eq!(
+            last["text"],
+            "[Alice 60% / someone 40%]: Jarvis明天天气怎么样"
+        );
+        assert_eq!(last["speaker"], "Alice");
+    }
+
+    #[test]
+    fn one_to_one_too_the_transcript_says_who_said_it_once_labels_came() {
+        let (shared, mut out, _clauses) = audio_shared();
+        let mut listener = Listener::default();
+        // No labels in this session (a call): as heard.
+        shared.listening.fetch_add(1, Ordering::SeqCst);
+        heard(
+            &shared,
+            utterance(0.0, 2.0, "喂", false),
+            None,
+            Gate::Open,
+            &mut listener,
+            &[],
+        );
+        listener
+            .speakers
+            .label(span(Some("Alice"), 10.0, 12.0, true), 0);
+        for u in [
+            utterance(10.0, 12.0, "你好", false),
+            utterance(20.0, 22.0, "在吗", false),
+        ] {
+            shared.listening.fetch_add(1, Ordering::SeqCst);
+            heard(&shared, u, None, Gate::Open, &mut listener, &[]);
+        }
+        let heard: Vec<(String, serde_json::Value)> = events(&mut out)
+            .into_iter()
+            .filter(|e| e["type"] == "input.transcript")
+            .map(|e| {
+                (
+                    e["text"].as_str().unwrap().to_string(),
+                    e["speaker"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            heard,
+            vec![
+                ("喂".to_string(), serde_json::Value::Null),
+                ("Alice: 你好".to_string(), "Alice".into()),
+                (
+                    "[unknown speaker]: 在吗".to_string(),
+                    serde_json::Value::Null
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_speaker_label_comes_in_a_session_update() {
+        let event: ClientEvent = serde_json::from_value(serde_json::json!({
+            "type": "session.update",
+            "config": {"speaker": {"name": null, "start": 16000, "end": 32000, "final": true, "user_id": "x",
+                                   "candidates": [{"name": null, "p": 0.5}, {"name": "Bob", "p": 0.4}]}},
+        }))
+        .unwrap();
+        let ClientEvent::SessionUpdate { config } = event else {
+            panic!("a session.update");
+        };
+        assert_eq!(
+            config.speaker,
+            Some(SpeakerSpan {
+                name: None,
+                start: 16000,
+                end: 32000,
+                done: true,
+                candidates: vec![
+                    SpeakerCandidate { name: None, p: 0.5 },
+                    SpeakerCandidate {
+                        name: Some("Bob".into()),
+                        p: 0.4
+                    },
+                ],
+            })
+        );
     }
 
     #[test]

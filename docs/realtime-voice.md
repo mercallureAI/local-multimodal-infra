@@ -7,8 +7,9 @@ server does the rest:
 1. **Silero VAD v6** (ONNX, CPU, one session per conversation; a port of the
    reference `VADIterator`: threshold 0.5, speech ends after `min_silence_ms`
    of silence, 30 ms padding) cuts the input into utterances.
-2. **SenseVoice** recognises each utterance (speakers are not told apart:
-   voiceprints of short phone-call utterances proved unreliable). Utterances
+2. **SenseVoice** recognises each utterance (the server does not tell
+   voices apart: voiceprints of short phone-call utterances proved
+   unreliable; a client may say who spoke, see Speaker labels). Utterances
    less than 1.5 s apart are joined (the speaker only paused; in a group
    only after a short call such as a bare "<name>,", since what follows a
    longer utterance is likely someone else): the joined one replaces the
@@ -146,6 +147,46 @@ an utterance while the client's model is still thinking gets `respond: true`
 and cuts nothing, so the client should stop its own pending reply (the
 `replaces` id tells it when the speaker only paused).
 
+## Speaker labels
+
+A client that knows who is talking (e.g. by where the voice comes from) says
+so with `session.update` `{"speaker": {"name", "start", "end", "final",
+"candidates"}}`: `start`/`end` are input samples (16 kHz, counted from the
+session's first audio: the clock the VAD's utterances are on), `name` null for
+someone not recognised. `candidates` (optional) are how likely each one is,
+likeliest first: `[{"name": "Alice", "p": 0.62}, {"name": null, "p": 0.3}]`
+(null: someone not recognised); without them the label is `name`, sure. A
+label is the latest for its speech segment: a later one with the same `start`
+replaces it (a segment still growing, relabelled every 250 ms or so, then once
+more with `final: true`). The server keeps the last 60 s of them (at most 512).
+
+Who said an utterance: each label's candidates weighed by how much of its
+speech the label covers (a joined one: all its parts, not the pauses between
+them, so a bare call, a pause and the request are judged by what was said),
+over what the labels cover; nobody when they cover less than 30% of it.
+`input.transcript` carries `speaker`, the likeliest name (null when that is
+someone not recognised, or nobody). Once labels have come in a session (a
+group or one to one alike), its `text` starts with who said it, which is what
+the model reads (cascade: the history and `tool.call` `heard`; the prompts
+explain it):
+
+| Case | `text` |
+|---|---|
+| Sure: the likeliest at least 75% and 30 points ahead of the next | `Alice: 明天天气怎么样` |
+| Unsure: the likeliest few (at most 3, each at least 10%), `someone` for a person not recognised | `[Alice 62% / someone 30%]: 明天天气怎么样` |
+| Unknown: the likeliest is someone not recognised, or no label covers it | `[unknown speaker]: 明天天气怎么样` |
+
+A session that never gets a label (a call) reads the text as heard. A joined
+utterance is said once, whole. What the wake words, the bot's names in the
+transcript and joins go by is the text without it. The formats live in one
+place (`session::Who::said`), with tests.
+
+A label may come a little after its audio. Once labels have come in a
+session, an utterance they do not reach yet (to within 250 ms of its end)
+waits for its own until 0.5 s after the VAD ended it (the wake words'
+waiting goes on meanwhile; audio keeps flowing); in a session without labels
+nothing waits.
+
 A worker built without the `chat` category (`--features audio`) serves only
 audio mode sessions: do not register it beside workers that cascade mode
 clients reach.
@@ -175,7 +216,7 @@ clients are not browsers.
 | `response.delta` | `response_id`, `text` | Audio: text to speak, streamed. |
 | `response.end` | `response_id` | Audio: the response's text is complete. |
 | `response.cancel` | `response_id`? | Audio: stops the bot (that response, or whatever it says). |
-| `session.update` | `config` | Changes a running session: `wake`, `aliases`, `wake_words`. |
+| `session.update` | `config` | Changes a running session: `wake`, `aliases`, `wake_words`; `speaker` labels who said a stretch of the input (see Speaker labels). |
 | `session.stop` | | Ends the conversation. |
 
 `session.start.config`:
@@ -207,7 +248,7 @@ clients are not browsers.
 | --- | --- | --- |
 | `session.started` | `input_rate`, `output_rate` | Models loaded; audio may flow. |
 | `input.speech_started` / `input.speech_stopped` | | VAD edges. |
-| `input.transcript` | `text`, `partial`?, `id`?, `replaces`?, `respond`?, `called`? | An utterance (joined when the speaker only paused); `partial`: a piece of a long one still going on. `id`, `replaces`, `respond`: audio mode; `called` (audio, group): it calls the bot (a wake word in it, or without the spotter its name; or it follows a bare call, or continues a called one). |
+| `input.transcript` | `text`, `partial`?, `id`?, `replaces`?, `respond`?, `called`?, `speaker`? | An utterance (joined when the speaker only paused); `partial`: a piece of a long one still going on. `id`, `replaces`, `respond`: audio mode; `called` (audio, group): it calls the bot (a wake word in it, or without the spotter its name; or it follows a bare call, or continues a called one). `speaker`: who said it, the likeliest name by the client's labels (once labels came, `text` starts with who said it: see Speaker labels). |
 | `input.wake` | `word`, `score` | A wake word was heard (its utterance may still go on). |
 | `state` | `speaking`, `listening` | Audio: sent when either changes. |
 | `response.text` | `text`, `response_id`? | A clause the bot is about to say. |
