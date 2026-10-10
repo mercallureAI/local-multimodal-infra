@@ -40,7 +40,7 @@
 | 语音合成 | `qwen3-tts-0.6b-onnx` | 本地导出后启用（INT8 权重，建议 NVIDIA GPU） | 流式 24 kHz 音频，3 秒参考音频克隆声音，可边接收文字边合成 |
 | 文本向量 | `multilingual-e5-small-onnx` | 默认启用 | 384 维归一化向量 |
 | 文本重排 | `mmarco-minilm-l12-onnx` | 默认启用 | 文档相关性排序与分数 |
-| 内容审核（文本） | `qwen3guard-gen-0.6b-int4-onnx` | 本地导出后启用（INT4；FP16 版 `qwen3guard-gen-0.6b-onnx` 可选） | 安全 / 有争议 / 不安全的概率与类别（暴力、违法、色情、个人信息、自残、政治敏感等） |
+| 内容审核（文本） | `qwen3guard-gen-0.6b-int4-onnx` | 本地导出后启用（INT4；FP16 版 `qwen3guard-gen-0.6b-onnx` 可选） | 安全 / 有争议 / 不安全的概率与类别（Violent、Non-violent Illegal Acts、Sexual Content or Sexual Acts、PII、Suicide & Self-Harm、Unethical Acts、Politically Sensitive Topics、Copyright Violation、Jailbreak） |
 | 内容审核（图片） | `freepik-nsfw-image-detector-onnx` | 本地导出后启用（FP16） | NSFW 概率与分级（neutral / low / medium / high） |
 | 对话补全 | `qwen3-4b-instruct-2507-int4-onnx` | 本地导出后启用 | 流式文本与工具调用（Qwen3 模板，KV 前缀复用） |
 | 实时语音 | `voice-cascade` | 默认启用，依赖 ASR、对话与 TTS 模型 | `/v1/realtime` WebSocket 语音对话（Silero VAD + SenseVoice + Qwen3 + Qwen3-TTS，TTS 也可换成 IndexTTS，见 `docs/realtime-voice.md`） |

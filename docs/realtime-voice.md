@@ -55,7 +55,15 @@ ended it. The spotter hears its input brought to a steady level first (a
 gain following the speech's peaks over a few seconds, 0.5x to 31.6x): it
 misses far more of a quiet or loud voice than of the same voice at a usual
 level (recorded calls through a game client: 62 % spotted as heard, 71 %
-levelled, no more false calls in 19 minutes of other speech).
+levelled, no more false calls in 19 minutes of other speech). The search
+keeps 16 paths a frame (`kws_paths`): a name's first tokens score low against
+what else the speech could be, and with 4 they were dropped before the rest
+came (82 % spotted with 16). Spotted calls then score from about 0.21 and
+other speech not at all, so a keyword needs a mean token probability of
+0.20 (`kws_threshold`, and `kws_short_threshold` for words of four tokens or
+fewer; 84 % spotted, still no false calls). A bigger boost along the
+keywords did worse (66 % at twice the boost). What is left missed is mostly
+a voice 30–42 dB under a usual level, which no gain brings back.
 
 The wake words are the bot's `name`, its `aliases` and `wake_words`, written
 as text: Chinese characters are read in pinyin, English words with the model's
@@ -76,8 +84,18 @@ transcript has a sentence starting or ending with a wake word ("M42跳一下",
 "坐下吧，M3。", "嗯嗯。M3去查一下"; a few words around it like "嗯", "吧"
 passed over, case, punctuation and Chinese numerals not minded): the
 recogniser hears names the spotter missed (in a game room, 165 utterances
-named the bot, the spotter caught 50; with the transcript 161). A name in
-the middle of a sentence ("我说M3它……") is talked about, not called. With `wake` off (one other
+named the bot, the spotter caught 50; with the transcript 161). A first
+clause that is only the name after a word or two calls too ("这个M42，你看看
+周围", "那个，M42，……"), and so does a name of letters and digits the
+recogniser wrote a letter or digit off, standing alone at a sentence's
+start or end ("M2", "L42" or "M12" for "M42"; for a two-character name only
+its digit: "M2" for "M3", not "A3"; replaying that room's 1548 transcripts
+calls 18 more, all but one or two the bot). A name in
+the middle of a sentence ("我说M3它……") is talked about, not called. Each
+call the transcript heard and the spotter missed keeps its audio and
+transcript (`<time>.wav`, `.txt`) in `<data>/voice-cascade-missed-wakes`,
+the newest 200 (`missed_wakes_kept`, 0: none): real misses to tune the
+spotter on. With `wake` off (one other
 person to talk with) every utterance may get one, as before. `session.update`
 turns it on and off mid-conversation (a room that fills up or empties). The
 model replying may still stay silent. Without the spotter's model

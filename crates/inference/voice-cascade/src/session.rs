@@ -60,6 +60,10 @@ const CALL_SAMPLES: usize = INPUT_RATE as usize * 3 / 2;
 const CALL_FOLLOW_SAMPLES: usize = INPUT_RATE as usize * 5;
 /// Wake words heard this long ago are forgotten.
 const WAKE_KEPT_SAMPLES: usize = INPUT_RATE as usize * 60;
+/// Calls the transcript heard and the spotter missed: this many kept by
+/// default (`missed_wakes_kept`), each at most this long.
+const MISSED_WAKES_KEPT: usize = 200;
+const MISSED_WAKE_SAMPLES: usize = INPUT_RATE as usize * 30;
 /// A wake word at the very end of an utterance is spotted a little after
 /// the VAD ends it (the encoder's lookahead and chunks): an utterance no
 /// wake word was spotted in yet waits until the spotter has gone this far
@@ -187,6 +191,31 @@ pub struct CascadeModels {
     /// The keyword spotter's model (`kws_dir`, beside the VAD model; default
     /// `kws`), if there: wake words in a group.
     pub kws_dir: Option<PathBuf>,
+    /// The spotter's settings (`kws_threshold`, `kws_short_threshold`,
+    /// `kws_paths`; the adapter's defaults else).
+    pub kws_tune: KwsTune,
+    /// Where the audio of calls the transcript heard and the spotter missed
+    /// is kept, and how many (the newest; `missed_wakes_kept`, 0: none):
+    /// what to tune the spotter on.
+    pub missed_wakes: Option<(PathBuf, usize)>,
+}
+
+/// The keyword spotter's settings.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KwsTune {
+    pub threshold: f32,
+    pub short_threshold: f32,
+    pub paths: usize,
+}
+
+impl Default for KwsTune {
+    fn default() -> Self {
+        Self {
+            threshold: local_adapter_kws_zipformer::THRESHOLD,
+            short_threshold: local_adapter_kws_zipformer::SHORT_THRESHOLD,
+            paths: local_adapter_kws_zipformer::ACTIVE_PATHS,
+        }
+    }
 }
 
 impl CascadeModels {
@@ -221,6 +250,22 @@ impl CascadeModels {
             .parent()
             .map(|dir| dir.join(text("kws_dir", "kws")))
             .filter(|dir| dir.join("encoder.onnx").is_file());
+        let number = |key: &str| spec.metadata.get(key).and_then(Value::as_f64);
+        let unit = |key: &str, default: f32| match number(key) {
+            Some(v) if (0.0..=1.0).contains(&v) => Ok(v as f32),
+            Some(v) => Err(InfraError::ModelNotConfigured {
+                model_id: spec.id.clone(),
+                reason: format!("{key} {v} is not between 0 and 1"),
+            }),
+            None => Ok(default),
+        };
+        let defaults = KwsTune::default();
+        let kws_tune = KwsTune {
+            threshold: unit("kws_threshold", defaults.threshold)?,
+            short_threshold: unit("kws_short_threshold", defaults.short_threshold)?,
+            paths: number("kws_paths").map_or(defaults.paths, |v| (v as usize).max(1)),
+        };
+        let kept = number("missed_wakes_kept").map_or(MISSED_WAKES_KEPT, |v| v.max(0.0) as usize);
         Ok(Self {
             vad_model,
             chat_model: text("chat_model", "qwen3-4b-instruct-2507-int4-onnx"),
@@ -271,6 +316,8 @@ impl CascadeModels {
             },
             temp_dir: data_dir.join("voice-cascade"),
             kws_dir,
+            kws_tune,
+            missed_wakes: (kept > 0).then(|| (data_dir.join("voice-cascade-missed-wakes"), kept)),
         })
     }
 }
@@ -542,7 +589,11 @@ async fn converse(
     if config.group {
         match models.kws_dir.clone() {
             Some(dir) => match blocking(move || KeywordSpotter::load(&dir)).await {
-                Ok(spotter) => {
+                Ok(mut spotter) => {
+                    let tune = models.kws_tune;
+                    spotter.set_paths(tune.paths);
+                    spotter.tune(local_adapter_kws_zipformer::BOOST, tune.threshold, tune.short_threshold);
+                    tracing::info!(?tune, "voice cascade keyword spotter");
                     input.spotter = Some(spotter);
                     input.set_wake_words(names.as_deref().unwrap_or_default(), &wake_words);
                 }
@@ -552,6 +603,9 @@ async fn converse(
         }
     }
     let mut listener = Listener::default();
+    if input.spotter.is_some() {
+        listener.missed = models.missed_wakes.clone();
+    }
     // Recognised utterances, in order, each until when it may wait for the
     // spotter.
     let mut waiting: VecDeque<(Utterance, tokio::time::Instant)> = VecDeque::new();
@@ -999,6 +1053,10 @@ struct Listener {
     bare_call: Option<usize>,
     /// Who spoke when, by the client's labels.
     speakers: Speakers,
+    /// Where calls the spotter missed are kept, and how many
+    /// (`CascadeModels::missed_wakes`); the audio of the pieces held.
+    missed: Option<(PathBuf, usize)>,
+    held_samples: Vec<f32>,
 }
 
 /// The client's speaker labels (`session.update` `speaker`): the latest of
@@ -1234,6 +1292,13 @@ fn heard(
     callers: &[String],
 ) {
     let piece = utterance.text.trim();
+    if listener.missed.is_some() {
+        let room = MISSED_WAKE_SAMPLES.saturating_sub(listener.held_samples.len());
+        let take = utterance.samples.len().min(room);
+        listener
+            .held_samples
+            .extend_from_slice(&utterance.samples[..take]);
+    }
     if utterance.continues {
         listener.held_called |= utterance.called;
         if !piece.is_empty() {
@@ -1264,8 +1329,22 @@ fn heard(
     // transcript starts or ends with a name (the recogniser hears a name
     // the spotter missed: in a room, 165 named, 50 spotted).
     let by_name = gate == Gate::WakeWords && !utterance.called && calls_by_name(&text, callers);
+    let samples = std::mem::take(&mut listener.held_samples);
     if by_name {
         tracing::info!(text, "voice cascade called by name in the transcript");
+        if let Some((dir, kept)) = listener.missed.clone() {
+            let text = text.clone();
+            let keep = move || {
+                if let Err(err) = keep_missed_wake(&dir, kept, &samples, &text) {
+                    tracing::warn!(error = %err, "voice cascade missed call not kept");
+                }
+            };
+            // Off the session's task (no runtime: here and now).
+            match tokio::runtime::Handle::try_current() {
+                Ok(runtime) => drop(runtime.spawn_blocking(keep)),
+                Err(_) => keep(),
+            }
+        }
     }
     let own_called = utterance.called
         || std::mem::take(&mut listener.held_called)
@@ -2282,7 +2361,9 @@ async fn recognize_utterances(
     heard: mpsc::UnboundedSender<Utterance>,
 ) {
     while let Some(mut utterance) = utterances.recv().await {
-        let samples = std::mem::take(&mut utterance.samples);
+        // Kept on the utterance too: a call the spotter missed keeps its
+        // audio (`keep_missed_wake`).
+        let samples = utterance.samples.clone();
         if samples.len() < MIN_UTTERANCE_SAMPLES {
             // The short end of a long utterance: nothing to recognise, but
             // it ends the utterance.
@@ -2721,6 +2802,33 @@ async fn play(shared: Arc<Shared>) {
         }
         shared.turn_spoken();
     }
+}
+
+/// Keeps a call the spotter missed below `dir`: its audio (`<time>.wav`)
+/// and transcript (`<time>.txt`), the newest `kept` of them.
+fn keep_missed_wake(dir: &Path, kept: usize, samples: &[f32], text: &str) -> Result<()> {
+    let io = |e: std::io::Error| InfraError::Runtime(format!("{}: {e}", dir.display()));
+    std::fs::create_dir_all(dir).map_err(io)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let name = format!("{now}-{}", &uuid::Uuid::new_v4().simple().to_string()[..6]);
+    write_wav(&dir.join(format!("{name}.wav")), samples)?;
+    std::fs::write(dir.join(format!("{name}.txt")), text).map_err(io)?;
+    let mut kept_now: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(io)?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "wav"))
+        .collect();
+    kept_now.sort();
+    let over = kept_now.len().saturating_sub(kept);
+    for old in &kept_now[..over] {
+        let _ = std::fs::remove_file(old);
+        let _ = std::fs::remove_file(old.with_extension("txt"));
+    }
+    Ok(())
 }
 
 fn write_wav(path: &Path, samples: &[f32]) -> Result<()> {
@@ -3222,6 +3330,61 @@ mod tests {
             .last()
             .unwrap();
         assert!(last["replaces"].is_u64(), "{last}");
+    }
+
+    #[test]
+    fn a_call_the_spotter_missed_keeps_its_audio() {
+        let (shared, _out, _clauses) = audio_shared();
+        let names = vec!["M42".to_string()];
+        let dir = std::env::temp_dir().join(format!("missed-wakes-{}", uuid::Uuid::new_v4()));
+        let mut listener = Listener {
+            missed: Some((dir.clone(), 2)),
+            ..Listener::default()
+        };
+        let with_audio = |start: f64, end: f64, text: &str, called: bool| {
+            let mut u = utterance(start, end, text, called);
+            u.samples = vec![0.1; ((end - start) * INPUT_RATE as f64) as usize];
+            u
+        };
+        for u in [
+            // Spotted, then not about the bot: nothing kept.
+            with_audio(0.0, 1.0, "M42跳一下", true),
+            with_audio(5.0, 6.0, "随便聊聊", false),
+            // Missed by the spotter, called in the transcript: kept, the
+            // newest two.
+            with_audio(10.0, 11.0, "M42开启跟随", false),
+            with_audio(20.0, 21.5, "M2站起来", false),
+            with_audio(30.0, 32.0, "L42坐下", false),
+        ] {
+            shared.listening.fetch_add(1, Ordering::SeqCst);
+            heard(
+                &shared,
+                u,
+                Some(&names),
+                Gate::WakeWords,
+                &mut listener,
+                &names,
+            );
+        }
+        let mut kept: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        kept.sort();
+        let texts: Vec<String> = kept
+            .iter()
+            .filter(|p| p.extension().is_some_and(|x| x == "txt"))
+            .map(|p| std::fs::read_to_string(p).unwrap())
+            .collect();
+        assert_eq!(texts, vec!["M2站起来", "L42坐下"]);
+        let wav = kept
+            .iter()
+            .find(|p| p.extension().is_some_and(|x| x == "wav"))
+            .unwrap();
+        let reader = hound::WavReader::open(wav).unwrap();
+        assert_eq!(reader.len(), (1.5 * INPUT_RATE as f64) as u32);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

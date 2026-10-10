@@ -43,15 +43,22 @@ const FEATURE_DIM: usize = 80;
 const FRAME_SHIFT: usize = SAMPLE_RATE / 100;
 /// Frames past a chunk's own that the encoder reads (zipformer2: 7 + 2 * 3).
 const PAD_FRAMES: usize = 13;
-const MAX_ACTIVE_PATHS: usize = 4;
+/// Paths the search keeps each frame. A name's first tokens score low
+/// against what else the speech could be: with 4 they were dropped before
+/// the rest came (recorded calls in a room's conditions: 71% spotted; 16:
+/// 82%, no more false calls in 19 minutes of other speech; 32 and more
+/// lost a few "M42"s).
+pub const ACTIVE_PATHS: usize = 16;
 /// Blanks that must follow a keyword's last token.
 const TRAILING_BLANKS: usize = 1;
 /// The boost (log domain) of each token along a keyword.
 pub const BOOST: f32 = 1.0;
 /// The mean token probability a keyword must reach; short ones (a few
-/// tokens: "M3" is four) more.
-pub const THRESHOLD: f32 = 0.25;
-pub const SHORT_THRESHOLD: f32 = 0.3;
+/// tokens: "M3" is four) may be set to need more. With ACTIVE_PATHS kept,
+/// calls score from 0.21 and other speech none at all (84% spotted at 0.18
+/// or 0.20, 82% at 0.25/0.30, no false calls at any).
+pub const THRESHOLD: f32 = 0.2;
+pub const SHORT_THRESHOLD: f32 = 0.2;
 const SHORT_TOKENS: usize = 4;
 /// The input's level as the spotter hears it (`Leveler`): speech is
 /// brought to about TARGET_RMS (a close, clear recording's: -25 dBFS), by
@@ -130,6 +137,8 @@ pub struct KeywordSpotter {
     short_threshold: f32,
     /// Blanks after a keyword's last token before it counts.
     trailing_blanks: usize,
+    /// Paths the search keeps (ACTIVE_PATHS).
+    paths: usize,
 }
 
 /// An automatic gain for the spotter's input: a peak-following speech level
@@ -256,6 +265,7 @@ impl KeywordSpotter {
             threshold: THRESHOLD,
             short_threshold: SHORT_THRESHOLD,
             trailing_blanks: TRAILING_BLANKS,
+            paths: ACTIVE_PATHS,
         };
         spotter.reset();
         Ok(spotter)
@@ -275,6 +285,11 @@ impl KeywordSpotter {
     /// than this many.
     pub fn set_trailing_blanks(&mut self, blanks: usize) {
         self.trailing_blanks = blanks;
+    }
+
+    /// Paths the search keeps each frame (at least 1).
+    pub fn set_paths(&mut self, paths: usize) {
+        self.paths = paths.max(1);
     }
 
     /// The boost and thresholds (long, short words) `set_keywords` gives
@@ -553,7 +568,7 @@ impl KeywordSpotter {
             search::Params {
                 vocab: self.vocab,
                 unk: self.unk,
-                max_paths: MAX_ACTIVE_PATHS,
+                max_paths: self.paths,
                 trailing_blanks: self.trailing_blanks,
             },
             at,

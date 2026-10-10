@@ -57,3 +57,12 @@ metadata:
   # python -m scripts.local.fetch_kws_model. Missing: the bot's name in the
   # transcript calls it.
   kws_dir: kws
+  # The spotter: mean token probability a wake word needs (and one of four
+  # tokens or fewer, like "M3"), and the paths its search keeps. Unset: the
+  # adapter's (0.20, 0.20, 16).
+  # kws_threshold: 0.2
+  # kws_short_threshold: 0.2
+  # kws_paths: 16
+  # Calls the transcript heard and the spotter missed: the newest this many
+  # kept (audio and text) in <data>/voice-cascade-missed-wakes; 0 for none.
+  # missed_wakes_kept: 200

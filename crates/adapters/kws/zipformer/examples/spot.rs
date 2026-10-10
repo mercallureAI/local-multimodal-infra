@@ -5,7 +5,8 @@
 //!         <model dir> <words: "M3,小M" or @keywords.txt> <wav>...
 //!
 //! `KWS_LEVEL=0` turns the input leveling off; `KWS_TUNE=<boost>,<threshold>,
-//! <short threshold>` sets the keywords' (words only, not keywords.txt).
+//! <short threshold>` sets the keywords' (words only, not keywords.txt);
+//! `KWS_PATHS=<n>` the paths the search keeps.
 
 use local_adapter_kws_zipformer::KeywordSpotter;
 use std::time::Instant;
@@ -40,6 +41,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut spotter = KeywordSpotter::load(std::path::Path::new(dir))?;
         if std::env::var("KWS_LEVEL").is_ok_and(|v| v == "0") {
             spotter.set_leveling(false);
+        }
+        if let Some(paths) = std::env::var("KWS_PATHS").ok().and_then(|v| v.parse().ok()) {
+            spotter.set_paths(paths);
         }
         if let Some(tb) = std::env::var("KWS_TB").ok().and_then(|v| v.parse().ok()) {
             spotter.set_trailing_blanks(tb);

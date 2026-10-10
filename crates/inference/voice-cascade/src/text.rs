@@ -123,6 +123,10 @@ const CALL_FILLERS: &[&str] = &[
     "吗", "嘛", "呢", "ok", "okay", "hey", "hi", "um", "uh",
 ];
 
+/// Said before a name in a first clause that only calls ("这个M42，……",
+/// "那个，M3，……"): passed over there, with CALL_FILLERS.
+const VOCATIVES: &[&str] = &["这个", "那个", "嘿"];
+
 /// `text` lowercased, Chinese numerals as digits ("M四十二" is "m42", "M三"
 /// "m3"), only letters and digits kept.
 fn call_form(text: &str) -> String {
@@ -166,7 +170,10 @@ fn call_form(text: &str) -> String {
 /// "坐下吧，M3", "嗯嗯。M3去查一下"). Sentences end at `SENTENCE_END` (and
 /// ". "), not at pauses: a name inside one ("我说M3它……") is talked about,
 /// not called. A few words said around a call ("嗯", "对", "吧") are passed
-/// over.
+/// over. A first clause that is only a call, after a word or two ("这个M42，
+/// 你看看周围"), calls too. A name of letters and digits the recogniser
+/// wrote a letter or digit off ("M2", "L42" for "M42": `near_name`) calls
+/// as well, standing alone there (not part of a longer word).
 pub fn calls_by_name(text: &str, callers: &[String]) -> bool {
     text.replace(". ", "\n")
         .split(|c: char| SENTENCE_END.contains(&c))
@@ -184,10 +191,38 @@ fn sentence_calls(text: &str, callers: &[String]) -> bool {
         return false;
     }
     let fillers: Vec<String> = CALL_FILLERS.iter().map(|f| call_form(f)).collect();
+    // A first clause that only calls, past fillers and vocatives (and
+    // clauses of nothing else: "那个，M42，……").
+    // Longest first ("那个" before "那").
+    let mut passed: Vec<String> = fillers
+        .iter()
+        .cloned()
+        .chain(VOCATIVES.iter().map(|v| call_form(v)))
+        .collect();
+    passed.sort_by_key(|f| std::cmp::Reverse(f.len()));
+    for clause in text.split(|c: char| PAUSES.contains(&c)) {
+        let mut clause = call_form(clause);
+        while let Some(f) = passed.iter().find(|f| clause.starts_with(f.as_str())) {
+            clause.drain(..f.len());
+        }
+        if !clause.is_empty() {
+            if names.iter().any(|n| near_name(&clause, n)) {
+                return true;
+            }
+            break;
+        }
+    }
     // From the start, past fillers.
     let mut head = rest.clone();
     loop {
-        if names.iter().any(|n| head.starts_with(n.as_str())) {
+        let word: String = head
+            .chars()
+            .take_while(char::is_ascii_alphanumeric)
+            .collect();
+        if names
+            .iter()
+            .any(|n| head.starts_with(n.as_str()) || near_name(&word, n))
+        {
             return true;
         }
         match fillers.iter().find(|f| head.starts_with(f.as_str())) {
@@ -197,7 +232,16 @@ fn sentence_calls(text: &str, callers: &[String]) -> bool {
     }
     // From the end, past fillers.
     loop {
-        if names.iter().any(|n| rest.ends_with(n.as_str())) {
+        let back: Vec<char> = rest
+            .chars()
+            .rev()
+            .take_while(char::is_ascii_alphanumeric)
+            .collect();
+        let word: String = back.into_iter().rev().collect();
+        if names
+            .iter()
+            .any(|n| rest.ends_with(n.as_str()) || near_name(&word, n))
+        {
             return true;
         }
         match fillers.iter().find(|f| rest.ends_with(f.as_str())) {
@@ -208,6 +252,33 @@ fn sentence_calls(text: &str, callers: &[String]) -> bool {
             None => return false,
         }
     }
+}
+
+/// Whether `word` is the caller `name` (both `call_form`), or, for a name
+/// of letters and digits, one the recogniser wrote a little off: a letter
+/// for a letter or a digit for a digit ("l42", "m43" for "m42"; for a
+/// two-character name only its digit: "m2" for "m3", not "a3"), or one
+/// left out of a longer name ("m2" for "m42"). In a room's log the bot was
+/// called "M2" and "L42"; a name of other characters must be exact.
+fn near_name(word: &str, name: &str) -> bool {
+    if word == name {
+        return true;
+    }
+    if !word.is_ascii() || !name.is_ascii() || name.len() < 2 || word.len() < 2 {
+        return false;
+    }
+    let (w, n) = (word.as_bytes(), name.as_bytes());
+    if w.len() == n.len() {
+        let mut off = (0..n.len()).filter(|&i| w[i] != n[i]);
+        let (Some(i), None) = (off.next(), off.next()) else {
+            return false;
+        };
+        let digit = n[i].is_ascii_digit();
+        return w[i].is_ascii_digit() == digit && (n.len() > 2 || digit);
+    }
+    n.len() > 2
+        && w.len() + 1 == n.len()
+        && (0..n.len()).any(|i| n[..i] == w[..i] && n[i + 1..] == w[i..])
 }
 
 /// The part of a clause still being written that is sure to stay in it: a
@@ -469,6 +540,19 @@ mod tests {
         ] {
             assert!(calls_by_name(said, &callers), "{said}");
         }
+        // The recogniser wrote the name a little off (the room's log), or
+        // called it in a first clause after a word or two.
+        for said in [
+            "M2开启跟谁。",
+            "L42向转走到路上来。",
+            "坐下吧，M2。",
+            "这个M42，我说你看看周围环境，你看了吗？",
+            "那个，M42，你过来一下。",
+            "喂M3，过来。",
+            "嘿，monstr，过来。",
+        ] {
+            assert!(calls_by_name(said, &callers), "{said}");
+        }
         // A sentence of several starting with it.
         assert!(calls_by_name(
             "うんうん。M3去查一下刚刚的免费模型。",
@@ -485,6 +569,11 @@ mod tests {
             "什么意思？",
             "我们三个人一起去",
             "M",
+            // Talked about, or only like it: not a call.
+            "这个M42的功能挺好的。",
+            "B3在哪里？",
+            "A4纸给我一张。",
+            "我在看M2的说明。",
         ] {
             assert!(!calls_by_name(said, &callers), "{said}");
         }
