@@ -31,6 +31,13 @@ load_policy:
   pin: false
 metadata:
   runtime: onnxruntime
+  # Keep the CUDA memory small (moderation runs in ~2 GB): grow the arena by
+  # what is asked instead of doubling, and no maximal cuDNN workspace.
+  cuda_arena_same_as_requested: true
+  cuda_conv_max_workspace: false
+  # ...and give each run's activations back afterwards (long prefills only,
+  # for the text model).
+  cuda_release_memory_after_run: true
   # Detection / recognition knobs (adapter defaults shown, but for
   # det_limit_side_len, 960 by default, and rec_batch, 8 by default).
   # 1280 keeps 720p game frames whole, so small, far name tags are still found.
@@ -39,6 +46,10 @@ metadata:
   # ~10-15 small boxes, and split in two batches of 8 they took ~320 ms with
   # fewer lines read, against ~30 ms in one (RTX 4090).
   rec_batch: 32
+  # ...but no more than 6400 padded columns per batch (4 lines at the 1600 px
+  # maximum): a text-dense screenshot's long lines in batches of 32 took ~1 GB
+  # more VRAM. Name tags (a few hundred px each) still go in one batch.
+  rec_batch_columns: 6400
   det_thresh: 0.3
   box_thresh: 0.6
   unclip_ratio: 1.5

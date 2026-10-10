@@ -73,6 +73,40 @@ fn metadata_overrides_the_defaults() {
     );
 }
 
+#[test]
+fn recognition_batches_keep_within_the_column_budget() {
+    // Narrow lines (game name tags) fill whole batches; wide ones (a chat
+    // screenshot) split by their padded width.
+    let mut config = PpocrConfig {
+        rec_batch: 32,
+        ..PpocrConfig::default()
+    };
+    let narrow = vec![150u32; 40];
+    assert_eq!(rec_batches(&narrow, &config), vec![32, 8]);
+    config.rec_batch_columns = Some(6400);
+    assert_eq!(rec_batches(&narrow, &config), vec![32, 8]);
+    let wide = vec![1500u32; 10];
+    assert_eq!(rec_batches(&wide, &config), vec![4, 4, 2]);
+    // Sorted narrowest first: the batch stops where the next line would
+    // widen it past the budget; a single line always goes.
+    config.rec_batch_columns = Some(4000);
+    let mixed = [100, 100, 100, 1600, 1600];
+    assert_eq!(rec_batches(&mixed, &config), vec![3, 2]);
+    config.rec_batch_columns = Some(1600);
+    assert_eq!(rec_batches(&[1600, 1600], &config), vec![1, 1]);
+    assert!(rec_batches(&[], &config).is_empty());
+}
+
+#[test]
+fn the_column_budget_is_at_least_one_line() {
+    let mut metadata = BTreeMap::new();
+    metadata.insert("rec_batch_columns".to_string(), serde_json::json!(10));
+    assert_eq!(
+        PpocrConfig::from_metadata(&metadata).rec_batch_columns,
+        Some(1600)
+    );
+}
+
 fn spec(dir: PathBuf, provider_order: Vec<String>) -> ModelSpec {
     ModelSpec {
         id: "ppocrv5-mobile-onnx".to_string(),

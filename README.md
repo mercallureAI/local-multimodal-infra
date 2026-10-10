@@ -40,6 +40,8 @@
 | 语音合成 | `qwen3-tts-0.6b-onnx` | 本地导出后启用（INT8 权重，建议 NVIDIA GPU） | 流式 24 kHz 音频，3 秒参考音频克隆声音，可边接收文字边合成 |
 | 文本向量 | `multilingual-e5-small-onnx` | 默认启用 | 384 维归一化向量 |
 | 文本重排 | `mmarco-minilm-l12-onnx` | 默认启用 | 文档相关性排序与分数 |
+| 内容审核（文本） | `qwen3guard-gen-0.6b-int4-onnx` | 本地导出后启用（INT4；FP16 版 `qwen3guard-gen-0.6b-onnx` 可选） | 安全 / 有争议 / 不安全的概率与类别（暴力、违法、色情、个人信息、自残、政治敏感等） |
+| 内容审核（图片） | `freepik-nsfw-image-detector-onnx` | 本地导出后启用（FP16） | NSFW 概率与分级（neutral / low / medium / high） |
 | 对话补全 | `qwen3-4b-instruct-2507-int4-onnx` | 本地导出后启用 | 流式文本与工具调用（Qwen3 模板，KV 前缀复用） |
 | 实时语音 | `voice-cascade` | 默认启用，依赖 ASR、对话与 TTS 模型 | `/v1/realtime` WebSocket 语音对话（Silero VAD + SenseVoice + Qwen3 + Qwen3-TTS，TTS 也可换成 IndexTTS，见 `docs/realtime-voice.md`） |
 | 唤醒词 | 实时语音内置（sherpa-onnx KWS zipformer zh-en 3M） | 模型用 `scripts.local.fetch_kws_model` 放入后启用 | 群聊会话中检出机器人名字等唤醒词（`input.wake`），只有叫到它的话要回应，其余作为上下文 |
@@ -49,6 +51,8 @@
 文档 OCR 使用 [baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-OCR)（DeepEncoder + DeepSeek-V2 MoE，R-SWA 注意力），每次请求识别一页图片（base 模式，缩放填充到 1024×1024）。结果为整页文本，每个版面块前带 `<|det|>类别 [x1, y1, x2, y2]<|/det|>` 标签，坐标按 0–999 归一化，表格为 HTML。可通过 MCP / legacy RPC 的 `ocr_recognize`（传 `image` FileRef 或 `image_path`）或通用任务 `ocr.recognize`（上传 `image`）调用。
 
 画面文字行（场景文字、界面标签、名牌等）使用 PaddleOCR 的 PP-OCRv5 mobile 检测与识别模型（中、英、日等文字同一个模型，两个 ONNX 合计约 21 MB），返回每行文字及其像素框，按从上到下、从左到右排列。逐帧调用可直接 `POST /v1/ocr/lines[?model=ppocrv5-mobile-onnx]`，请求体就是图片（PNG/JPEG/BMP），立即返回 `{"lines": [{"text", "confidence", "bbox"}]}`，受推理 token 保护；也可用通用任务 `ocr.lines`（上传 `image`）。目标检测同样有逐帧接口 `POST /v1/detect/objects[?model=yolo11n.onnx]`，返回 `{"objects": [{"label", "confidence", "bbox"}]}`。
+
+内容审核用于把内容发给云端 LLM API 之前，检查其中是否有违反平台政策的内容：`POST /v1/moderations` 兼容 OpenAI 的审核接口，`input` 可以是字符串、字符串数组，或 `text` / `image_url`（base64 `data:` URL，不拉取远程图片）组成的多模态数组。文本由 Qwen3Guard-Gen-0.6B（INT4）判定（一次 prefill 读出安全 / 有争议 / 不安全的概率，非安全时再解码类别）；图片先由 NSFW 分类器判定，未被拦下的再用 PP-OCRv5 读出图中文字一并审核。默认 `1 - p(safe) > 0.9` 或 NSFW 概率 > 0.5 时 `flagged`，可用 `threshold` / `nsfw_threshold` 调整，`nsfw_labels` 选择哪些图片档位算违规（如只算 `medium`、`high`），`categories` 选择哪些文字类别拦截。多模态数组的结果另有 `parts`，按输入顺序给出每一项的判定，便于调用方只去掉违规的部分。ToxicChat 上召回 0.81、误报 2.8%，600 段本地技术文档与代码 0 误报；三个模型合计显存峰值约 1.6 GB，RTX 4090 上一张图端到端约 120 ms。模型导出、接口细节与评测数据见 [`docs/moderation.md`](docs/moderation.md)。
 
 单目米制深度使用 Depth Anything V2 Metric Indoor Small（ViT-S，室内 Hypersim 微调，最大 20 m，Apache-2.0），由 `python -m scripts.local.depth_anything_export --size 308x546 --output-dir <models>/depth-anything-v2-metric-indoor-small-onnx` 从固定 revision 导出为固定输入尺寸的 ONNX（约 99 MB）；图片被拉伸到该尺寸，因此按 16:9 画面（如 1280×720 游戏画面）导出，其他宽高比的图片会变形、深度有偏差，需按其宽高比另行导出（`--size`）。逐帧接口 `POST /v1/depth[?model=&cols=&rows=]`（默认 64×36）返回 `{"cols", "rows", "max_depth", "depth": [米，自上而下逐行]}`，每格是该区域的平均深度；通用任务 `depth.estimate`（上传 `image`，`params.cols/rows`）同样可用。RTX 4090 上一帧 1280×720 约 30 ms（含解码）。
 
@@ -168,6 +172,8 @@ curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
 
 `depth-anything-v2-metric-indoor-small-onnx` 与 `sensevoice-small-fp16-onnx` 没有发布的包，按上文的导出命令本地导出。
 
+`qwen3guard-gen-0.6b-int4-onnx`、`qwen3guard-gen-0.6b-onnx`、`freepik-nsfw-image-detector-onnx` 与 `falconsai-nsfw-image-detection-onnx` 没有发布的包，按 [`configs/providers/moderation`](configs/providers/moderation) 中的命令本地导出（NSFW 分类器用 `python -m scripts.local.nsfw_export`）。
+
 `qwen3-4b-instruct-2507-int4-onnx` 没有发布的 ONNX 包，需按 [`configs/providers/chat/qwen3-chat.yaml`](configs/providers/chat/qwen3-chat.yaml) 中的命令从固定 revision 本地导出到 `workdir/models/qwen3-4b-instruct-2507-int4-onnx`。
 
 `qwen3-tts-0.6b-onnx`（实时语音默认的 TTS）同样没有发布的包，需从固定 revision 本地导出（导出环境、图结构、INT8 音质对比与延迟数据见 [`docs/qwen3-tts.md`](docs/qwen3-tts.md)）：
@@ -263,6 +269,9 @@ python -m scripts.local.smoke --tests mcp \
 | Unlimited-OCR（本地导出 ONNX 的源模型） | [baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-OCR) | `07dea832e22aefee32ad281d4b80551282e1c168` |
 | Qwen3-TTS-12Hz-0.6B-Base（本地导出 ONNX 的源模型） | [Qwen/Qwen3-TTS-12Hz-0.6B-Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base) | `5d83992436eae1d760afd27aff78a71d676296fc` |
 | Qwen3-4B-Instruct-2507（本地导出 INT4 的源模型） | [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) | `cdbee75f17c01a7cc42f958dc650907174af0554` |
+| Qwen3Guard-Gen-0.6B（本地导出 FP16 的源模型） | [Qwen/Qwen3Guard-Gen-0.6B](https://huggingface.co/Qwen/Qwen3Guard-Gen-0.6B) | `fada3b2f655b89601929198343c94cd2f64d93cc` |
+| Freepik NSFW image detector（本地导出 ONNX 的源模型） | [Freepik/nsfw_image_detector](https://huggingface.co/Freepik/nsfw_image_detector) | `15b85477e4fd2000db76ae9aae0f89a72f95e2e3` |
+| Falconsai NSFW image detection（本地导出 ONNX 的源模型） | [Falconsai/nsfw_image_detection](https://huggingface.co/Falconsai/nsfw_image_detection) | `96cb0d0342c7afb80cab76ecc58b265fa44da256` |
 | Depth Anything V2 Metric Indoor Small（本地导出 ONNX 的源模型） | [depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf](https://huggingface.co/depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf) | `8078d68a9c75a972131914f6afd0c1723be0da7f` |
 | SenseVoiceSmall（本地导出 float16 ONNX 的源模型） | [FunAudioLLM/SenseVoiceSmall](https://huggingface.co/FunAudioLLM/SenseVoiceSmall) | `3847d57b6bdf2dd8875cb1508d2af43d80a16bf7` |
 | Silero VAD v6.2.3 | [snakers4/silero-vad](https://github.com/snakers4/silero-vad) | `5cd7945676eb32225748052e2e6a0580e4686a08` |

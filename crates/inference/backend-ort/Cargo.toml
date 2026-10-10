@@ -19,6 +19,7 @@ half.workspace = true
 # onnxruntime-genai decoder exports correctly on CUDA, the bundled 1.24 does not.
 ort = { workspace = true, features = ["std", "tracing", "load-dynamic", "api-24", "half"] }
 serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

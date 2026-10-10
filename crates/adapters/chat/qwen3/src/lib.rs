@@ -36,6 +36,9 @@ pub use template::ChatTemplate as Qwen3ChatTemplate;
 const DEFAULT_MAX_CONTEXT: usize = 8192;
 /// Completion tokens unless the request sets `max_tokens`.
 const DEFAULT_MAX_TOKENS: usize = 1024;
+/// Prefills longer than this give their activations back when
+/// `cuda_release_memory_after_run` is set (shorter ones barely grow them).
+const LONG_PREFILL: usize = 512;
 const TOOL_CALL_START: &str = "<tool_call>";
 const TOOL_CALL_END: &str = "</tool_call>";
 
@@ -173,6 +176,9 @@ pub struct Qwen3ChatAdapter {
     cached: Vec<u32>,
     tool_call_start: Option<u32>,
     tool_call_end: Option<u32>,
+    /// Give a long prefill's activations back to the driver
+    /// (`cuda_release_memory_after_run`).
+    release_memory: bool,
 }
 
 impl Qwen3ChatAdapter {
@@ -188,7 +194,8 @@ impl Qwen3ChatAdapter {
         let template = ChatTemplate::new(read_chat_template(&artifacts.chat_template)?)?;
         let backend = OrtBackend::new(ProviderSelection::from_strings(
             &spec.runtime.provider_order,
-        ));
+        ))
+        .with_cuda_memory_metadata(&spec.metadata);
         let session = backend.load_session(&artifacts.model)?;
         let capacity = spec
             .metadata
@@ -237,6 +244,7 @@ impl Qwen3ChatAdapter {
             cached: Vec::new(),
             tool_call_start,
             tool_call_end,
+            release_memory: local_backend_ort::release_memory_after_run(&spec.metadata),
         })
     }
 
@@ -246,6 +254,72 @@ impl Qwen3ChatAdapter {
 
     pub fn provider_report(&self) -> SessionProviderReport {
         self.session.provider_report()
+    }
+
+    pub fn tokenizer(&self) -> &Tokenizer {
+        &self.tokenizer
+    }
+
+    pub fn template(&self) -> &ChatTemplate {
+        &self.template
+    }
+
+    /// KV cache capacity (tokens): the longest prompt plus completion.
+    pub fn capacity(&self) -> usize {
+        self.cache.capacity()
+    }
+
+    pub fn eos_tokens(&self) -> &[u32] {
+        &self.config.eos
+    }
+
+    /// Runs `prompt_ids` (a whole prompt, template already applied) and
+    /// returns the logits of its last token and how many leading tokens were
+    /// reused from the cache. For callers that read the model's next-token
+    /// distribution (classifiers built on a chat model); `step` goes on.
+    pub fn prefill(&mut self, prompt_ids: &[u32]) -> Result<(Vec<f32>, usize)> {
+        if prompt_ids.is_empty() {
+            return Err(InfraError::BadRequest("the prompt is empty".to_string()));
+        }
+        let capacity = self.cache.capacity();
+        if prompt_ids.len() >= capacity {
+            return Err(InfraError::BadRequest(format!(
+                "prompt has {} tokens; the model's context holds {capacity}",
+                prompt_ids.len()
+            )));
+        }
+        // Reuse the cached prefix; at least one token is fed to get logits.
+        let reused = common_prefix(&self.cached, prompt_ids).min(prompt_ids.len() - 1);
+        let logits = match self.feed(&prompt_ids[reused..], reused) {
+            Ok(logits) => logits,
+            Err(err) => {
+                self.cached.clear();
+                return Err(err);
+            }
+        };
+        self.cached.truncate(reused);
+        self.cached.extend_from_slice(&prompt_ids[reused..]);
+        Ok((logits, reused))
+    }
+
+    /// Feeds one more token after the cached ones; the logits that follow it.
+    pub fn step(&mut self, token: u32) -> Result<Vec<f32>> {
+        if self.cached.len() + 1 >= self.cache.capacity() {
+            return Err(InfraError::BadRequest(
+                "the model's context is full".to_string(),
+            ));
+        }
+        let position = self.cached.len();
+        match self.feed(&[token], position) {
+            Ok(logits) => {
+                self.cached.push(token);
+                Ok(logits)
+            }
+            Err(err) => {
+                self.cached.clear();
+                Err(err)
+            }
+        }
     }
 
     /// Generates the assistant turn for `messages`. `sink` receives content
@@ -292,17 +366,7 @@ impl Qwen3ChatAdapter {
         let mut rng = Rng::new(options.seed.unwrap_or_else(time_seed));
         let tool_first_tokens = self.tool_first_tokens(&options.tool_bias);
 
-        // Reuse the cached prefix; at least one token is fed to get logits.
-        let reused = common_prefix(&self.cached, &prompt_ids).min(prompt_ids.len() - 1);
-        let mut logits = match self.feed(&prompt_ids[reused..], reused) {
-            Ok(logits) => logits,
-            Err(err) => {
-                self.cached.clear();
-                return Err(err);
-            }
-        };
-        self.cached.truncate(reused);
-        self.cached.extend_from_slice(&prompt_ids[reused..]);
+        let (mut logits, reused) = self.prefill(&prompt_ids)?;
         let prefill_ms = started.elapsed().as_millis() as u64;
 
         let mut state = Decoding::new(&options.stop);
@@ -355,15 +419,7 @@ impl Qwen3ChatAdapter {
             if self.cached.len() + 1 >= capacity || step + 1 == max_tokens {
                 break;
             }
-            let position = self.cached.len();
-            logits = match self.feed(&[token], position) {
-                Ok(logits) => logits,
-                Err(err) => {
-                    self.cached.clear();
-                    return Err(err);
-                }
-            };
-            self.cached.push(token);
+            logits = self.step(token)?;
         }
         let (content, tail, tool_calls) = state.finish(&self.tokenizer)?;
         if finish != ChatFinishReason::Cancelled {
@@ -433,9 +489,13 @@ impl Qwen3ChatAdapter {
                 data: OrtTensorData::I64((past..total).map(|p| p as i64).collect()),
             });
         }
-        let output = self
-            .session
-            .run_shared_kv_binding(&mut self.cache, inputs)?;
+        let output = if self.release_memory && tokens.len() > LONG_PREFILL {
+            self.session
+                .run_shared_kv_binding_releasing_memory(&mut self.cache, inputs)?
+        } else {
+            self.session
+                .run_shared_kv_binding(&mut self.cache, inputs)?
+        };
         last_row(output.data, output.shape.last().copied().unwrap_or(0))
     }
 
@@ -454,8 +514,11 @@ impl Qwen3ChatAdapter {
 }
 
 fn read_chat_template(path: &Path) -> Result<String> {
+    // Universal newlines, as Python reads `chat_template.jinja` (a template
+    // written on Windows has CRLF, which would put `\r` into every prompt).
     let text = fs::read_to_string(path)
-        .map_err(|err| InfraError::Adapter(format!("read {}: {err}", path.display())))?;
+        .map_err(|err| InfraError::Adapter(format!("read {}: {err}", path.display())))?
+        .replace("\r\n", "\n");
     if path.extension().is_some_and(|ext| ext == "json") {
         let json: Json = serde_json::from_str(&text)
             .map_err(|err| InfraError::Adapter(format!("parse {}: {err}", path.display())))?;

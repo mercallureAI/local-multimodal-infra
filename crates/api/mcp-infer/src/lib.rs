@@ -407,6 +407,13 @@ mod tests {
                     text: "ok".to_string(),
                 },
                 TaskKind::OcrLines => InferenceOutput::OcrLines { lines: Vec::new() },
+                TaskKind::TextModerate => InferenceOutput::TextModerations {
+                    results: Vec::new(),
+                },
+                TaskKind::ImageNsfw => InferenceOutput::ImageNsfw {
+                    nsfw: 0.0,
+                    scores: Vec::new(),
+                },
                 TaskKind::DepthEstimate => InferenceOutput::DepthMap {
                     cols: 1,
                     rows: 1,

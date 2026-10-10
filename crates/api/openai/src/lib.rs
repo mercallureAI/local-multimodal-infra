@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use axum::{
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -16,8 +16,13 @@ use serde_json::json;
 use std::sync::Arc;
 
 mod chat;
+mod moderation;
 
 pub use chat::ChatCompletionRequest;
+pub use moderation::{ModerationRequest, ModerationResponse};
+
+/// Largest `/v1/moderations` body (base64 images included).
+const MODERATION_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 #[async_trait]
 pub trait OpenAiApi: Send + Sync + 'static {
@@ -33,6 +38,26 @@ pub trait OpenAiApi: Send + Sync + 'static {
         let _ = task;
         Err(InfraError::Unsupported(
             "streaming inference is not available".to_string(),
+        ))
+    }
+
+    /// As `dispatch`, for checks run per request (moderation): no job record
+    /// (a few database writes each, which would cost more than the check).
+    async fn dispatch_direct(&self, task: InferenceTask) -> Result<InferenceOutput> {
+        self.dispatch(task).await
+    }
+
+    /// Runs one-image tasks (`ocr.lines`, `image.nsfw`, ...; with their
+    /// model, or any) on `image` (encoded PNG, JPEG, BMP, WebP or GIF bytes),
+    /// all at once; one result per task, in order.
+    async fn dispatch_image_tasks(
+        &self,
+        image: Vec<u8>,
+        tasks: Vec<(TaskKind, Option<String>)>,
+    ) -> Result<Vec<Result<InferenceOutput>>> {
+        let _ = (image, tasks);
+        Err(InfraError::Unsupported(
+            "image tasks are not available".to_string(),
         ))
     }
 }
@@ -58,6 +83,10 @@ pub fn inference_router(state: OpenAiApiState) -> Router {
         .route("/v1/audio/speech", post(speech))
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/chat/completions", post(chat::chat_completions))
+        .route(
+            "/v1/moderations",
+            post(moderation::moderations).layer(DefaultBodyLimit::max(MODERATION_MAX_BYTES)),
+        )
         .route("/rerank", post(rerank))
         .route("/v1/rerank", post(rerank))
         .route("/v2/rerank", post(rerank))
@@ -465,6 +494,13 @@ mod tests {
                     text: "ok".to_string(),
                 },
                 TaskKind::OcrLines => InferenceOutput::OcrLines { lines: Vec::new() },
+                TaskKind::TextModerate => InferenceOutput::TextModerations {
+                    results: Vec::new(),
+                },
+                TaskKind::ImageNsfw => InferenceOutput::ImageNsfw {
+                    nsfw: 0.0,
+                    scores: Vec::new(),
+                },
                 TaskKind::DepthEstimate => InferenceOutput::DepthMap {
                     cols: 1,
                     rows: 1,

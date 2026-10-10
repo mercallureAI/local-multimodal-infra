@@ -1,0 +1,49 @@
+id: qwen3guard-gen-0.6b-int4-onnx
+name: Qwen3Guard-Gen-0.6B INT4 ONNX
+enabled: true
+task_kinds:
+  - text.moderate
+adapter: qwen3_guard
+backend: ort
+artifacts:
+  # Local export (path omitted: <model_dir>/qwen3guard-gen-0.6b-int4-onnx):
+  #   hf download Qwen/Qwen3Guard-Gen-0.6B --revision fada3b2f655b89601929198343c94cd2f64d93cc --local-dir <src>
+  #   python -m onnxruntime_genai.models.builder -i <src> -o <dir> \
+  #     -p int4 -e cuda --extra_options int4_algo_config=rtn_last prune_lm_head=true
+  # The directory (~340 MB: int4 weights, int8 LM head shared with the
+  # embedding) holds model.onnx(.data), genai_config.json, tokenizer.json and
+  # chat_template.jinja (the moderation prompt). At the default threshold
+  # against FP16: ToxicChat recall 0.81 vs 0.84 at the same 2.8% false
+  # positives, XSTest F1 0.90 vs 0.87 (docs/moderation.md).
+  - type: local
+runtime:
+  provider_order: [cuda, cpu]
+  max_concurrency: 1
+  idle_ttl_sec: 600
+resources:
+  min_ram_mb: 1024
+  min_vram_mb: 768
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  runtime: onnxruntime
+  # Keep the CUDA memory small (moderation runs in ~2 GB): grow the arena by
+  # what is asked instead of doubling, and no maximal cuDNN workspace.
+  cuda_arena_same_as_requested: true
+  cuda_conv_max_workspace: false
+  # ...and give each run's activations back afterwards (long prefills only,
+  # for the text model).
+  cuda_release_memory_after_run: true
+  model_family: qwen3
+  task: text-moderation
+  precision: int4
+  source: Qwen/Qwen3Guard-Gen-0.6B
+  huggingface_revision: fada3b2f655b89601929198343c94cd2f64d93cc
+  # KV cache capacity in tokens, allocated once on load (~112 KB/token).
+  max_context: 2048
+  # Longer texts are judged in windows of this many tokens (64 shared
+  # between neighbours), each with the ~300-token moderation prompt; at most
+  # max_context - 512.
+  window_tokens: 1536

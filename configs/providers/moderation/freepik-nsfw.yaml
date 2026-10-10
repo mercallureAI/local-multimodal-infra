@@ -1,0 +1,45 @@
+id: freepik-nsfw-image-detector-onnx
+name: Freepik NSFW image detector (EVA02-base 448) ONNX
+enabled: true
+task_kinds:
+  - image.nsfw
+adapter: nsfw_vit
+backend: ort
+artifacts:
+  # Local export (path omitted: <model_dir>/freepik-nsfw-image-detector-onnx)
+  # of Freepik/nsfw_image_detector at revision
+  # 15b85477e4fd2000db76ae9aae0f89a72f95e2e3 (MIT):
+  #   python -m scripts.local.nsfw_export freepik --fp16 --output-dir <dir>
+  # The directory holds model.onnx (~180 MB, FP16 with its pooling in FP32;
+  # ~358 MB without --fp16) and nsfw_meta.json. Levels
+  # neutral / low / medium / high; the NSFW probability is low + medium +
+  # high. ~8 ms per image on an RTX 4090 (plus decoding and resizing).
+  - type: local
+runtime:
+  provider_order: [cuda, cpu]
+  max_concurrency: 2
+  idle_ttl_sec: 600
+resources:
+  min_ram_mb: 1024
+  min_vram_mb: 0
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  runtime: onnxruntime
+  # Keep the CUDA memory small (moderation runs in ~2 GB): grow the arena by
+  # what is asked instead of doubling, and no maximal cuDNN workspace.
+  cuda_arena_same_as_requested: true
+  cuda_conv_max_workspace: false
+  # ...and give each run's activations back afterwards (long prefills only,
+  # for the text model).
+  cuda_release_memory_after_run: true
+  task: nsfw-image-classification
+  source: Freepik/nsfw_image_detector
+  huggingface_revision: 15b85477e4fd2000db76ae9aae0f89a72f95e2e3
+  # Labels whose probabilities make the NSFW probability (default: the
+  # export's, low + medium + high). `low` is suggestive (lingerie, swimwear):
+  # without it 44% of such images are flagged instead of 99.7%, and explicit
+  # ones stay at 99.3%. See docs/moderation.md.
+  # nsfw_labels: [medium, high]

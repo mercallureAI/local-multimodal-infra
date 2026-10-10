@@ -1222,6 +1222,17 @@ impl ControllerState {
                     })
                 })?,
             },
+            local_core::TaskKind::ImageNsfw => InferenceInput::ImageNsfw {
+                image: uploaded("image")
+                    .or_else(first_file)
+                    .ok_or_else(|| {
+                        InfraError::BadRequest("image.nsfw requires an image upload".to_string())
+                    })
+                    .and_then(to_ref)?,
+            },
+            local_core::TaskKind::TextModerate => InferenceInput::TextModerate {
+                texts: text_list_param(&status.params, &["input", "texts", "text"])?,
+            },
             local_core::TaskKind::AsrTranscribe => InferenceInput::AsrTranscribe {
                 audio: uploaded("audio")
                     .or_else(first_file)
@@ -2033,41 +2044,72 @@ async fn direct_image_task(
             "the request body must be an image".to_string(),
         ));
     }
-    // Named by the image type: some adapters pick the decoder by extension.
-    let extension = match body.as_ref() {
-        [0x89, b'P', b'N', b'G', ..] => "png",
-        [0xff, 0xd8, 0xff, ..] => "jpg",
-        [b'B', b'M', ..] => "bmp",
-        _ => {
-            return Err(InfraError::BadRequest(
-                "the request body must be a PNG, JPEG or BMP image".to_string(),
-            ));
-        }
-    };
-    let dir = state.data_dir.join("tmp").join("direct-images");
-    let path = dir.join(format!("{}.{extension}", Uuid::new_v4()));
+    let extension = image_extension(body, false).ok_or_else(|| {
+        InfraError::BadRequest("the request body must be a PNG, JPEG or BMP image".to_string())
+    })?;
+    let file = write_temp_image(state, body.clone(), extension).await?;
     let task = InferenceTask::new(
         kind,
         query.get("model").cloned(),
-        input(FileRef::local(&path)),
+        input(FileRef::local(&file.0)),
     );
-    let body = body.clone();
+    state.forward_to_worker_as(task, true).await
+}
+
+/// The extension of an encoded image by its signature (WebP and GIF only
+/// when `more`): some adapters pick the decoder by extension.
+fn image_extension(bytes: &[u8], more: bool) -> Option<&'static str> {
+    match bytes {
+        [0x89, b'P', b'N', b'G', ..] => Some("png"),
+        [0xff, 0xd8, 0xff, ..] => Some("jpg"),
+        [b'B', b'M', ..] => Some("bmp"),
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] if more => Some("webp"),
+        [b'G', b'I', b'F', b'8', ..] if more => Some("gif"),
+        _ => None,
+    }
+}
+
+/// Writes `bytes` to a temporary file in the data directory (which the
+/// worker sees too); the file goes when the returned guard is dropped,
+/// however the request ends (an answer, an error, the client gone, even
+/// mid-write).
+async fn write_temp_image(
+    state: &ControllerState,
+    bytes: Bytes,
+    extension: &str,
+) -> Result<RemoveOnDrop> {
+    let dir = state.data_dir.join("tmp").join("direct-images");
+    let path = dir.join(format!("{}.{extension}", Uuid::new_v4()));
     let write_path = path.clone();
-    // The guard comes with the written file, so it is removed however this
-    // ends (an answer, an error, the client gone, even mid-write).
-    let _file = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         fs::create_dir_all(&dir)?;
         let file = RemoveOnDrop(write_path);
-        fs::write(&file.0, &body)?;
+        fs::write(&file.0, &bytes)?;
         Ok::<_, std::io::Error>(file)
     })
     .await
     .map_err(|err| InfraError::Runtime(format!("write the image: {err}")))?
     .map_err(|source| InfraError::Io {
-        path: Some(path.clone()),
+        path: Some(path),
         source,
-    })?;
-    state.forward_to_worker_as(task, true).await
+    })
+}
+
+/// The input of a one-image task kind.
+fn image_task_input(kind: local_core::TaskKind, image: FileRef) -> Result<InferenceInput> {
+    use local_core::TaskKind;
+    Ok(match kind {
+        TaskKind::ObjectDetect => InferenceInput::ObjectDetect { image },
+        TaskKind::OcrRecognize => InferenceInput::OcrRecognize { image },
+        TaskKind::OcrLines => InferenceInput::OcrLines { image },
+        TaskKind::ImageNsfw => InferenceInput::ImageNsfw { image },
+        TaskKind::DepthEstimate => InferenceInput::DepthEstimate { image, grid: None },
+        other => {
+            return Err(InfraError::BadRequest(format!(
+                "{other:?} does not take an image alone"
+            )))
+        }
+    })
 }
 
 /// Removes its file when dropped.
@@ -2454,6 +2496,32 @@ impl OpenAiApi for ControllerState {
         task: InferenceTask,
     ) -> Result<tokio::sync::mpsc::Receiver<InferenceEvent>> {
         self.forward_to_worker_stream(task).await
+    }
+
+    async fn dispatch_direct(&self, task: InferenceTask) -> Result<InferenceOutput> {
+        self.forward_to_worker_as(task, true).await
+    }
+
+    async fn dispatch_image_tasks(
+        &self,
+        image: Vec<u8>,
+        tasks: Vec<(local_core::TaskKind, Option<String>)>,
+    ) -> Result<Vec<Result<InferenceOutput>>> {
+        let extension = image_extension(&image, true).ok_or_else(|| {
+            InfraError::BadRequest("an image must be PNG, JPEG, BMP, WebP or GIF".to_string())
+        })?;
+        let file = write_temp_image(self, Bytes::from(image), extension).await?;
+        let runs = tasks.into_iter().map(|(kind, model)| {
+            let path = file.0.clone();
+            async move {
+                let input = image_task_input(kind, FileRef::local(path))?;
+                self.forward_to_worker_as(InferenceTask::new(kind, model, input), true)
+                    .await
+            }
+        });
+        let outputs = futures_util::future::join_all(runs).await;
+        drop(file);
+        Ok(outputs)
     }
 }
 

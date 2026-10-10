@@ -7,7 +7,7 @@ publish.workspace = true
 [features]
 # One feature per model category (see `ModelCategory`); a worker built without
 # one does not offer its models.
-default = ["asr", "tts", "chat", "embedding", "rerank", "detect", "ocr"]
+default = ["asr", "tts", "chat", "embedding", "rerank", "detect", "ocr", "moderation"]
 asr = ["dep:local-adapter-sensevoice-asr"]
 tts = ["dep:local-adapter-index-tts", "dep:local-adapter-index-tts2", "dep:local-adapter-qwen3-tts"]
 chat = ["dep:local-adapter-qwen3-chat"]
@@ -15,6 +15,7 @@ embedding = ["dep:local-adapter-e5-embedding"]
 rerank = ["dep:local-adapter-mmarco-reranker"]
 detect = ["dep:local-adapter-yolo", "dep:local-adapter-depth-anything-v2"]
 ocr = ["dep:local-adapter-unlimited-ocr", "dep:local-adapter-ppocrv5-mobile"]
+moderation = ["dep:local-adapter-qwen3guard", "dep:local-adapter-nsfw-vit"]
 cuda = [
     "local-adapter-e5-embedding?/cuda",
     "local-adapter-index-tts?/cuda",
@@ -27,6 +28,8 @@ cuda = [
     "local-adapter-ppocrv5-mobile?/cuda",
     "local-adapter-yolo?/cuda",
     "local-adapter-depth-anything-v2?/cuda",
+    "local-adapter-qwen3guard?/cuda",
+    "local-adapter-nsfw-vit?/cuda",
 ]
 directml = [
     "local-adapter-e5-embedding?/directml",
@@ -40,6 +43,8 @@ directml = [
     "local-adapter-ppocrv5-mobile?/directml",
     "local-adapter-yolo?/directml",
     "local-adapter-depth-anything-v2?/directml",
+    "local-adapter-qwen3guard?/directml",
+    "local-adapter-nsfw-vit?/directml",
 ]
 tensorrt = [
     "local-adapter-e5-embedding?/tensorrt",
@@ -53,6 +58,8 @@ tensorrt = [
     "local-adapter-ppocrv5-mobile?/tensorrt",
     "local-adapter-yolo?/tensorrt",
     "local-adapter-depth-anything-v2?/tensorrt",
+    "local-adapter-qwen3guard?/tensorrt",
+    "local-adapter-nsfw-vit?/tensorrt",
 ]
 
 [dependencies]
@@ -67,6 +74,8 @@ local-adapter-unlimited-ocr = { workspace = true, optional = true }
 local-adapter-ppocrv5-mobile = { workspace = true, optional = true }
 local-adapter-yolo = { workspace = true, optional = true }
 local-adapter-depth-anything-v2 = { workspace = true, optional = true }
+local-adapter-qwen3guard = { workspace = true, optional = true }
+local-adapter-nsfw-vit = { workspace = true, optional = true }
 local-backend-ort.workspace = true
 local-core.workspace = true
 local-error.workspace = true

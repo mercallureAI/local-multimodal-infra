@@ -1,0 +1,42 @@
+id: qwen3guard-gen-0.6b-onnx
+name: Qwen3Guard-Gen-0.6B FP16 ONNX
+enabled: true
+task_kinds:
+  - text.moderate
+adapter: qwen3_guard
+backend: ort
+artifacts:
+  # Local export (path omitted: <model_dir>/qwen3guard-gen-0.6b-onnx):
+  #   hf download Qwen/Qwen3Guard-Gen-0.6B --revision fada3b2f655b89601929198343c94cd2f64d93cc --local-dir <src>
+  #   python -m onnxruntime_genai.models.builder -i <src> -o <dir> \
+  #     -p fp16 -e cuda --extra_options prune_lm_head=true
+  # The directory (~1.2 GB) holds model.onnx(.data), genai_config.json,
+  # tokenizer.json and chat_template.jinja (the moderation prompt). The most
+  # accurate export, ~2.7 GB of VRAM with its cache; the default text model
+  # is the INT4 one (qwen3guard-int4.yaml).
+  - type: local
+runtime:
+  provider_order: [cuda, cpu]
+  max_concurrency: 1
+  idle_ttl_sec: 600
+resources:
+  min_ram_mb: 2048
+  min_vram_mb: 2048
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  runtime: onnxruntime
+  model_family: qwen3
+  task: text-moderation
+  precision: fp16
+  source: Qwen/Qwen3Guard-Gen-0.6B
+  huggingface_revision: fada3b2f655b89601929198343c94cd2f64d93cc
+  # Picked only when a request names it (`model`).
+  auto_select: false
+  # KV cache capacity in tokens, allocated once on load (~112 KB/token).
+  max_context: 4096
+  # Longer texts are judged in windows of this many tokens (64 shared
+  # between neighbours), each with the ~300-token moderation prompt.
+  window_tokens: 2048

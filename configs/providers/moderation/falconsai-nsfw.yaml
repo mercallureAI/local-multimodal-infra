@@ -1,0 +1,33 @@
+id: falconsai-nsfw-image-detection-onnx
+name: Falconsai NSFW image detection (ViT-base 224) ONNX
+enabled: true
+task_kinds:
+  - image.nsfw
+adapter: nsfw_vit
+backend: ort
+artifacts:
+  # Local export (path omitted: <model_dir>/falconsai-nsfw-image-detection-onnx)
+  # of Falconsai/nsfw_image_detection at revision
+  # 96cb0d0342c7afb80cab76ecc58b265fa44da256 (Apache-2.0):
+  #   python -m scripts.local.nsfw_export falconsai --output-dir <dir>
+  # normal / nsfw; ~4 ms per image on an RTX 4090. Fewer flags on everyday
+  # photos than Freepik's model, but it misses suggestive images.
+  - type: local
+runtime:
+  provider_order: [cuda, cpu]
+  max_concurrency: 2
+  idle_ttl_sec: 600
+resources:
+  min_ram_mb: 1024
+  min_vram_mb: 0
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  runtime: onnxruntime
+  task: nsfw-image-classification
+  source: Falconsai/nsfw_image_detection
+  huggingface_revision: 96cb0d0342c7afb80cab76ecc58b265fa44da256
+  # Picked only when a request names it (`nsfw_model`).
+  auto_select: false

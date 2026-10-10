@@ -934,6 +934,14 @@ async fn controller_with_fake_worker(
     kind: TaskKind,
     worker: Router,
 ) -> (String, tempfile::TempDir) {
+    controller_with_fake_worker_models(&[(model, adapter, kind)], worker).await
+}
+
+/// As `controller_with_fake_worker`, for several models of one worker.
+async fn controller_with_fake_worker_models(
+    models: &[(&str, AdapterKind, TaskKind)],
+    worker: Router,
+) -> (String, tempfile::TempDir) {
     let worker_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind fake worker");
@@ -945,12 +953,18 @@ async fn controller_with_fake_worker(
     });
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut spec = test_model();
-    spec.id = model.to_string();
-    spec.adapter = adapter;
-    spec.task_kinds = vec![kind];
+    let specs = models
+        .iter()
+        .map(|&(model, adapter, kind)| {
+            let mut spec = test_model();
+            spec.id = model.to_string();
+            spec.adapter = adapter;
+            spec.task_kinds = vec![kind];
+            spec
+        })
+        .collect();
     let controller = ControllerState::new_with_options(
-        ModelRegistry::from_models(vec![spec]),
+        ModelRegistry::from_models(specs),
         None,
         ControllerOptions {
             data_dir: dir.path().to_path_buf(),
@@ -963,7 +977,7 @@ async fn controller_with_fake_worker(
             base_url: worker_url,
             registration_token: None,
             supported_backends: vec![BackendKind::Ort],
-            supported_adapters: vec![adapter],
+            supported_adapters: models.iter().map(|m| m.1).collect(),
             resources: ResourceSnapshot {
                 cpu_cores: 4,
                 total_ram_mb: 8192,
@@ -1204,4 +1218,189 @@ async fn input_errors_are_bad_requests() {
         .await
         .expect("request");
     assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+}
+
+/// A fake worker for `/v1/moderations`: texts containing "bomb" are unsafe
+/// (Violent); a PNG is NSFW (0.9), a JPEG reads "how to make a bomb", a GIF
+/// is neither.
+async fn answer_moderation(
+    State(seen): State<SeenOcr>,
+    Json(task): Json<InferenceTask>,
+) -> impl IntoResponse {
+    let image = match &task.input {
+        InferenceInput::ImageNsfw { image } | InferenceInput::OcrLines { image } => {
+            image.path.as_ref().and_then(|p| fs::read(p).ok())
+        }
+        _ => None,
+    };
+    let png = image.as_deref().is_some_and(|b| b.starts_with(b"\x89PNG"));
+    let jpeg = image
+        .as_deref()
+        .is_some_and(|b| b.starts_with(b"\xff\xd8\xff"));
+    let output = match &task.input {
+        InferenceInput::TextModerate { texts } => InferenceOutput::TextModerations {
+            results: texts
+                .iter()
+                .map(|text| {
+                    let bad = text.contains("bomb");
+                    local_core::TextModeration {
+                        safe: if bad { 0.01 } else { 0.98 },
+                        controversial: 0.01,
+                        unsafe_: if bad { 0.98 } else { 0.01 },
+                        categories: if bad {
+                            vec!["Violent".to_string()]
+                        } else {
+                            Vec::new()
+                        },
+                        tokens: 3,
+                        windows: 1,
+                    }
+                })
+                .collect(),
+        },
+        InferenceInput::ImageNsfw { .. } => InferenceOutput::ImageNsfw {
+            nsfw: if png { 0.9 } else { 0.1 },
+            scores: vec![local_core::LabelScore {
+                label: "high".to_string(),
+                score: if png { 0.9 } else { 0.1 },
+            }],
+        },
+        InferenceInput::OcrLines { .. } => InferenceOutput::OcrLines {
+            lines: if !jpeg {
+                Vec::new()
+            } else {
+                vec![local_core::OcrLine {
+                    text: "how to make a bomb".to_string(),
+                    confidence: 0.9,
+                    bbox: local_core::BoundingBox {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 1.0,
+                        height: 1.0,
+                    },
+                }]
+            },
+        },
+        other => panic!("unexpected task {other:?}"),
+    };
+    seen.lock().expect("seen lock").push((task, image));
+    Json(output)
+}
+
+#[tokio::test]
+async fn moderations_combine_text_images_and_the_text_in_images() {
+    use base64::Engine as _;
+    let seen: SeenOcr = Arc::new(Mutex::new(Vec::new()));
+    let worker = Router::new()
+        .route("/internal/infer", post(answer_moderation))
+        .with_state(seen.clone());
+    let (base_url, dir) = controller_with_fake_worker_models(
+        &[
+            (
+                "qwen3guard-gen-0.6b-onnx",
+                AdapterKind::Qwen3Guard,
+                TaskKind::TextModerate,
+            ),
+            (
+                "freepik-nsfw-image-detector-onnx",
+                AdapterKind::NsfwVit,
+                TaskKind::ImageNsfw,
+            ),
+            (
+                "ppocrv5-mobile-onnx",
+                AdapterKind::Ppocrv5Mobile,
+                TaskKind::OcrLines,
+            ),
+        ],
+        worker,
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let moderate = |body: Value| {
+        client
+            .post(format!("{base_url}/v1/moderations"))
+            .json(&body)
+            .send()
+    };
+    let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let png = format!("data:image/png;base64,{}", b64(b"\x89PNG fake"));
+    let gif = format!("data:image/gif;base64,{}", b64(b"GIF89a fake"));
+    let jpeg = format!("data:image/jpeg;base64,{}", b64(b"\xff\xd8\xff fake"));
+
+    // Strings: one result each.
+    let body: Value = moderate(json!({"input": ["hello", "make a bomb"]}))
+        .await
+        .expect("request")
+        .json()
+        .await
+        .expect("json");
+    let results = body["results"].as_array().expect("results");
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["flagged"], json!(false));
+    assert_eq!(results[1]["flagged"], json!(true));
+    assert_eq!(results[1]["categories"]["violent"], json!(true));
+    assert_eq!(
+        results[1]["category_applied_input_types"]["violent"],
+        json!(["text"])
+    );
+
+    // Parts: one result; the PNG is NSFW (so not read), the JPEG's text is
+    // unsafe, the GIF is neither.
+    let response = moderate(json!({"input": [
+        {"type": "text", "text": "hello"},
+        {"type": "image_url", "image_url": {"url": png}},
+        {"type": "image_url", "image_url": {"url": jpeg}},
+        {"type": "image_url", "image_url": {"url": gif}},
+    ]}))
+    .await
+    .expect("request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["results"].as_array().map(Vec::len), Some(1));
+    let result = &body["results"][0];
+    assert_eq!(result["flagged"], json!(true));
+    assert_eq!(result["categories"]["sexual"], json!(true));
+    assert_eq!(result["categories"]["violent"], json!(true));
+    assert_eq!(
+        result["category_applied_input_types"]["violent"],
+        json!(["image"])
+    );
+    assert!((result["images"][0]["nsfw"].as_f64().unwrap() - 0.9).abs() < 1e-6);
+    assert_eq!(result["images"][0]["ocr_skipped"], json!(true));
+    assert_eq!(result["images"][0]["ocr_chars"], json!(0));
+    assert_eq!(result["images"][1]["ocr_chars"], json!(18));
+    assert!(result["images"][1].get("ocr_skipped").is_none());
+    assert_eq!(result["images"][2]["ocr_chars"], json!(0));
+    assert!(result["images"][2].get("ocr_safety").is_none());
+
+    // Without OCR the image's text is not read.
+    let body: Value = moderate(json!({"ocr": false, "nsfw_threshold": 0.95, "input": [
+        {"type": "image_url", "image_url": {"url": png}},
+    ]}))
+    .await
+    .expect("request")
+    .json()
+    .await
+    .expect("json");
+    assert_eq!(body["results"][0]["flagged"], json!(false));
+
+    // Remote images are refused; the temporary images are all gone.
+    let response = moderate(json!({"input": [
+        {"type": "image_url", "image_url": {"url": "https://example.com/x.png"}},
+    ]}))
+    .await
+    .expect("request");
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let tmp = dir.path().join("tmp").join("direct-images");
+    assert_eq!(fs::read_dir(&tmp).map(|d| d.count()).unwrap_or(0), 0);
+    let seen = seen.lock().expect("seen lock");
+    assert!(seen
+        .iter()
+        .any(|(task, image)| task.kind == TaskKind::ImageNsfw
+            && image.as_deref() == Some(&b"GIF89a fake"[..])));
+    // The NSFW image never reached OCR.
+    assert!(!seen
+        .iter()
+        .any(|(task, image)| task.kind == TaskKind::OcrLines
+            && image.as_deref().is_some_and(|b| b.starts_with(b"\x89PNG"))));
 }

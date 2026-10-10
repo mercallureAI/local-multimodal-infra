@@ -1,0 +1,20 @@
+[package]
+name = "local-adapter-qwen3guard"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+cuda = ["local-adapter-qwen3-chat/cuda"]
+directml = ["local-adapter-qwen3-chat/directml"]
+tensorrt = ["local-adapter-qwen3-chat/tensorrt"]
+
+[dependencies]
+local-adapter-qwen3-chat.workspace = true
+local-backend-ort.workspace = true
+local-core.workspace = true
+local-error.workspace = true
+serde_json.workspace = true
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+tracing.workspace = true

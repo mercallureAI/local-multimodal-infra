@@ -7,7 +7,8 @@
         feature = "embedding",
         feature = "rerank",
         feature = "detect",
-        feature = "ocr"
+        feature = "ocr",
+        feature = "moderation"
     )),
     allow(unused_imports, unused_variables, unreachable_code)
 )]
@@ -22,12 +23,16 @@ use local_adapter_index_tts::IndexTtsAdapter;
 use local_adapter_index_tts2::IndexTts2Adapter;
 #[cfg(feature = "rerank")]
 use local_adapter_mmarco_reranker::MmarcoRerankerAdapter;
+#[cfg(feature = "moderation")]
+use local_adapter_nsfw_vit::NsfwVitAdapter;
 #[cfg(feature = "ocr")]
 use local_adapter_ppocrv5_mobile::PpocrAdapter;
 #[cfg(feature = "chat")]
 use local_adapter_qwen3_chat::Qwen3ChatAdapter;
 #[cfg(feature = "tts")]
 use local_adapter_qwen3_tts::Qwen3TtsAdapter;
+#[cfg(feature = "moderation")]
+use local_adapter_qwen3guard::Qwen3GuardAdapter;
 #[cfg(feature = "asr")]
 use local_adapter_sensevoice_asr::SenseVoiceAsrAdapter;
 #[cfg(feature = "ocr")]
@@ -72,6 +77,7 @@ pub fn compiled_adapters() -> Vec<AdapterKind> {
             AdapterKind::MmarcoReranker => cfg!(feature = "rerank"),
             AdapterKind::Qwen3Chat => cfg!(feature = "chat"),
             AdapterKind::UnlimitedOcr | AdapterKind::Ppocrv5Mobile => cfg!(feature = "ocr"),
+            AdapterKind::Qwen3Guard | AdapterKind::NsfwVit => cfg!(feature = "moderation"),
             AdapterKind::VoiceCascade => false,
         })
         .collect()
@@ -641,6 +647,12 @@ impl LoadedEntry {
             }
             #[cfg(feature = "ocr")]
             AdapterKind::Ppocrv5Mobile => LoadedModel::Ppocrv5Mobile(PpocrAdapter::load(&spec)?),
+            #[cfg(feature = "moderation")]
+            AdapterKind::Qwen3Guard => {
+                LoadedModel::Qwen3Guard(Box::new(Qwen3GuardAdapter::load(&spec)?))
+            }
+            #[cfg(feature = "moderation")]
+            AdapterKind::NsfwVit => LoadedModel::NsfwVit(NsfwVitAdapter::load(&spec)?),
             AdapterKind::VoiceCascade => {
                 return Err(InfraError::Unsupported(format!(
                     "model `{}` is a realtime voice pipeline, served over /v1/realtime",
@@ -778,6 +790,11 @@ fn validated_runtime_providers_for_model(model_id: &str) -> Option<&'static [&'s
         "ppocrv5-mobile-onnx" => Some(&["cuda", "cpu"]),
         // One fixed-size ViT-S session.
         "depth-anything-v2-metric-indoor-small-onnx" => Some(&["cuda", "cpu"]),
+        // Qwen3 decoder (shared KV binding) and single-session classifiers.
+        "qwen3guard-gen-0.6b-onnx" => Some(&["cuda", "cpu"]),
+        "freepik-nsfw-image-detector-onnx" | "falconsai-nsfw-image-detection-onnx" => {
+            Some(&["cuda", "cpu"])
+        }
         "voice-cascade" => Some(&["cpu"]),
         _ => None,
     }
@@ -807,6 +824,10 @@ enum LoadedModel {
     UnlimitedOcr(Box<UnlimitedOcrAdapter>),
     #[cfg(feature = "ocr")]
     Ppocrv5Mobile(PpocrAdapter),
+    #[cfg(feature = "moderation")]
+    Qwen3Guard(Box<Qwen3GuardAdapter>),
+    #[cfg(feature = "moderation")]
+    NsfwVit(NsfwVitAdapter),
     #[cfg(test)]
     Test {
         cache_releases: Arc<std::sync::atomic::AtomicUsize>,
@@ -899,6 +920,18 @@ impl LoadedModel {
                 TaskKind::OcrLines,
                 InferenceInput::OcrLines { image },
             ) => adapter.ocr_lines(image),
+            #[cfg(feature = "moderation")]
+            (
+                LoadedModel::Qwen3Guard(adapter),
+                TaskKind::TextModerate,
+                InferenceInput::TextModerate { texts },
+            ) => adapter.moderate(texts),
+            #[cfg(feature = "moderation")]
+            (
+                LoadedModel::NsfwVit(adapter),
+                TaskKind::ImageNsfw,
+                InferenceInput::ImageNsfw { image },
+            ) => adapter.classify_file(image),
             #[cfg(feature = "asr")]
             (
                 LoadedModel::SenseVoiceAsr(adapter),
@@ -1568,6 +1601,8 @@ mod tests {
             AdapterKind::UnlimitedOcr => vec![TaskKind::OcrRecognize],
             AdapterKind::Ppocrv5Mobile => vec![TaskKind::OcrLines],
             AdapterKind::DepthAnythingV2 => vec![TaskKind::DepthEstimate],
+            AdapterKind::Qwen3Guard => vec![TaskKind::TextModerate],
+            AdapterKind::NsfwVit => vec![TaskKind::ImageNsfw],
             AdapterKind::VoiceCascade => vec![TaskKind::VoiceRealtime],
         };
         ModelSpec {

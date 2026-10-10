@@ -52,6 +52,36 @@ pub struct CudaMemoryOptions {
     pub conv_max_workspace: bool,
 }
 
+/// Whether a model spec asks for its CUDA arenas to give a run's memory back
+/// afterwards (`cuda_release_memory_after_run`; needs
+/// `cuda_arena_same_as_requested`): for models kept small at some latency.
+pub fn release_memory_after_run(
+    metadata: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> bool {
+    metadata
+        .get("cuda_release_memory_after_run")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+impl CudaMemoryOptions {
+    /// From a model spec's metadata, for models whose memory must stay small:
+    /// `cuda_arena_same_as_requested` (default false) and
+    /// `cuda_conv_max_workspace` (default true, ORT's). `None` when neither is
+    /// set, keeping ORT's defaults.
+    pub fn from_metadata(
+        metadata: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Option<Self> {
+        let flag = |key: &str| metadata.get(key).and_then(serde_json::Value::as_bool);
+        let same = flag("cuda_arena_same_as_requested");
+        let workspace = flag("cuda_conv_max_workspace");
+        (same.is_some() || workspace.is_some()).then(|| Self {
+            arena_same_as_requested: same.unwrap_or(false),
+            conv_max_workspace: workspace.unwrap_or(true),
+        })
+    }
+}
+
 /// CUDA execution provider options for the sessions a backend loads.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CudaSessionOptions {
@@ -478,6 +508,18 @@ impl OrtBackend {
     pub fn with_cuda_memory_options(mut self, options: CudaMemoryOptions) -> Self {
         self.cuda_memory = Some(options);
         self
+    }
+
+    /// [`Self::with_cuda_memory_options`] from a model spec's metadata (see
+    /// [`CudaMemoryOptions::from_metadata`]); unchanged when it sets none.
+    pub fn with_cuda_memory_metadata(
+        self,
+        metadata: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Self {
+        match CudaMemoryOptions::from_metadata(metadata) {
+            Some(options) => self.with_cuda_memory_options(options),
+            None => self,
+        }
     }
 
     /// CUDA execution provider options for every session this backend loads
@@ -1713,5 +1755,38 @@ mod tests {
             value >>= 7;
         }
         bytes.push(value as u8);
+    }
+}
+
+#[cfg(test)]
+mod cuda_memory_metadata_tests {
+    use super::CudaMemoryOptions;
+
+    #[test]
+    fn metadata_opts_into_memory_options() {
+        let mut metadata = std::collections::BTreeMap::new();
+        assert_eq!(CudaMemoryOptions::from_metadata(&metadata), None);
+        metadata.insert(
+            "cuda_arena_same_as_requested".to_string(),
+            serde_json::json!(true),
+        );
+        assert_eq!(
+            CudaMemoryOptions::from_metadata(&metadata),
+            Some(CudaMemoryOptions {
+                arena_same_as_requested: true,
+                conv_max_workspace: true,
+            })
+        );
+        metadata.insert(
+            "cuda_conv_max_workspace".to_string(),
+            serde_json::json!(false),
+        );
+        assert_eq!(
+            CudaMemoryOptions::from_metadata(&metadata),
+            Some(CudaMemoryOptions {
+                arena_same_as_requested: true,
+                conv_max_workspace: false,
+            })
+        );
     }
 }

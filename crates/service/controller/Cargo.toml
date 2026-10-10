@@ -30,4 +30,5 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+base64 = "0.22"
 tempfile = "3"

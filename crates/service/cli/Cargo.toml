@@ -7,7 +7,7 @@ publish.workspace = true
 [features]
 # Model categories the worker is built with (all by default). An audio-only
 # worker: `--no-default-features --features audio`.
-default = ["asr", "tts", "chat", "embedding", "rerank", "detect", "ocr", "realtime"]
+default = ["asr", "tts", "chat", "embedding", "rerank", "detect", "ocr", "moderation", "realtime"]
 audio = ["asr", "tts", "realtime"]
 asr = ["local-worker/asr"]
 tts = ["local-worker/tts"]
@@ -16,6 +16,7 @@ embedding = ["local-worker/embedding"]
 rerank = ["local-worker/rerank"]
 detect = ["local-worker/detect"]
 ocr = ["local-worker/ocr"]
+moderation = ["local-worker/moderation"]
 realtime = ["local-worker/realtime"]
 cuda = ["local-runtime/cuda"]
 directml = ["local-runtime/directml"]

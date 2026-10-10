@@ -23,7 +23,8 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 half = { version = "2.1", default-features = false }
 hound = "3.5"
 hmac = "0.12"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp"] }
+# WebP and GIF (first frame) for images sent to /v1/moderations.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "webp", "gif"] }
 ndarray = "0.15"
 # rc.13 bug (fixed upstream, not yet released): `MemoryInfo::to_owned` always
 # returns a CPU MemoryInfo, so `TensorRefMut::from_raw` over CUDA memory makes
@@ -83,5 +84,7 @@ local-adapter-yolo = { path = "crates/adapters/detect/yolo" }
 local-adapter-depth-anything-v2 = { path = "crates/adapters/detect/depth-anything-v2" }
 local-adapter-unlimited-ocr = { path = "crates/adapters/ocr/unlimited-ocr" }
 local-adapter-ppocrv5-mobile = { path = "crates/adapters/ocr/ppocrv5-mobile" }
+local-adapter-qwen3guard = { path = "crates/adapters/moderation/qwen3guard" }
+local-adapter-nsfw-vit = { path = "crates/adapters/moderation/nsfw-vit" }
 local-adapter-silero-vad = { path = "crates/adapters/vad/silero" }
 local-adapter-kws-zipformer = { path = "crates/adapters/kws/zipformer" }

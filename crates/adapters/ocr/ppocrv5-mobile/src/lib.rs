@@ -55,6 +55,14 @@ pub struct PpocrConfig {
     pub rec_batch: usize,
     pub rec_width_step: u32,
     pub rec_max_width: u32,
+    /// Most padded columns (lines x padded width) in one recognition batch:
+    /// bounds the recogniser's activations, which grow with both (a dense
+    /// screenshot's long lines would take ~1 GB more at 32 x 1600). `None`:
+    /// batches of `rec_batch` lines whatever their width.
+    pub rec_batch_columns: Option<u32>,
+    /// Give each session's run memory back after an image
+    /// (`cuda_release_memory_after_run`).
+    pub release_memory: bool,
 }
 
 impl Default for PpocrConfig {
@@ -68,6 +76,8 @@ impl Default for PpocrConfig {
             rec_batch: 8,
             rec_width_step: 80,
             rec_max_width: 1600,
+            rec_batch_columns: None,
+            release_memory: false,
         }
     }
 }
@@ -100,6 +110,10 @@ impl PpocrConfig {
         if let Some(v) = f("rec_max_width") {
             config.rec_max_width = (v as u32).max(REC_HEIGHT);
         }
+        if let Some(v) = f("rec_batch_columns") {
+            config.rec_batch_columns = Some((v as u32).max(config.rec_max_width));
+        }
+        config.release_memory = local_backend_ort::release_memory_after_run(metadata);
         config
     }
 }
@@ -134,7 +148,8 @@ impl PpocrAdapter {
         .with_cuda_session_options(CudaSessionOptions {
             conv_algo_heuristic: true,
             ..CudaSessionOptions::default()
-        });
+        })
+        .with_cuda_memory_metadata(&spec.metadata);
         let det = backend.load_session(&det_path)?;
         let rec = backend.load_session(&rec_path)?;
         // The recogniser and the dictionary must belong together.
@@ -191,7 +206,12 @@ impl PpocrAdapter {
             shape: vec![1, 3, det_h as usize, det_w as usize],
             data: OrtTensorData::F32(det_tensor(&resized)),
         };
-        let output = first_output(self.det.run_tensors(&[input])?)?;
+        let output = if self.config.release_memory {
+            self.det.run_tensors_releasing_memory(&[input])?
+        } else {
+            self.det.run_tensors(&[input])?
+        };
+        let output = first_output(output)?;
         let expected = (det_w * det_h) as usize;
         if output.data.len() != expected {
             return Err(InfraError::Backend(format!(
@@ -226,17 +246,27 @@ impl PpocrAdapter {
         crops.sort_by_key(|(_, crop)| crop.width());
         let classes = self.dict.len() + 2;
         let mut lines: Vec<Option<OcrLine>> = vec![None; boxes.len()];
-        for batch in crops.chunks(self.config.rec_batch) {
-            // `rec_width` never exceeds `rec_max_width`, so neither does this.
-            let widest = batch.last().map_or(1, |(_, crop)| crop.width());
-            let padded = (widest.div_ceil(self.config.rec_width_step) * self.config.rec_width_step)
-                .min(self.config.rec_max_width);
+        let widths: Vec<u32> = crops.iter().map(|(_, crop)| crop.width()).collect();
+        let mut start = 0;
+        let batches = rec_batches(&widths, &self.config);
+        let last = batches.len().saturating_sub(1);
+        for (b, len) in batches.into_iter().enumerate() {
+            let batch = &crops[start..start + len];
+            start += len;
+            let padded = self
+                .config
+                .padded_width(batch.last().map_or(1, |(_, c)| c.width()));
             let input = OrtTensorInput {
                 name: input_name(&self.rec, "x"),
                 shape: vec![batch.len(), 3, REC_HEIGHT as usize, padded as usize],
                 data: OrtTensorData::F32(rec_tensor(batch.iter().map(|(_, c)| c), padded)),
             };
-            let output = first_output(self.rec.run_tensors(&[input])?)?;
+            let output = if self.config.release_memory && b == last {
+                self.rec.run_tensors_releasing_memory(&[input])?
+            } else {
+                self.rec.run_tensors(&[input])?
+            };
+            let output = first_output(output)?;
             let [n, steps, out_classes] = output.shape[..] else {
                 return Err(InfraError::Backend(format!(
                     "recogniser output shape {:?} is not [batch, steps, classes]",
@@ -271,6 +301,38 @@ impl PpocrAdapter {
         }
         Ok(lines.into_iter().flatten().collect())
     }
+}
+
+impl PpocrConfig {
+    /// A batch's input width for its widest crop (`rec_width` never exceeds
+    /// `rec_max_width`, so neither does this).
+    fn padded_width(&self, widest: u32) -> u32 {
+        (widest.div_ceil(self.rec_width_step) * self.rec_width_step).min(self.rec_max_width)
+    }
+}
+
+/// Batch sizes over crops sorted narrowest first: up to `rec_batch` lines,
+/// and with `rec_batch_columns`, no more lines than keep lines x padded
+/// width within it (one line always fits).
+pub fn rec_batches(widths: &[u32], config: &PpocrConfig) -> Vec<usize> {
+    let mut sizes = Vec::new();
+    let mut start = 0;
+    while start < widths.len() {
+        let mut len = 1;
+        while start + len < widths.len() && len < config.rec_batch {
+            let padded = config.padded_width(widths[start + len]);
+            if config
+                .rec_batch_columns
+                .is_some_and(|budget| (len as u32 + 1) * padded > budget)
+            {
+                break;
+            }
+            len += 1;
+        }
+        sizes.push(len);
+        start += len;
+    }
+    sizes
 }
 
 /// A text box in image pixels (`x1`/`y1` exclusive).

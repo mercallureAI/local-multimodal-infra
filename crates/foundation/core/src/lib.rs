@@ -27,13 +27,18 @@ pub enum AdapterKind {
     Ppocrv5Mobile,
     /// Depth Anything V2 metric depth (metres per pixel).
     DepthAnythingV2,
+    /// Qwen3Guard-Gen safety verdicts (safe / controversial / unsafe and
+    /// categories) of text.
+    Qwen3Guard,
+    /// ViT-family NSFW image classifiers exported with their label metadata.
+    NsfwVit,
     /// Pseudo-realtime voice (VAD, ASR, chat and TTS models of the worker),
     /// served over `/v1/realtime` only.
     VoiceCascade,
 }
 
 impl AdapterKind {
-    pub const ALL: [AdapterKind; 12] = [
+    pub const ALL: [AdapterKind; 14] = [
         AdapterKind::Yolo,
         AdapterKind::SenseVoiceAsr,
         AdapterKind::IndexTts,
@@ -45,6 +50,8 @@ impl AdapterKind {
         AdapterKind::UnlimitedOcr,
         AdapterKind::Ppocrv5Mobile,
         AdapterKind::DepthAnythingV2,
+        AdapterKind::Qwen3Guard,
+        AdapterKind::NsfwVit,
         AdapterKind::VoiceCascade,
     ];
 
@@ -60,6 +67,7 @@ impl AdapterKind {
             AdapterKind::MmarcoReranker => ModelCategory::Rerank,
             AdapterKind::Qwen3Chat => ModelCategory::Chat,
             AdapterKind::UnlimitedOcr | AdapterKind::Ppocrv5Mobile => ModelCategory::Ocr,
+            AdapterKind::Qwen3Guard | AdapterKind::NsfwVit => ModelCategory::Moderation,
             AdapterKind::VoiceCascade => ModelCategory::Realtime,
         }
     }
@@ -77,12 +85,14 @@ pub enum ModelCategory {
     Rerank,
     Detect,
     Ocr,
+    /// Content moderation (text safety, NSFW images).
+    Moderation,
     /// Realtime voice pipelines (their VAD included).
     Realtime,
 }
 
 impl ModelCategory {
-    pub const ALL: [ModelCategory; 8] = [
+    pub const ALL: [ModelCategory; 9] = [
         ModelCategory::Asr,
         ModelCategory::Tts,
         ModelCategory::Chat,
@@ -90,6 +100,7 @@ impl ModelCategory {
         ModelCategory::Rerank,
         ModelCategory::Detect,
         ModelCategory::Ocr,
+        ModelCategory::Moderation,
         ModelCategory::Realtime,
     ];
 
@@ -103,6 +114,7 @@ impl ModelCategory {
             ModelCategory::Rerank => "rerank",
             ModelCategory::Detect => "detect",
             ModelCategory::Ocr => "ocr",
+            ModelCategory::Moderation => "moderation",
             ModelCategory::Realtime => "realtime",
         }
     }
@@ -136,6 +148,12 @@ pub enum TaskKind {
     /// Metric depth of an image, pooled to a grid.
     #[serde(rename = "depth.estimate")]
     DepthEstimate,
+    /// Safety verdicts of texts (one per text).
+    #[serde(rename = "text.moderate")]
+    TextModerate,
+    /// NSFW probability of an image.
+    #[serde(rename = "image.nsfw")]
+    ImageNsfw,
     #[serde(rename = "voice.realtime")]
     VoiceRealtime,
 }
@@ -667,6 +685,12 @@ pub enum InferenceInput {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         grid: Option<DepthGrid>,
     },
+    TextModerate {
+        texts: Vec<String>,
+    },
+    ImageNsfw {
+        image: FileRef,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -722,6 +746,16 @@ pub enum InferenceOutput {
         /// The model's largest depth (metres): farther reads as this.
         max_depth: f32,
         depth: Vec<f32>,
+    },
+    /// One verdict per text, in order.
+    TextModerations {
+        results: Vec<TextModeration>,
+    },
+    ImageNsfw {
+        /// The probability of the classifier's NSFW labels together.
+        nsfw: f32,
+        /// Every label's probability, in the classifier's order.
+        scores: Vec<LabelScore>,
     },
     Accepted {
         job_id: String,
@@ -891,6 +925,31 @@ pub struct DetectedObject {
 pub struct DepthGrid {
     pub cols: u32,
     pub rows: u32,
+}
+
+/// A safety verdict of one text. The three probabilities sum to 1; a text
+/// longer than the model's window is judged window by window and reported by
+/// its least safe window.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TextModeration {
+    pub safe: f32,
+    pub controversial: f32,
+    #[serde(rename = "unsafe")]
+    pub unsafe_: f32,
+    /// The model's categories for the least safe window, when it is not
+    /// judged safe (e.g. `Violent`, `PII`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<String>,
+    /// Tokens of the text (without the model's prompt).
+    pub tokens: usize,
+    /// Windows the text was judged in.
+    pub windows: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LabelScore {
+    pub label: String,
+    pub score: f32,
 }
 
 /// A line of text found in an image, top to bottom then left to right.
