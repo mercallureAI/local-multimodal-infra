@@ -946,6 +946,58 @@ pub struct TextModeration {
     pub windows: usize,
 }
 
+/// A text is flagged when `1 - p(safe)` exceeds this, unless the caller
+/// says otherwise (~84% recall at ~2.8% false positives on ToxicChat).
+pub const DEFAULT_MODERATION_THRESHOLD: f32 = 0.9;
+
+/// Qwen3Guard's categories under the short names callers use; `sexual` also
+/// takes images.
+pub const MODERATION_CATEGORIES: [(&str, &str); 9] = [
+    ("Violent", "violent"),
+    ("Non-violent Illegal Acts", "illegal"),
+    ("Sexual Content or Sexual Acts", "sexual"),
+    ("PII", "pii"),
+    ("Suicide & Self-Harm", "self-harm"),
+    ("Unethical Acts", "unethical"),
+    ("Politically Sensitive Topics", "political"),
+    ("Copyright Violation", "copyright"),
+    ("Jailbreak", "jailbreak"),
+];
+
+/// The short name of a moderation model's category (`Violent`: `violent`).
+pub fn moderation_category(category: &str) -> String {
+    MODERATION_CATEGORIES
+        .iter()
+        .find(|(model, _)| model.eq_ignore_ascii_case(category))
+        .map(|(_, name)| name.to_string())
+        .unwrap_or_else(|| category.to_ascii_lowercase().replace(' ', "-"))
+}
+
+/// The categories (short names) a text judged `safe` (its probability) and
+/// `named` (the model's categories) is flagged for: None when it is not.
+/// Flagged when `1 - safe` exceeds `threshold` and one of its categories is
+/// in `allowed` (None: any); unsafe with no category named is flagged with
+/// none.
+pub fn moderation_flags(
+    safe: f32,
+    named: &[String],
+    threshold: f32,
+    allowed: Option<&[String]>,
+) -> Option<Vec<String>> {
+    if 1.0 - safe <= threshold {
+        return None;
+    }
+    let names: Vec<String> = named.iter().map(|c| moderation_category(c)).collect();
+    if names.is_empty() {
+        return Some(names);
+    }
+    let kept: Vec<String> = names
+        .into_iter()
+        .filter(|n| allowed.is_none_or(|allowed| allowed.iter().any(|a| a == n)))
+        .collect();
+    (!kept.is_empty()).then_some(kept)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LabelScore {
     pub label: String,

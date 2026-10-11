@@ -20,7 +20,8 @@ use crate::{
     history::History,
     prompt,
     protocol::{
-        ClientEvent, ServerEvent, SessionConfig, SessionMode, SpeakerSpan, INPUT_RATE, OUTPUT_RATE,
+        ClientEvent, Moderation, ServerEvent, SessionConfig, SessionMode, SpeakerSpan, INPUT_RATE,
+        OUTPUT_RATE,
     },
     text::{calls_by_name, live_prefix, speakable, takes_floor, ClauseSplitter},
 };
@@ -28,8 +29,9 @@ use base64::Engine;
 use local_adapter_kws_zipformer::KeywordSpotter;
 use local_adapter_silero_vad::{SileroVad, VadEvent, VadIterator, WINDOW};
 use local_core::{
-    AdapterKind, ArtifactKind, ChatMessage, ChatOptions, ChatToolCall, FileRef, InferenceEvent,
-    InferenceInput, InferenceOutput, InferenceTask, ModelSpec, TaskKind, TextPiece,
+    moderation_flags, AdapterKind, ArtifactKind, ChatMessage, ChatOptions, ChatToolCall, FileRef,
+    InferenceEvent, InferenceInput, InferenceOutput, InferenceTask, ModelSpec, TaskKind, TextPiece,
+    DEFAULT_MODERATION_THRESHOLD,
 };
 use local_error::{InfraError, Result};
 use local_runtime::RuntimeManager;
@@ -91,6 +93,17 @@ const SPEAKER_LISTED: usize = 3;
 /// the VAD ended it.
 const SPEAKER_SLACK_SAMPLES: u64 = INPUT_RATE as u64 / 4;
 const SPEAKER_WAIT: Duration = Duration::from_millis(500);
+/// What the client's model gets for an utterance content moderation
+/// withheld that wants a reply (`{reply}`: what to say), or without a reply
+/// set.
+const WITHHELD: &str =
+    "(What was said here was withheld by content moderation. Reply only: \"{reply}\")";
+/// A moderation check longer than this lets its text pass (as a failed one
+/// does): utterances are recognised one after the other, and a stuck check
+/// must not leave the bot deaf. Loading the model gets longer.
+const MODERATION_TIMEOUT: Duration = Duration::from_secs(2);
+const MODERATION_LOAD_TIMEOUT: Duration = Duration::from_secs(60);
+const WITHHELD_NO_REPLY: &str = "(What was said here was withheld by content moderation. Say briefly that you cannot take it up.)";
 /// A joined utterance's stretches of speech kept for who said it (the
 /// latest).
 const STRETCHES_KEPT: usize = 16;
@@ -498,6 +511,7 @@ async fn converse(
         system: prompt::system(&config),
         chat_model: config.chat_model.clone().unwrap_or(models.chat_model),
         asr_model: Mutex::new(config.asr_model.clone().unwrap_or(models.asr_model)),
+        moderation: Mutex::new(config.moderation.clone().filter(|m| m.enabled && audio)),
         tts_model,
         tts_params,
         tts_stream_text,
@@ -552,7 +566,18 @@ async fn converse(
             let task = shared.chat_task(vec![user_message("你好".to_string())], Steer::Free, 1);
             shared.runtime.infer(task).await.map(|_| ())
         };
-        let (asr, chat, tts) = tokio::join!(asr, chat, shared.synthesize("你好。", |_| true));
+        // The moderation model too (a failure only shows in the log: the
+        // utterances then pass unchecked, as with any failed check).
+        let moderation = async {
+            let moderation = shared.moderation.lock().unwrap().clone();
+            if let Some(moderation) = moderation {
+                shared
+                    .moderate("你好", &moderation, MODERATION_LOAD_TIMEOUT)
+                    .await;
+            }
+        };
+        let (asr, chat, tts, ()) =
+            tokio::join!(asr, chat, shared.synthesize("你好。", |_| true), moderation);
         asr?;
         chat?;
         tts.map(|_| ())
@@ -634,6 +659,20 @@ async fn converse(
                             wake_words = words;
                         }
                         input.set_wake_words(names.as_deref().unwrap_or_default(), &wake_words);
+                    }
+                    if let Some(moderation) = update.moderation {
+                        let on = moderation.enabled && shared.audio;
+                        tracing::info!(on, "voice cascade content moderation updated");
+                        if on {
+                            // Loaded now, not by the first utterance's check.
+                            let (shared_, moderation_) = (shared.clone(), moderation.clone());
+                            shared.spawn(async move {
+                                shared_
+                                    .moderate("你好", &moderation_, MODERATION_LOAD_TIMEOUT)
+                                    .await;
+                            });
+                        }
+                        *shared.moderation.lock().unwrap() = on.then_some(moderation);
                     }
                     if let Some(span) = update.speaker {
                         listener.speakers.label(span, input.iterator.position() as u64);
@@ -992,6 +1031,7 @@ impl Input {
             continues,
             barged: self.barged,
             called,
+            withheld: false,
             spoken_at,
             sent_at: now,
             recognized_at: None,
@@ -1012,6 +1052,8 @@ struct Utterance {
     barged: bool,
     /// A wake word was heard in it (this piece or the utterance so far).
     called: bool,
+    /// Content moderation flagged its text: what is passed on has none of it.
+    withheld: bool,
     /// When its speech ended (the VAD's end less its lag), when it was sent
     /// to be recognised, and when it was: a voice turn's first stages.
     spoken_at: Instant,
@@ -1047,6 +1089,8 @@ struct Listener {
     held: String,
     /// One of them was called.
     held_called: bool,
+    /// One of them was withheld (content moderation).
+    held_withheld: bool,
     last: Option<LastUtterance>,
     /// Where the last utterance ended, if it was a bare call ("<name>,"
     /// alone, called by itself): what starts soon after is called too.
@@ -1273,6 +1317,8 @@ struct LastUtterance {
     answered: bool,
     /// A wake word was heard in it.
     called: bool,
+    /// Content moderation withheld it (or a part of it).
+    withheld: bool,
 }
 
 /// `a` and `b` as one text (a space between words of a spaced script).
@@ -1301,7 +1347,8 @@ fn heard(
     }
     if utterance.continues {
         listener.held_called |= utterance.called;
-        if !piece.is_empty() {
+        listener.held_withheld |= utterance.withheld;
+        if !piece.is_empty() && !utterance.withheld {
             listener.held = join_text(&listener.held, piece);
             shared.emit(ServerEvent::Transcript {
                 text: piece.to_string(),
@@ -1325,14 +1372,23 @@ fn heard(
     let _taken_in = TakenIn(&shared.listening);
     let held = std::mem::take(&mut listener.held);
     let mut text = join_text(&held, piece);
+    let mut withheld = utterance.withheld || std::mem::take(&mut listener.held_withheld);
     // Called by itself: a wake word in it, or (no spotter) a name; or the
     // transcript starts or ends with a name (the recogniser hears a name
     // the spotter missed: in a room, 165 named, 50 spotted).
     let by_name = gate == Gate::WakeWords && !utterance.called && calls_by_name(&text, callers);
     let samples = std::mem::take(&mut listener.held_samples);
     if by_name {
-        tracing::info!(text, "voice cascade called by name in the transcript");
-        if let Some((dir, kept)) = listener.missed.clone() {
+        // What was withheld stays out of the log and the kept calls.
+        tracing::info!(
+            text = if withheld {
+                "<withheld>"
+            } else {
+                text.as_str()
+            },
+            "voice cascade called by name in the transcript"
+        );
+        if let Some((dir, kept)) = listener.missed.clone().filter(|_| !withheld) {
             let text = text.clone();
             let keep = move || {
                 if let Err(err) = keep_missed_wake(&dir, kept, &samples, &text) {
@@ -1353,7 +1409,8 @@ fn heard(
     let mut called = own_called;
     let after_call = listener.follows_call(&utterance);
     let short = utterance.end - utterance.start < CALL_SAMPLES;
-    if text.is_empty() {
+    // (Withheld pieces with an empty end still get their answer.)
+    if text.is_empty() && !withheld {
         // A bare call the recogniser made nothing of still calls; noise it
         // made nothing of leaves the last call as it was.
         if own_called && short {
@@ -1371,7 +1428,9 @@ fn heard(
         // One to one, the speaker only paused. In a group, voices are not
         // told apart: only a short call (a bare "<name>,") is continued;
         // what follows a longer utterance is likely someone else.
-        let continues = names.is_none() || previous.short;
+        // Nothing joins what content moderation withheld: what follows it
+        // is judged (and answered) on its own.
+        let continues = (names.is_none() || previous.short) && !previous.withheld;
         let gap = utterance.start.saturating_sub(previous.end);
         if continues && gap < JOIN_SAMPLES {
             // The utterance replaces the last one.
@@ -1401,6 +1460,11 @@ fn heard(
     }
     let skip = text.chars().count().saturating_sub(MAX_UTTERANCE_CHARS);
     let text: String = text.chars().skip(skip).collect();
+    // Its parts were checked one by one; joined, they are checked as a whole
+    // (what two parts say together).
+    if !withheld && (joined.is_some() || !held.is_empty()) {
+        withheld = shared.moderate_now(&text);
+    }
     // Who said it (all of it, joined, without the pauses), by the client's
     // labels. Once labels came in this session (in a group and one to one
     // alike) the text passed on says so, sure or not; the text the gate and
@@ -1421,7 +1485,11 @@ fn heard(
         Gate::WakeWords | Gate::Names => restarts || called,
     };
     tracing::info!(
-        text,
+        text = if withheld {
+            "<withheld>"
+        } else {
+            text.as_str()
+        },
         speaker = speaker.as_deref(),
         joined = joined.is_some(),
         answer,
@@ -1435,6 +1503,30 @@ fn heard(
         // Whatever was made of the utterance's first part goes too.
         shared.cut();
     }
+    // Withheld by content moderation (audio mode): the client's model gets
+    // none of its words; for one that wants a reply, what to say instead.
+    let said = if !withheld {
+        said
+    } else if !answer {
+        String::new()
+    } else {
+        let reply = shared
+            .moderation
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|m| m.reply.clone())
+            .filter(|reply| !reply.trim().is_empty());
+        let note = match reply {
+            Some(reply) => WITHHELD.replace("{reply}", reply.trim()),
+            None => WITHHELD_NO_REPLY.to_string(),
+        };
+        if listener.speakers.seen {
+            who.said(&note)
+        } else {
+            note
+        }
+    };
     let id = shared.next_utterance.fetch_add(1, Ordering::SeqCst);
     shared.emit(ServerEvent::Transcript {
         text: said.clone(),
@@ -1473,6 +1565,7 @@ fn heard(
             message: id,
             answered: answer,
             called,
+            withheld,
         });
         return;
     }
@@ -1493,6 +1586,7 @@ fn heard(
         message,
         answered: answer,
         called,
+        withheld,
     });
     if answer {
         let due = Counted::new(&shared.replies_due);
@@ -1736,6 +1830,8 @@ struct Shared {
     chat_model: String,
     /// The fallback once the configured one failed to load.
     asr_model: Mutex<String>,
+    /// Content moderation of what is heard (audio mode; None: off).
+    moderation: Mutex<Option<Moderation>>,
     tts_model: String,
     tts_params: BTreeMap<String, Value>,
     /// See [`CascadeModels::tts_stream_text`].
@@ -2268,6 +2364,67 @@ impl Shared {
         )
     }
 
+    /// Whether `moderation` flags `text`. One it cannot check passes (as
+    /// text does when the moderation service is down); only the categories
+    /// of a flagged one are logged.
+    async fn moderate(&self, text: &str, moderation: &Moderation, timeout: Duration) -> bool {
+        let task = InferenceTask::new(
+            TaskKind::TextModerate,
+            moderation.model.clone(),
+            InferenceInput::TextModerate {
+                texts: vec![text.to_string()],
+            },
+        );
+        let verdict = match tokio::time::timeout(timeout, self.runtime.infer(task)).await {
+            Err(_) => {
+                tracing::warn!(?timeout, "voice cascade moderation took too long");
+                return false;
+            }
+            Ok(Ok(InferenceOutput::TextModerations { mut results })) if results.len() == 1 => {
+                results.remove(0)
+            }
+            Ok(Ok(other)) => {
+                tracing::warn!(?other, "voice cascade moderation gave no verdict");
+                return false;
+            }
+            Ok(Err(err)) => {
+                tracing::warn!(error = %err, "voice cascade moderation failed");
+                return false;
+            }
+        };
+        let threshold = moderation
+            .threshold
+            .filter(|t| (0.0..1.0).contains(t))
+            .unwrap_or(DEFAULT_MODERATION_THRESHOLD);
+        let allowed = moderation.categories.as_deref().filter(|c| !c.is_empty());
+        let flags = moderation_flags(verdict.safe, &verdict.categories, threshold, allowed);
+        if let Some(categories) = &flags {
+            tracing::info!(
+                ?categories,
+                "voice cascade withheld an utterance (content moderation)"
+            );
+        }
+        flags.is_some()
+    }
+
+    /// [`Self::moderate`] for `text` here and now (from `heard`, which is
+    /// not async: it holds up the session's input for the check, as the
+    /// VAD does). Without a multi-threaded runtime (tests) it passes.
+    fn moderate_now(&self, text: &str) -> bool {
+        let moderation = self.moderation.lock().unwrap().clone();
+        let Some(moderation) = moderation.filter(|_| !text.trim().is_empty()) else {
+            return false;
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| {
+                    handle.block_on(self.moderate(text, &moderation, MODERATION_TIMEOUT))
+                })
+            }
+            _ => false,
+        }
+    }
+
     async fn recognize(&self, wav: &Path) -> Result<String> {
         let mut task = InferenceTask::new(
             TaskKind::AsrTranscribe,
@@ -2377,6 +2534,12 @@ async fn recognize_utterances(
         };
         match result {
             Ok(text) => {
+                let moderation = shared.moderation.lock().unwrap().clone();
+                if let Some(moderation) = moderation.filter(|_| !text.trim().is_empty()) {
+                    utterance.withheld = shared
+                        .moderate(&text, &moderation, MODERATION_TIMEOUT)
+                        .await;
+                }
                 utterance.text = text;
                 utterance.recognized_at = Some(Instant::now());
                 let _ = heard.send(utterance);
@@ -3056,6 +3219,7 @@ mod tests {
             system: String::new(),
             chat_model: String::new(),
             asr_model: Mutex::new(String::new()),
+            moderation: Mutex::new(None),
             tts_model: String::new(),
             tts_params: BTreeMap::new(),
             tts_stream_text: stream_text,
@@ -3129,10 +3293,78 @@ mod tests {
             continues: false,
             barged: false,
             called,
+            withheld: false,
             spoken_at: Instant::now(),
             sent_at: Instant::now(),
             recognized_at: Some(Instant::now()),
         }
+    }
+
+    #[test]
+    fn withheld_utterances_pass_on_none_of_their_words() {
+        let (shared, mut out, _clauses) = audio_shared();
+        *shared.moderation.lock().unwrap() = Some(Moderation {
+            enabled: true,
+            model: None,
+            threshold: None,
+            categories: None,
+            reply: Some("这条内容无法处理。".to_string()),
+        });
+        let names = vec!["Jarvis".to_string()];
+        let mut listener = Listener::default();
+        let withheld = |mut u: Utterance| {
+            u.withheld = true;
+            u
+        };
+        for u in [
+            // Talk among others: nothing of it.
+            withheld(utterance(0.0, 2.0, "坏话", false)),
+            // A call: the note of what to say.
+            withheld(utterance(4.0, 6.0, "Jarvis 坏话", true)),
+            // A bare call, then a withheld request joined to it.
+            utterance(10.0, 10.6, "Jarvis", true),
+            withheld(utterance(11.0, 12.0, "坏话", false)),
+            // Nothing joins a withheld one: what follows it is its own.
+            withheld(utterance(20.0, 20.6, "Jarvis 坏", true)),
+            utterance(21.0, 22.0, "帮我查一下", false),
+            // Clean talk passes.
+            utterance(30.0, 32.0, "Jarvis 你好", true),
+            // A long utterance withheld with an empty end still answers.
+            Utterance {
+                continues: true,
+                ..withheld(utterance(40.0, 55.0, "坏话", true))
+            },
+            utterance(55.0, 55.1, "", false),
+        ] {
+            shared.listening.fetch_add(1, Ordering::SeqCst);
+            heard(
+                &shared,
+                u,
+                Some(&names),
+                Gate::WakeWords,
+                &mut listener,
+                &[],
+            );
+        }
+        let note = "(What was said here was withheld by content moderation. Reply only: \"这条内容无法处理。\")";
+        let texts: Vec<String> = events(&mut out)
+            .iter()
+            .filter(|e| e["type"] == "input.transcript")
+            .map(|e| e["text"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "",
+                note,
+                "Jarvis",
+                note,
+                note,
+                "帮我查一下",
+                "Jarvis 你好",
+                note
+            ]
+        );
     }
 
     #[test]

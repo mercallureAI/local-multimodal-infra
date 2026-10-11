@@ -205,6 +205,34 @@ waits for its own until 0.5 s after the VAD ended it (the wake words'
 waiting goes on meanwhile; audio keeps flowing); in a session without labels
 nothing waits.
 
+## Content moderation
+
+In audio mode the client's model may be a cloud one: a client that wants
+what it is given checked first sets `moderation` in `session.start` (or a
+`session.update`): `{"enabled": true, "threshold": 0.9, "categories":
+["violent", ...], "reply": "这条内容无法处理。", "model": null}`, all but
+`enabled` optional (`threshold` and `categories` as in `POST
+/v1/moderations`; `model`: the `text.moderate` model, by default any that does
+it). Each recognised utterance (each piece of a long one) is then checked
+before it is passed on; one flagged reaches the client without its words:
+
+| Case | `text` |
+|---|---|
+| It wants no reply (context) | empty |
+| It wants a reply | `(What was said here was withheld by content moderation. Reply only: "<reply>")`, after who said it when labels came |
+
+A joined utterance (or a long one's pieces) is also checked as a whole once
+joined: two parts may say together what neither says alone. Nothing joins a
+withheld utterance: what follows it is judged and answered on its own. A
+withheld piece of a long utterance sends no partial transcript, and the
+utterance is withheld (answered with the note) even when its last piece is
+empty. A check that fails or takes over 2 s passes its text, as text passes
+when the moderation service is down, so a stuck model never leaves the bot
+deaf. The log and the kept missed calls have no withheld text, only the
+categories. The moderation model loads with the others at the session's
+start (or when a `session.update` turns it on). `{"enabled": false}`
+ends it; cascade sessions are never checked (their model is local).
+
 A worker built without the `chat` category (`--features audio`) serves only
 audio mode sessions: do not register it beside workers that cascade mode
 clients reach.
@@ -234,7 +262,7 @@ clients are not browsers.
 | `response.delta` | `response_id`, `text` | Audio: text to speak, streamed. |
 | `response.end` | `response_id` | Audio: the response's text is complete. |
 | `response.cancel` | `response_id`? | Audio: stops the bot (that response, or whatever it says). |
-| `session.update` | `config` | Changes a running session: `wake`, `aliases`, `wake_words`; `speaker` labels who said a stretch of the input (see Speaker labels). |
+| `session.update` | `config` | Changes a running session: `wake`, `aliases`, `wake_words`; `speaker` labels who said a stretch of the input (see Speaker labels); `moderation` (see Content moderation). |
 | `session.stop` | | Ends the conversation. |
 
 `session.start.config`:
@@ -259,6 +287,7 @@ clients are not browsers.
 | `vad_threshold` | 0.5 | |
 | `min_silence_ms` | 600 | |
 | `barge_in_ms` | 1200 | |
+| `moderation` | off | Audio: check what is heard before passing it on (see Content moderation). |
 
 ## Server events
 

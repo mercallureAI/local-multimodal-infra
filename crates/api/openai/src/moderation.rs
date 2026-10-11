@@ -24,7 +24,11 @@
 use crate::{error_response, OpenAiApiState};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use base64::Engine as _;
-use local_core::{InferenceInput, InferenceOutput, InferenceTask, TaskKind, TextModeration};
+use local_core::{
+    moderation_category as category_name, moderation_flags, InferenceInput, InferenceOutput,
+    InferenceTask, TaskKind, TextModeration, DEFAULT_MODERATION_THRESHOLD,
+    MODERATION_CATEGORIES as CATEGORIES,
+};
 use local_error::{InfraError, Result};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
@@ -32,23 +36,10 @@ use serde_json::json;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub const DEFAULT_THRESHOLD: f32 = 0.9;
+pub const DEFAULT_THRESHOLD: f32 = DEFAULT_MODERATION_THRESHOLD;
 pub const DEFAULT_NSFW_THRESHOLD: f32 = 0.5;
 /// Images one request may carry.
 const MAX_IMAGES: usize = 16;
-
-/// Qwen3Guard's categories under short names; `sexual` also takes images.
-const CATEGORIES: [(&str, &str); 9] = [
-    ("Violent", "violent"),
-    ("Non-violent Illegal Acts", "illegal"),
-    ("Sexual Content or Sexual Acts", "sexual"),
-    ("PII", "pii"),
-    ("Suicide & Self-Harm", "self-harm"),
-    ("Unethical Acts", "unethical"),
-    ("Politically Sensitive Topics", "political"),
-    ("Copyright Violation", "copyright"),
-    ("Jailbreak", "jailbreak"),
-];
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModerationRequest {
@@ -364,16 +355,7 @@ fn combine(
         |name: &str| text_categories.is_none_or(|allowed| allowed.iter().any(|a| a == name));
     // A text's flagged categories: None when it is not flagged.
     let text_hit = |verdict: Safety, named: &[String]| -> Option<Vec<String>> {
-        if 1.0 - verdict.safe <= threshold {
-            return None;
-        }
-        let names: Vec<String> = named.iter().map(|c| category_name(c)).collect();
-        if names.is_empty() {
-            // Unsafe, but the model named no category: still flagged.
-            return Some(names);
-        }
-        let kept: Vec<String> = names.into_iter().filter(|n| counts(n)).collect();
-        (!kept.is_empty()).then_some(kept)
+        moderation_flags(verdict.safe, named, threshold, text_categories)
     };
     let mut flagged = false;
     let mut least_safe: Option<Safety> = None;
@@ -476,14 +458,6 @@ fn nsfw_of(scores: &BTreeMap<String, f32>, labels: &[String]) -> Result<f32> {
         }
     }
     Ok(sum.min(1.0))
-}
-
-fn category_name(category: &str) -> String {
-    CATEGORIES
-        .iter()
-        .find(|(model, _)| model.eq_ignore_ascii_case(category))
-        .map(|(_, name)| name.to_string())
-        .unwrap_or_else(|| category.to_ascii_lowercase().replace(' ', "-"))
 }
 
 fn unit(value: Option<f32>, default: f32, name: &str) -> Result<f32> {

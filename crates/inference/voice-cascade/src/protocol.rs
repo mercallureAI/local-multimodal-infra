@@ -66,6 +66,37 @@ pub struct SessionUpdate {
     /// the voice came from).
     #[serde(default)]
     pub speaker: Option<SpeakerSpan>,
+    /// Content moderation from now on (`enabled: false` ends it).
+    #[serde(default)]
+    pub moderation: Option<Moderation>,
+}
+
+/// Content moderation of what the client is told it heard (audio mode: the
+/// client's model may be a cloud one). Each recognised utterance is checked
+/// with a `text.moderate` model before it is passed on; a flagged one is
+/// passed on without its words: empty when it wants no reply, else a note
+/// in parentheses telling the client's model what to say (`reply`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Moderation {
+    #[serde(default = "enabled")]
+    pub enabled: bool,
+    /// The `text.moderate` model (default: any that does it).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Flagged when `1 - p(safe)` exceeds it (0 to 1; default 0.9).
+    #[serde(default)]
+    pub threshold: Option<f32>,
+    /// The categories that flag (short names, e.g. `violent`); none: all.
+    #[serde(default)]
+    pub categories: Option<Vec<String>>,
+    /// What the bot says to a flagged utterance that wants a reply (empty:
+    /// its model is told only that the words were withheld).
+    #[serde(default)]
+    pub reply: Option<String>,
+}
+
+fn enabled() -> bool {
+    true
 }
 
 /// A speaker's label for input samples `start..end` (16 kHz, counted since
@@ -178,6 +209,9 @@ pub struct SessionConfig {
     /// One to one: talking over the bot this long stops it.
     #[serde(default)]
     pub barge_in_ms: Option<usize>,
+    /// Content moderation of what is heard (audio mode).
+    #[serde(default)]
+    pub moderation: Option<Moderation>,
 }
 
 #[derive(Debug, Clone, Serialize)]
