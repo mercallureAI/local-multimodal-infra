@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
 import os
 import subprocess
 import sys
@@ -300,7 +301,13 @@ def main(argv: list[str] | None = None) -> int:
 
         if "sensevoice-asr" in requested_tests:
             try:
-                run_sensevoice_asr(sensevoice_asr_audio, data_dir, timestamp, args.request_timeout)
+                run_sensevoice_asr(
+                    sensevoice_asr_audio,
+                    data_dir,
+                    timestamp,
+                    args.request_timeout,
+                    args.sensevoice_asr_model,
+                )
             except SmokeError as exc:
                 failures.append(f"sensevoice-asr: {exc}")
 
@@ -451,7 +458,16 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         dest="sensevoice_asr_audio",
         type=Path,
         default=None,
-        help="Local SenseVoice ASR WAV override. Default: scripts/assets/tts-input-mon3tr.wav.",
+        help="Local SenseVoice ASR audio override (WAV, M4A/AAC, MP3, FLAC, Ogg). "
+        "Default: scripts/assets/tts-input-mon3tr.wav.",
+    )
+    parser.add_argument(
+        "--sensevoice-asr-model",
+        dest="sensevoice_asr_model",
+        default="sensevoice-small-onnx",
+        help="ASR model of the sensevoice-asr test, e.g. sensevoice-small-int8-gpu-onnx "
+        "(the GPU int8 export, CUDA graphs; needs a --features cuda build). "
+        "Default: sensevoice-small-onnx.",
     )
     parser.add_argument(
         "--indextts-reference",
@@ -1321,21 +1337,28 @@ def validate_ocr_output(output: object, label: str) -> str:
     return text
 
 
-def run_sensevoice_asr(audio: Path, data_dir: Path, timestamp: str, timeout: float) -> None:
+def run_sensevoice_asr(
+    audio: Path,
+    data_dir: Path,
+    timestamp: str,
+    timeout: float,
+    model: str = "sensevoice-small-onnx",
+) -> None:
     if not audio.exists():
         raise SmokeError(f"SenseVoice ASR audio does not exist: {audio}")
     out = data_dir / f"smoke-sensevoice-asr-{timestamp}.json"
+    mime = mimetypes.guess_type(audio.name)[0] or "application/octet-stream"
     create = rpc_create_task(
         {
             "task_kind": "asr.transcribe",
-            "model": "sensevoice-small-onnx",
-            "files": [{"name": audio.name, "mime": "audio/wav", "role": "audio", "required": True}],
+            "model": model,
+            "files": [{"name": audio.name, "mime": mime, "role": "audio", "required": True}],
             "params": {},
         },
         f"smoke-sensevoice-asr-create-{timestamp}",
         timeout,
     )
-    upload_file(first_upload(create, "audio")["upload_url"], audio, "audio/wav", timeout)
+    upload_file(first_upload(create, "audio")["upload_url"], audio, mime, timeout)
     payload = rpc_start_task(create["task_id"], f"smoke-sensevoice-asr-start-{timestamp}", timeout)
     if payload.get("state") != "succeeded":
         raise SmokeError(f"SenseVoice ASR generic task did not succeed: {payload}")
@@ -1352,13 +1375,15 @@ def run_sensevoice_asr(audio: Path, data_dir: Path, timestamp: str, timeout: flo
         raise SmokeError(f"SenseVoice ASR did not return default timeline segments: {payload}")
     if not isinstance(speakers, list) or not speakers:
         raise SmokeError(f"SenseVoice ASR did not return default speaker diarization: {payload}")
+    # Timeline segments are ~10 s, longer where a speech segment has no
+    # word boundary to cut at, never longer than a speech segment (20 s).
     for segment in segments:
         if (
             not isinstance(segment, dict)
             or not isinstance(segment.get("start_ms"), int)
             or not isinstance(segment.get("end_ms"), int)
             or segment["end_ms"] <= segment["start_ms"]
-            or segment["end_ms"] - segment["start_ms"] > 15_000
+            or segment["end_ms"] - segment["start_ms"] > 20_000
             or not str(segment.get("speaker", "")).startswith("speaker_")
             or bool(segment.get("tokens"))
         ):

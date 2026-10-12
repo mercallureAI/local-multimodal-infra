@@ -64,16 +64,34 @@ impl SharedInitializers {
     }
 }
 
+/// Offsets every range of a packed data file is aligned to: such a file is
+/// uploaded as one device buffer, the tensors views into it.
+pub const PACKED_ALIGNMENT: u64 = 256;
+
 impl OrtBackend {
     /// Reads `ranges` from `data_file` and places them on this backend's
     /// preferred CUDA device (host memory when CUDA is not selected). Sessions
     /// that should fall back to CPU must not receive CUDA-resident values.
+    ///
+    /// When every range starts at a multiple of [`PACKED_ALIGNMENT`], the
+    /// span they cover goes up in one copy and each tensor is a view into it:
+    /// copying hundreds of small tensors one by one leaves each copy's
+    /// staging buffer in the copy session's arena (SenseVoice's 1198 tensors,
+    /// 266 MB, took ~5.7 GB that way).
     pub fn upload_initializers(
         &self,
         data_file: &Path,
         ranges: &[InitializerRange],
     ) -> Result<SharedInitializers> {
         let cuda_device = self.preferred_cuda_device();
+        if let Some(device) = cuda_device.filter(|_| {
+            !ranges.is_empty()
+                && ranges
+                    .iter()
+                    .all(|range| range.offset % PACKED_ALIGNMENT == 0)
+        }) {
+            return upload_packed(data_file, ranges, device);
+        }
         let mut file =
             File::open(data_file).map_err(|e| InfraError::io(Some(data_file.to_path_buf()), e))?;
         let mut values = Vec::with_capacity(ranges.len());
@@ -136,6 +154,97 @@ impl OrtBackend {
             bytes,
         })
     }
+}
+
+/// The span of `data_file` that `ranges` cover, uploaded in one copy, each
+/// range a view into it.
+fn upload_packed(
+    data_file: &Path,
+    ranges: &[InitializerRange],
+    device: u32,
+) -> Result<SharedInitializers> {
+    let start = ranges.iter().map(|range| range.offset).min().unwrap_or(0);
+    let end = ranges
+        .iter()
+        .map(|range| range.offset + range.length)
+        .max()
+        .unwrap_or(0);
+    for range in ranges {
+        let expected = element_size(range.element).and_then(|size| {
+            range
+                .shape
+                .iter()
+                .try_fold(size, |acc, dim| acc.checked_mul(*dim))
+        });
+        if expected.map(|bytes| bytes as u64) != Some(range.length) {
+            return Err(InfraError::Backend(format!(
+                "shared initializer `{}` length {} does not match {:?} {:?}",
+                range.name, range.length, range.element, range.shape
+            )));
+        }
+    }
+    let mut file =
+        File::open(data_file).map_err(|e| InfraError::io(Some(data_file.to_path_buf()), e))?;
+    let mut span = vec![0u8; (end - start) as usize];
+    file.seek(SeekFrom::Start(start))
+        .and_then(|_| file.read_exact(&mut span))
+        .map_err(|e| InfraError::io(Some(data_file.to_path_buf()), e))?;
+    let host = Tensor::from_array((vec![span.len() as i64], span.into_boxed_slice()))
+        .map(|tensor| tensor.into_dyn())
+        .map_err(map_ort_err)?;
+    let owner = to_cuda(host, device as i32, &data_file.display().to_string())?;
+    let tensor = owner
+        .downcast_ref::<ort::value::DynTensorValueType>()
+        .map_err(map_ort_err)?;
+    let base = tensor.data_ptr() as *mut u8;
+    let mut values = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        let shape = range
+            .shape
+            .iter()
+            .map(|dim| *dim as i64)
+            .collect::<Vec<_>>();
+        // SAFETY: the range lies inside the uploaded span (offset and length
+        // checked against it above), which `owner` keeps alive alongside the
+        // views; the element type and shape describe its bytes.
+        let view = unsafe {
+            wrap_memory(
+                tensor.memory_info(),
+                base.add((range.offset - start) as usize) as *mut _,
+                range.length as usize,
+                &shape,
+                ort_element(range.element, &range.name)?,
+                &range.name,
+            )
+        }?;
+        values.push((range.name.clone(), Arc::new(view)));
+    }
+    Ok(SharedInitializers {
+        drop_gate: Default::default(),
+        values: Arc::new(values),
+        _owners: Arc::new(vec![owner]),
+        cuda_device: Some(device),
+        bytes: ranges.iter().map(|range| range.length).sum(),
+    })
+}
+
+fn ort_element(element: TensorElement, name: &str) -> Result<ort::value::TensorElementType> {
+    use ort::value::TensorElementType as Ort;
+    Ok(match element {
+        TensorElement::F32 => Ort::Float32,
+        TensorElement::F16 => Ort::Float16,
+        TensorElement::Bool => Ort::Bool,
+        TensorElement::I8 => Ort::Int8,
+        TensorElement::U8 => Ort::Uint8,
+        TensorElement::I16 => Ort::Int16,
+        TensorElement::I32 => Ort::Int32,
+        TensorElement::I64 => Ort::Int64,
+        TensorElement::Other => {
+            return Err(InfraError::Backend(format!(
+                "shared initializer `{name}` has an unsupported element type"
+            )))
+        }
+    })
 }
 
 pub(crate) fn element_size(element: TensorElement) -> Option<usize> {

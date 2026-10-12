@@ -33,6 +33,36 @@ pub fn sha256_file(path: impl AsRef<Path>) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// What an asset is written from.
+#[derive(Debug, Clone, Copy)]
+enum AssetContent<'a> {
+    Bytes(&'a [u8]),
+    /// A finished file, moved into place.
+    File {
+        path: &'a Path,
+        size: u64,
+    },
+}
+
+impl AssetContent<'_> {
+    fn size(&self) -> u64 {
+        match self {
+            Self::Bytes(bytes) => bytes.len() as u64,
+            Self::File { size, .. } => *size,
+        }
+    }
+}
+
+/// Renames `from` to `to`, replacing it; copies and removes `from` when they
+/// are on different file systems.
+pub fn move_file(from: &Path, to: &Path) -> Result<()> {
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    fs::copy(from, to).map_err(|e| InfraError::io(Some(to.to_path_buf()), e))?;
+    fs::remove_file(from).map_err(|e| InfraError::io(Some(from.to_path_buf()), e))
+}
+
 #[derive(Debug, Clone)]
 pub struct AssetsStore {
     root: PathBuf,
@@ -56,7 +86,66 @@ impl AssetsStore {
         self.cleanup_expired_before_access("put");
         let relative = normalize_asset_path(path)?;
         let sha256 = sha256_bytes(bytes);
-        self.write_asset(kind, relative, content_type, expires_at, bytes, sha256)
+        self.write_asset(
+            kind,
+            relative,
+            content_type,
+            expires_at,
+            AssetContent::Bytes(bytes),
+            sha256,
+        )
+    }
+
+    /// As [`Self::put`], the content being the file `source` (`size` bytes,
+    /// hashed by the caller while it was written), moved into the store.
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_file(
+        &self,
+        kind: AssetKind,
+        path: &str,
+        content_type: Option<String>,
+        expires_at: Option<DateTime<Utc>>,
+        source: &Path,
+        size: u64,
+        sha256: String,
+    ) -> Result<AssetRecord> {
+        self.cleanup_expired_before_access("put_file");
+        let relative = normalize_asset_path(path)?;
+        self.write_asset(
+            kind,
+            relative,
+            content_type,
+            expires_at,
+            AssetContent::File { path: source, size },
+            sha256,
+        )
+    }
+
+    /// As [`Self::put_or_reuse_by_sha256`] for the file `source`, moved into
+    /// the store, or removed when an equal asset is reused.
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_or_reuse_by_sha256_file(
+        &self,
+        kind: AssetKind,
+        path: &str,
+        content_type: Option<String>,
+        expires_at: Option<DateTime<Utc>>,
+        source: &Path,
+        size: u64,
+        sha256: String,
+    ) -> Result<(AssetRecord, bool)> {
+        let result = self.put_or_reuse_by_sha256_any_path(
+            kind,
+            path,
+            content_type,
+            expires_at,
+            AssetContent::File { path: source, size },
+            sha256,
+        );
+        if matches!(result, Ok((_, true))) {
+            let _ = fs::remove_file(source);
+        }
+        result
     }
 
     pub fn put_or_reuse_by_sha256(
@@ -68,7 +157,14 @@ impl AssetsStore {
         bytes: &[u8],
         sha256: String,
     ) -> Result<(AssetRecord, bool)> {
-        self.put_or_reuse_by_sha256_any_path(kind, path, content_type, expires_at, bytes, sha256)
+        self.put_or_reuse_by_sha256_any_path(
+            kind,
+            path,
+            content_type,
+            expires_at,
+            AssetContent::Bytes(bytes),
+            sha256,
+        )
     }
 
     pub fn put_or_reuse_by_sha256_at_path(
@@ -106,8 +202,15 @@ impl AssetsStore {
             return Ok((record, true));
         }
 
-        self.write_asset(kind, relative, content_type, expires_at, bytes, sha256)
-            .map(|record| (record, false))
+        self.write_asset(
+            kind,
+            relative,
+            content_type,
+            expires_at,
+            AssetContent::Bytes(bytes),
+            sha256,
+        )
+        .map(|record| (record, false))
     }
 
     fn put_or_reuse_by_sha256_any_path(
@@ -116,12 +219,12 @@ impl AssetsStore {
         path: &str,
         content_type: Option<String>,
         expires_at: Option<DateTime<Utc>>,
-        bytes: &[u8],
+        content: AssetContent<'_>,
         sha256: String,
     ) -> Result<(AssetRecord, bool)> {
         self.cleanup_expired_before_access("put_or_reuse_by_sha256");
         let relative = normalize_asset_path(path)?;
-        let size = bytes.len() as u64;
+        let size = content.size();
         let query = AssetListQuery {
             kind: Some(kind),
             ..AssetListQuery::default()
@@ -149,7 +252,7 @@ impl AssetsStore {
             return Ok((record, true));
         }
 
-        self.write_asset(kind, relative, content_type, expires_at, bytes, sha256)
+        self.write_asset(kind, relative, content_type, expires_at, content, sha256)
             .map(|record| (record, false))
     }
 
@@ -159,7 +262,7 @@ impl AssetsStore {
         relative: String,
         content_type: Option<String>,
         expires_at: Option<DateTime<Utc>>,
-        bytes: &[u8],
+        content: AssetContent<'_>,
         sha256: String,
     ) -> Result<AssetRecord> {
         let asset_path = self.asset_path(kind, &relative);
@@ -167,16 +270,21 @@ impl AssetsStore {
             fs::create_dir_all(parent)
                 .map_err(|e| InfraError::io(Some(parent.to_path_buf()), e))?;
         }
-        let mut file =
-            File::create(&asset_path).map_err(|e| InfraError::io(Some(asset_path.clone()), e))?;
-        file.write_all(bytes)
-            .map_err(|e| InfraError::io(Some(asset_path.clone()), e))?;
+        match content {
+            AssetContent::Bytes(bytes) => {
+                let mut file = File::create(&asset_path)
+                    .map_err(|e| InfraError::io(Some(asset_path.clone()), e))?;
+                file.write_all(bytes)
+                    .map_err(|e| InfraError::io(Some(asset_path.clone()), e))?;
+            }
+            AssetContent::File { path, .. } => move_file(path, &asset_path)?,
+        }
         let record = AssetRecord {
             uri: asset_uri(kind, &relative),
             kind,
             path: relative,
             content_type,
-            size: bytes.len() as u64,
+            size: content.size(),
             sha256: Some(sha256),
             created_at: Utc::now(),
             expires_at,

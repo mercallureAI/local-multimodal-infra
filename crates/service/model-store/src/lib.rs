@@ -1049,7 +1049,15 @@ fn normalize_artifact_path(artifact: &mut ModelArtifact, base: &Path) -> Result<
 fn stable_model_base(model_dir: &Path, model_id: &str) -> Result<PathBuf> {
     let id_path = Path::new(model_id);
     validate_relative_component_path(id_path, "model_id")?;
-    Ok(model_dir.join(id_path))
+    let base = model_dir.join(id_path);
+    if base.exists() {
+        return Ok(base);
+    }
+    // A renamed model's files may still sit under its former id.
+    Ok(local_core::former_model_ids(model_id)
+        .map(|old| model_dir.join(old))
+        .find(|old| old.is_dir())
+        .unwrap_or(base))
 }
 
 fn local_destination(base: &Path, source: Option<&Path>) -> Result<PathBuf> {

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
@@ -18,7 +18,7 @@ use local_core::{
     FileRef, GenericTaskResult, GenericTaskState, InferenceEvent, InferenceInput, InferenceOutput,
     InferenceTask, JobState, ModelDownloadStatus, ModelInfo, ModelSpec, NodeStatus,
     StartTaskRequest, TaskStatus, TaskUploadSlot, WaitTaskRequest, WorkerHeartbeat,
-    WorkerRegistration, WorkerRegistrationResponse,
+    WorkerRegistration, WorkerRegistrationResponse, CONTROLLER_INSTANCE_FILE,
 };
 use local_error::{InfraError, Result};
 use local_files::{asset_uri, normalize_asset_path, parse_asset_uri, AssetsStore};
@@ -31,7 +31,6 @@ use std::path::{Path, PathBuf};
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
-    io::Write,
     sync::Arc,
     time::Duration,
 };
@@ -49,7 +48,9 @@ const DEFAULT_ASSET_URL_TTL_SECS: i64 = 600;
 const DEFAULT_MATERIAL_ASSET_TTL_SECS: i64 = 10 * 60;
 const DEFAULT_ARTIFACT_ASSET_TTL_SECS: i64 = 24 * 60 * 60;
 const DEFAULT_ASSET_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
-const MATERIAL_FAST_HASH_MAX_BYTES: usize = 100 * 1024 * 1024;
+const MATERIAL_FAST_HASH_MAX_BYTES: u64 = 100 * 1024 * 1024;
+/// Default largest upload (4 GiB): hours of compressed audio, or a long WAV.
+pub const DEFAULT_MAX_UPLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct ControllerState {
@@ -68,6 +69,10 @@ pub struct ControllerState {
     admin_token: Option<String>,
     mcp_infer_tokens: Vec<String>,
     model_downloads: Arc<Mutex<HashSet<String>>>,
+    max_upload_bytes: u64,
+    /// Written to [`CONTROLLER_INSTANCE_FILE`] in the data directory, for
+    /// workers to tell whether they share it.
+    instance_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +84,8 @@ pub struct ControllerOptions {
     pub admin_token: Option<String>,
     pub mcp_infer_tokens: Vec<String>,
     pub asset_cleanup_interval: Option<Duration>,
+    /// The largest file a signed upload URL accepts.
+    pub max_upload_bytes: u64,
 }
 
 impl Default for ControllerOptions {
@@ -91,6 +98,7 @@ impl Default for ControllerOptions {
             admin_token: None,
             mcp_infer_tokens: Vec::new(),
             asset_cleanup_interval: Some(DEFAULT_ASSET_CLEANUP_INTERVAL),
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
         }
     }
 }
@@ -144,6 +152,7 @@ impl ControllerState {
             )
         });
         let assets = AssetsStore::new(options.data_dir.clone());
+        let instance_id = Uuid::new_v4().as_simple().to_string();
         if let Err(err) = assets.cleanup_expired() {
             tracing::warn!(error = %err, "initial asset cleanup failed");
         }
@@ -166,6 +175,8 @@ impl ControllerState {
             admin_token: options.admin_token,
             mcp_infer_tokens: options.mcp_infer_tokens,
             model_downloads: Arc::new(Mutex::new(HashSet::new())),
+            max_upload_bytes: options.max_upload_bytes,
+            instance_id,
         }
     }
 
@@ -250,15 +261,13 @@ impl ControllerState {
             .route("/internal/workers/register", post(register_worker))
             .route("/internal/workers/heartbeat", post(worker_heartbeat))
             .route(
-                "/files/upload/:task_id/:slot",
-                post(upload_task_file).layer(DefaultBodyLimit::max(512 * 1024 * 1024)),
+                "/internal/files",
+                get(worker_file_download).post(worker_file_upload),
             )
+            .route("/files/upload/:task_id/:slot", post(upload_task_file))
             .route(
                 "/assets/:kind/*path",
-                post(upload_asset)
-                    .get(download_asset)
-                    .delete(delete_asset)
-                    .layer(DefaultBodyLimit::max(512 * 1024 * 1024)),
+                post(upload_asset).get(download_asset).delete(delete_asset),
             )
             .route("/assets", get(list_assets))
             .route("/assets/sign", post(sign_assets))
@@ -282,6 +291,16 @@ impl ControllerState {
             }
         }
         registration.registration_token = None;
+        // For the worker to tell whether it shares this data directory (one
+        // that does not exist yet holds no task files to share).
+        if self.data_dir.is_dir() {
+            if let Err(err) = fs::write(
+                self.data_dir.join(CONTROLLER_INSTANCE_FILE),
+                &self.instance_id,
+            ) {
+                tracing::warn!(error = %err, "could not write the controller instance file; workers will fetch task files over HTTP");
+            }
+        }
         let session_token = Uuid::new_v4().to_string();
         let status = NodeStatus {
             registration: registration.clone(),
@@ -303,6 +322,8 @@ impl ControllerState {
         Ok(WorkerRegistrationResponse {
             status,
             session_token,
+            controller_data_dir: Some(absolute_path(&self.data_dir)),
+            controller_instance: Some(self.instance_id.clone()),
         })
     }
 
@@ -326,6 +347,21 @@ impl ControllerState {
             store.record_worker(&status)?;
         }
         Ok(status)
+    }
+
+    /// Whether `headers` carry a registered worker's session token.
+    async fn is_worker(&self, headers: &HeaderMap) -> bool {
+        let Some(token) = headers
+            .get(WORKER_TOKEN_HEADER)
+            .and_then(|value| value.to_str().ok())
+        else {
+            return false;
+        };
+        self.worker_session_tokens
+            .read()
+            .await
+            .values()
+            .any(|expected| expected == token)
     }
 
     async fn validate_worker_session(&self, node_id: &str, token: Option<&str>) -> Result<()> {
@@ -411,8 +447,9 @@ impl ControllerState {
     /// the receiver closes the worker connection, which stops the inference.
     async fn forward_to_worker_stream(
         &self,
-        task: InferenceTask,
+        mut task: InferenceTask,
     ) -> Result<tokio::sync::mpsc::Receiver<InferenceEvent>> {
+        absolute_input_paths(&mut task);
         if let Some(store) = &self.store {
             store.record_job_state(&task, JobState::Queued, None, None)?;
         }
@@ -520,9 +557,10 @@ impl ControllerState {
     /// adapters raise it for the input only).
     async fn forward_to_worker_as(
         &self,
-        task: InferenceTask,
+        mut task: InferenceTask,
         direct: bool,
     ) -> Result<InferenceOutput> {
+        absolute_input_paths(&mut task);
         let total_started = std::time::Instant::now();
         let request_id = task.id;
         let store = self.store.as_ref().filter(|_| !direct);
@@ -734,14 +772,14 @@ impl ControllerState {
         })
     }
 
-    async fn upload_asset_bytes(
+    async fn upload_asset_body(
         &self,
         kind: AssetKind,
         path: String,
         query: BTreeMap<String, String>,
         headers: HeaderMap,
-        body: Bytes,
-    ) -> Result<AssetRecord> {
+        body: Body,
+    ) -> std::result::Result<AssetRecord, UploadError> {
         let expires_at = asset_expires_at(kind, &query)?;
         let content_type = query
             .get("content_type")
@@ -754,28 +792,40 @@ impl ControllerState {
                     .map(str::to_string)
             });
         let requested_uri = asset_uri(kind, &path);
-        let reuse_by_hash = is_fast_hash_material_input(kind, &path, body.len());
-        let (mut record, reused) = if reuse_by_hash {
-            self.assets.put_or_reuse_by_sha256(
+        let received =
+            receive_upload(body, &headers, &self.partial_dir(), self.max_upload_bytes).await?;
+        let reuse_by_hash = is_fast_hash_material_input(kind, &path, received.size);
+        let stored = if reuse_by_hash {
+            self.assets.put_or_reuse_by_sha256_file(
                 kind,
                 &path,
                 content_type,
                 expires_at,
-                body.as_ref(),
-                sha256_hex(body.as_ref()),
-            )?
-        } else {
-            (
-                self.assets
-                    .put(kind, &path, content_type, expires_at, body.as_ref())?,
-                false,
+                &received.path,
+                received.size,
+                received.sha256,
             )
+        } else {
+            self.assets
+                .put_file(
+                    kind,
+                    &path,
+                    content_type,
+                    expires_at,
+                    &received.path,
+                    received.size,
+                    received.sha256,
+                )
+                .map(|record| (record, false))
         };
+        let (mut record, reused) = stored.inspect_err(|_| {
+            let _ = fs::remove_file(&received.path);
+        })?;
         tracing::info!(
             kind = kind.as_str(),
             requested_uri = %requested_uri,
             resolved_uri = %record.uri,
-            upload_bytes = body.len(),
+            upload_bytes = received.size,
             reuse_by_hash,
             reused,
             "controller material upload stored or reused"
@@ -838,8 +888,8 @@ impl ControllerState {
         slot: String,
         query: BTreeMap<String, String>,
         headers: HeaderMap,
-        body: Bytes,
-    ) -> Result<UploadResponse> {
+        body: Body,
+    ) -> std::result::Result<UploadResponse, UploadError> {
         let expires = query
             .get("expires")
             .ok_or_else(|| InfraError::BadRequest("upload URL is missing expires".to_string()))?
@@ -849,7 +899,7 @@ impl ControllerState {
             .get("sig")
             .ok_or_else(|| InfraError::BadRequest("upload URL is missing sig".to_string()))?;
         if Utc::now().timestamp() > expires {
-            return Err(InfraError::BadRequest("upload URL has expired".to_string()));
+            return Err(InfraError::BadRequest("upload URL has expired".to_string()).into());
         }
         self.verify_upload_signature(&task_id, &slot, expires, sig)?;
         let mut status = self.load_task(&task_id).await?;
@@ -861,10 +911,11 @@ impl ControllerState {
         let dir = self.data_dir.join("uploads").join(&task_id);
         fs::create_dir_all(&dir).map_err(|e| InfraError::io(Some(dir.clone()), e))?;
         let target = dir.join(&upload.file_name);
-        let mut file =
-            fs::File::create(&target).map_err(|e| InfraError::io(Some(target.clone()), e))?;
-        file.write_all(&body)
-            .map_err(|e| InfraError::io(Some(target.clone()), e))?;
+        let received =
+            receive_upload(body, &headers, &self.partial_dir(), self.max_upload_bytes).await?;
+        local_files::move_file(&received.path, &target).inspect_err(|_| {
+            let _ = fs::remove_file(&received.path);
+        })?;
         if upload.mime.is_none() {
             upload.mime = headers
                 .get("content-type")
@@ -1012,6 +1063,12 @@ impl ControllerState {
             .expect("HMAC accepts keys of any length");
         mac.update(format!("{task_id}:{slot}:{expires}").as_bytes());
         hex(mac.finalize().into_bytes().as_slice())
+    }
+
+    /// Where uploads are written until complete (on the data volume, so the
+    /// finished file is renamed into place).
+    fn partial_dir(&self) -> PathBuf {
+        self.data_dir.join("uploads").join(".partial")
     }
 
     fn verify_upload_signature(
@@ -1596,15 +1653,16 @@ async fn upload_task_file(
     AxumPath((task_id, slot)): AxumPath<(String, String)>,
     Query(query): Query<BTreeMap<String, String>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> impl IntoResponse {
     match state.upload_file(task_id, slot, query, headers, body).await {
         Ok(response) => response.into_response(),
-        Err(err) => (
+        Err(UploadError::Infra(err)) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": err.to_string() })),
         )
             .into_response(),
+        Err(err) => err.into_response(),
     }
 }
 
@@ -1613,7 +1671,7 @@ async fn upload_asset(
     AxumPath((kind, path)): AxumPath<(String, String)>,
     Query(query): Query<BTreeMap<String, String>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> impl IntoResponse {
     let kind = match kind.parse::<AssetKind>() {
         Ok(kind) => kind,
@@ -1631,12 +1689,108 @@ async fn upload_asset(
         return error_response(err);
     }
     match state
-        .upload_asset_bytes(kind, relative, query, headers, body)
+        .upload_asset_body(kind, relative, query, headers, body)
         .await
     {
         Ok(record) => (StatusCode::OK, Json(json!(record))).into_response(),
-        Err(err) => error_response(err),
+        Err(err) => err.into_response(),
     }
+}
+
+/// An upload failure: too large (413) or any other error.
+#[derive(Debug)]
+enum UploadError {
+    TooLarge { limit: u64 },
+    Infra(InfraError),
+}
+
+impl From<InfraError> for UploadError {
+    fn from(err: InfraError) -> Self {
+        Self::Infra(err)
+    }
+}
+
+impl IntoResponse for UploadError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::TooLarge { limit } => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(json!({
+                    "error": format!(
+                        "upload exceeds the {limit}-byte limit (controller max_upload_mb); \
+                         compressed audio (m4a/aac/mp3/flac/ogg) or 16 kHz mono WAV is much smaller"
+                    )
+                })),
+            )
+                .into_response(),
+            Self::Infra(err) => error_response(err),
+        }
+    }
+}
+
+/// A request body written to disk.
+struct ReceivedUpload {
+    path: PathBuf,
+    size: u64,
+    sha256: String,
+}
+
+/// Streams `body` into a new file in `dir`, hashing it on the way, never
+/// holding more than one chunk in memory; refuses bodies over `limit`
+/// (by `Content-Length` up front, else as the bytes arrive).
+async fn receive_upload(
+    body: Body,
+    headers: &HeaderMap,
+    dir: &Path,
+    limit: u64,
+) -> std::result::Result<ReceivedUpload, UploadError> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    if declared.is_some_and(|length| length > limit) {
+        return Err(UploadError::TooLarge { limit });
+    }
+    tokio::fs::create_dir_all(dir)
+        .await
+        .map_err(|e| InfraError::io(Some(dir.to_path_buf()), e))?;
+    let path = dir.join(format!("{}.part", Uuid::new_v4().as_simple()));
+    let result = async {
+        let mut file = tokio::fs::File::create(&path)
+            .await
+            .map_err(|e| InfraError::io(Some(path.clone()), e))?;
+        let mut hasher = Sha256::new();
+        let mut size = 0u64;
+        let mut stream = body.into_data_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk
+                .map_err(|e| InfraError::BadRequest(format!("upload body interrupted: {e}")))?;
+            size += chunk.len() as u64;
+            if size > limit {
+                return Err(UploadError::TooLarge { limit });
+            }
+            hasher.update(&chunk);
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| InfraError::io(Some(path.clone()), e))?;
+        }
+        file.flush()
+            .await
+            .map_err(|e| InfraError::io(Some(path.clone()), e))?;
+        Ok(ReceivedUpload {
+            path: path.clone(),
+            size,
+            sha256: format!("{:x}", hasher.finalize()),
+        })
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+    result
 }
 
 async fn download_asset(
@@ -1889,7 +2043,7 @@ fn task_id_from_material_input_path(path: &str) -> Option<&str> {
     Some(task_id)
 }
 
-fn is_fast_hash_material_input(kind: AssetKind, path: &str, size: usize) -> bool {
+fn is_fast_hash_material_input(kind: AssetKind, path: &str, size: u64) -> bool {
     kind == AssetKind::Material
         && size <= MATERIAL_FAST_HASH_MAX_BYTES
         && task_id_from_material_input_path(path).is_some()
@@ -2113,6 +2267,161 @@ fn image_task_input(kind: local_core::TaskKind, image: FileRef) -> Result<Infere
 }
 
 /// Removes its file when dropped.
+/// `path` made absolute against the working directory (not resolving
+/// links), so a worker elsewhere on the machine reads the same file.
+fn absolute_path(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// The task's input files with absolute paths, and its model's current id
+/// (a renamed model's old id replaced).
+fn absolute_input_paths(task: &mut InferenceTask) {
+    if let Some(model_id) = &task.model_id {
+        task.model_id = Some(local_core::current_model_id(model_id).to_string());
+    }
+    for file in task.input.files_mut() {
+        if let Some(path) = &file.path {
+            file.path = Some(absolute_path(path));
+        }
+    }
+}
+
+/// How long files workers upload (their outputs) are kept.
+const WORKER_OUTPUT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+#[derive(Debug, serde::Deserialize)]
+struct WorkerFileQuery {
+    #[serde(default)]
+    path: Option<PathBuf>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// A task file for a worker that does not share the controller's files:
+/// any file under the data directory (uploads, assets, temporary images),
+/// to registered workers only.
+async fn worker_file_download(
+    State(state): State<ControllerState>,
+    headers: HeaderMap,
+    Query(query): Query<WorkerFileQuery>,
+) -> axum::response::Response {
+    use futures_util::StreamExt;
+
+    if !state.is_worker(&headers).await {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "missing or invalid worker session token" })),
+        )
+            .into_response();
+    }
+    let Some(path) = query.path else {
+        return error_response(InfraError::BadRequest("path is required".to_string()));
+    };
+    let (Ok(file_path), Ok(data_dir)) =
+        (fs::canonicalize(&path), fs::canonicalize(&state.data_dir))
+    else {
+        return error_response(InfraError::NotFound(format!("file {}", path.display())));
+    };
+    if !file_path.starts_with(&data_dir) || !file_path.is_file() {
+        // Outside the data directory: the controller does not serve it.
+        return error_response(InfraError::NotFound(format!("file {}", path.display())));
+    }
+    let file = match tokio::fs::File::open(&file_path).await {
+        Ok(file) => file,
+        Err(err) => return error_response(InfraError::io(Some(file_path), err)),
+    };
+    let length = file.metadata().await.map(|metadata| metadata.len()).ok();
+    let chunks = futures_util::stream::unfold(file, |mut file| async move {
+        use tokio::io::AsyncReadExt;
+        let mut buffer = vec![0u8; 256 * 1024];
+        match file.read(&mut buffer).await {
+            Ok(0) => None,
+            Ok(read) => {
+                buffer.truncate(read);
+                Some((Ok::<_, std::io::Error>(Bytes::from(buffer)), file))
+            }
+            Err(err) => Some((Err(err), file)),
+        }
+    })
+    .boxed();
+    let mut response = Body::from_stream(chunks).into_response();
+    if let Some(length) = length.and_then(|length| HeaderValue::from_str(&length.to_string()).ok())
+    {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, length);
+    }
+    response
+}
+
+/// An output file of a worker that does not share the controller's files
+/// (synthesized audio): stored under the data directory, its path returned
+/// for the worker to put in the output it answers with.
+async fn worker_file_upload(
+    State(state): State<ControllerState>,
+    headers: HeaderMap,
+    Query(query): Query<WorkerFileQuery>,
+    body: Body,
+) -> axum::response::Response {
+    if !state.is_worker(&headers).await {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "missing or invalid worker session token" })),
+        )
+            .into_response();
+    }
+    let root = state.data_dir.join("tmp").join("worker-outputs");
+    remove_older_than(&root, WORKER_OUTPUT_TTL);
+    let received =
+        match receive_upload(body, &headers, &state.partial_dir(), state.max_upload_bytes).await {
+            Ok(received) => received,
+            Err(err) => return err.into_response(),
+        };
+    let dir = root.join(Uuid::new_v4().as_simple().to_string());
+    let target = dir.join(safe_filename(query.name.as_deref().unwrap_or("output.bin")));
+    let stored = fs::create_dir_all(&dir)
+        .map_err(|e| InfraError::io(Some(dir.clone()), e))
+        .and_then(|_| local_files::move_file(&received.path, &target));
+    if let Err(err) = stored {
+        let _ = fs::remove_file(&received.path);
+        return error_response(err);
+    }
+    (
+        StatusCode::OK,
+        Json(json!({
+            "path": absolute_path(&target),
+            "size": received.size,
+            "sha256": received.sha256,
+        })),
+    )
+        .into_response()
+}
+
+/// Removes the entries of `dir` last modified more than `age` ago.
+fn remove_older_than(dir: &Path, age: Duration) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let old = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|modified| {
+                now.duration_since(modified)
+                    .is_ok_and(|elapsed| elapsed > age)
+            });
+        if old {
+            let path = entry.path();
+            let _ = if path.is_dir() {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path)
+            };
+        }
+    }
+}
+
 struct RemoveOnDrop(PathBuf);
 
 impl Drop for RemoveOnDrop {

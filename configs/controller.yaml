@@ -18,3 +18,6 @@ file_upload_base_url: null
 # HMAC key for signed upload URLs. If null, controller generates a random
 # per-process secret; previously issued upload URLs expire on controller restart.
 upload_signing_secret: null
+# Largest file a signed upload URL accepts, in MiB (LOCAL_MAX_UPLOAD_MB);
+# null means 4096. Uploads stream to disk, so this bounds disk, not memory.
+max_upload_mb: null

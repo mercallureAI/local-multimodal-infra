@@ -1,5 +1,10 @@
 use super::*;
-use axum::{body::Bytes, http::HeaderMap, routing::post, Router};
+use axum::{
+    body::{Body, Bytes},
+    http::HeaderMap,
+    routing::post,
+    Router,
+};
 use local_core::{
     AdapterKind, ArtifactKind, BackendKind, DeviceSpec, FileRef, InferenceInput, LoadPolicy,
     ModelArtifact, ResourceRequirement, ResourceSnapshot, RuntimePolicy, TaskKind,
@@ -176,6 +181,7 @@ async fn worker_registration_requires_shared_token_and_returns_session_token() {
             admin_token: None,
             mcp_infer_tokens: Vec::new(),
             asset_cleanup_interval: None,
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
         },
     );
 
@@ -254,6 +260,7 @@ async fn optional_unuploaded_tts_reference_audio_is_not_used_as_input() {
             admin_token: None,
             mcp_infer_tokens: Vec::new(),
             asset_cleanup_interval: None,
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
         },
     );
     controller
@@ -360,12 +367,12 @@ async fn signed_asset_upload_rejects_unsigned_ttl_params_and_persists_signed_exp
         .parse::<i64>()
         .expect("asset_expires timestamp");
     let record = controller
-        .upload_asset_bytes(
+        .upload_asset_body(
             AssetKind::Material,
             "user/foo.txt".to_string(),
             query.clone(),
             HeaderMap::new(),
-            Bytes::from_static(b"hello"),
+            Body::from(Bytes::from_static(b"hello")),
         )
         .await
         .expect("upload asset bytes");
@@ -397,6 +404,84 @@ async fn signed_asset_upload_rejects_unsigned_ttl_params_and_persists_signed_exp
             &no_expiry_alias,
         )
         .expect_err("only signed asset_expires=never may disable asset expiration");
+    cleanup_test_controller(&controller);
+}
+
+#[tokio::test]
+async fn uploads_stream_to_disk_and_refuse_bodies_over_the_limit() {
+    let mut controller = test_controller_with_temp_data_dir();
+    controller.max_upload_bytes = 1_024;
+    let signed = controller
+        .sign_asset_url_public(AssetSignItem {
+            operation: AssetUrlOperation::Upload,
+            kind: Some(AssetKind::Material),
+            path: Some("user/audio.m4a".to_string()),
+            uri: None,
+            content_type: None,
+            ttl_sec: Some(DEFAULT_MATERIAL_ASSET_TTL_SECS),
+            expires: None,
+            url_ttl_sec: Some(DEFAULT_UPLOAD_URL_TTL_SECS),
+        })
+        .expect("sign upload URL");
+    let query = signed_url_query(&signed.signed_url);
+
+    // Within the limit, arriving in pieces: stored whole, with its hash.
+    let pieces = futures_util::stream::iter([
+        Ok::<_, std::io::Error>(Bytes::from(vec![1u8; 600])),
+        Ok(Bytes::from(vec![2u8; 424])),
+    ]);
+    let record = controller
+        .upload_asset_body(
+            AssetKind::Material,
+            "user/audio.m4a".to_string(),
+            query.clone(),
+            HeaderMap::new(),
+            Body::from_stream(pieces),
+        )
+        .await
+        .expect("upload within the limit");
+    let mut expected = vec![1u8; 600];
+    expected.extend(vec![2u8; 424]);
+    assert_eq!(record.size, 1_024);
+    assert_eq!(
+        record.sha256.as_deref(),
+        Some(sha256_hex(&expected).as_str())
+    );
+    let (_, stored) = controller
+        .assets
+        .read_bytes(&record.uri)
+        .expect("stored asset");
+    assert_eq!(stored, expected);
+
+    // Over the limit, found while streaming or declared up front: 413.
+    let mut declared = HeaderMap::new();
+    declared.insert(header::CONTENT_LENGTH, HeaderValue::from_static("4096"));
+    for (headers, body) in [
+        (HeaderMap::new(), Body::from(vec![0u8; 1_025])),
+        (declared, Body::empty()),
+    ] {
+        let err = controller
+            .upload_asset_body(
+                AssetKind::Material,
+                "user/too-big.m4a".to_string(),
+                query.clone(),
+                headers,
+                body,
+            )
+            .await
+            .expect_err("over the limit");
+        assert!(
+            matches!(err, UploadError::TooLarge { limit: 1_024 }),
+            "{err:?}"
+        );
+        assert_eq!(err.into_response().status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    assert!(controller.assets.get("material/user/too-big.m4a").is_err());
+    // No partial file is left behind.
+    let partial = fs::read_dir(controller.partial_dir())
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(partial, 0);
     cleanup_test_controller(&controller);
 }
 
@@ -573,12 +658,12 @@ async fn small_task_input_reuses_existing_material_and_refreshes_expiry() {
         .expect("asset expiry timestamp");
 
     let record = controller
-        .upload_asset_bytes(
+        .upload_asset_body(
             AssetKind::Material,
             requested_path.clone(),
             query,
             HeaderMap::new(),
-            bytes,
+            Body::from(bytes),
         )
         .await
         .expect("reuse task input upload");
@@ -732,6 +817,7 @@ fn controller_startup_runs_initial_asset_cleanup() {
             admin_token: None,
             mcp_infer_tokens: Vec::new(),
             asset_cleanup_interval: None,
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
         },
     );
 
@@ -852,6 +938,7 @@ fn test_controller_with_temp_data_dir() -> ControllerState {
             admin_token: None,
             mcp_infer_tokens: Vec::new(),
             asset_cleanup_interval: None,
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
         },
     )
 }

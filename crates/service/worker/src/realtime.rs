@@ -40,6 +40,7 @@ pub(crate) async fn realtime(
         return unauthorized();
     }
     let model_id = query.model.unwrap_or_else(|| "voice-cascade".to_string());
+    let model_id = local_core::current_model_id(&model_id).to_string();
     let spec = state
         .specs
         .get(&model_id)

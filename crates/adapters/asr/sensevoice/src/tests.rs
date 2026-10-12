@@ -1,5 +1,5 @@
 use super::*;
-use local_backend_ort::ProviderKind;
+use local_backend_ort::{OrtTensorData, OrtTensorOutput, ProviderKind};
 use local_core::{
     AdapterKind, ArtifactKind, BackendKind, ModelArtifact, ResourceRequirement, RuntimePolicy,
 };
@@ -75,9 +75,10 @@ fn wav_reader_mixes_and_resamples_to_16k() {
         writer.write_sample::<i16>(0).expect("right");
     }
     writer.finalize().expect("finalize");
-    let samples = audio::read_wav_mono_f32(&path).expect("read wav");
+    let samples = audio::read_audio_mono_16k(&path).expect("read wav");
     assert_eq!(samples.len(), 1_600);
-    assert!((samples[0] - 0.25).abs() < 0.01);
+    // Away from the band-limited edges, the mix of 0.5 and 0.
+    assert!((samples[800] - 0.25).abs() < 0.01, "{}", samples[800]);
 }
 
 #[test]
@@ -351,7 +352,7 @@ fn real_model_smoke_if_env_set() {
         "SenseVoice provider report: {:?}",
         adapter.pipeline_provider_report()
     );
-    let duration_samples = audio::read_wav_mono_f32(&audio)
+    let duration_samples = audio::read_audio_mono_16k(&audio)
         .expect("read smoke audio")
         .len();
     let output = adapter
@@ -420,6 +421,197 @@ fn real_model_smoke_if_env_set() {
     }
 }
 
+/// The streamed FSMN-VAD (blocks, carried caches, streaming FBANK/LFR) sees
+/// what one model run over the whole recording sees. Not bit for bit: the
+/// int8 graph's DynamicQuantizeLinear scales each run's activations by that
+/// run's own range (one 10 s block run alone already differs from the same
+/// frames in a 30 s run by ~0.01 on average), so one run is no more exact.
+/// `LOCAL_SENSEVOICE_ASR_MODEL_DIR`, optionally `LOCAL_SENSEVOICE_ASR_TEST_AUDIO`.
+#[test]
+fn real_vad_stream_matches_one_shot_if_env_set() {
+    let Ok(model_dir) = std::env::var("LOCAL_SENSEVOICE_ASR_MODEL_DIR") else {
+        return;
+    };
+    let audio = std::env::var_os("LOCAL_SENSEVOICE_ASR_TEST_AUDIO")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../../scripts/assets/tts-input-mon3tr.wav")
+        });
+    let mut adapter = SenseVoiceAsrAdapter::load(&model_spec(PathBuf::from(model_dir)))
+        .expect("load real SenseVoice model");
+    let samples = audio::read_audio_mono_16k(&audio).expect("read audio");
+    let (streamed, one_shot) = adapter.vad.compare_one_shot(&samples).expect("VAD");
+    assert_eq!(streamed.len(), one_shot.len());
+    let differences = streamed
+        .iter()
+        .zip(&one_shot)
+        .map(|(a, b)| (a - b).abs())
+        .collect::<Vec<_>>();
+    let max = differences.iter().copied().fold(0.0, f32::max);
+    let mean = differences.iter().sum::<f32>() / differences.len().max(1) as f32;
+    // Speech/non-speech decisions (threshold 0.8 on speech probability).
+    let flipped = streamed
+        .iter()
+        .zip(&one_shot)
+        .filter(|(a, b)| (**a >= 0.8) != (**b >= 0.8))
+        .count();
+    eprintln!(
+        "{} frames: speech probability |difference| mean {mean:.5} max {max:.4}; {flipped} decisions differ",
+        streamed.len()
+    );
+    assert!(mean < 0.02, "mean difference {mean}");
+    assert!(flipped * 50 <= streamed.len(), "{flipped} decisions differ");
+}
+
+#[test]
+fn cuda_graph_frames_metadata_is_sorted_and_bounded() {
+    let mut spec = model_spec(PathBuf::from("unused"));
+    spec.metadata.remove(CUDA_GRAPH_FRAMES_KEY);
+    assert!(metadata_frames(&spec, CUDA_GRAPH_FRAMES_KEY)
+        .expect("absent")
+        .is_empty());
+    spec.metadata.insert(
+        CUDA_GRAPH_FRAMES_KEY.to_string(),
+        serde_json::json!([352, 64, 128, 64]),
+    );
+    assert_eq!(
+        metadata_frames(&spec, CUDA_GRAPH_FRAMES_KEY).expect("frames"),
+        [64, 128, 352]
+    );
+    for invalid in [
+        serde_json::json!([0]),
+        serde_json::json!([MAX_CUDA_GRAPH_FRAMES + 1]),
+        serde_json::json!(["64"]),
+        serde_json::json!(64),
+    ] {
+        spec.metadata
+            .insert(CUDA_GRAPH_FRAMES_KEY.to_string(), invalid);
+        assert!(metadata_frames(&spec, CUDA_GRAPH_FRAMES_KEY).is_err());
+    }
+}
+
+#[test]
+fn ctc_ids_output_decodes_as_the_logits_do() {
+    let tokens = [
+        "<blank>",
+        "<|zh|>",
+        "<|NEUTRAL|>",
+        "<|Speech|>",
+        "<|withitn|>",
+        "你",
+        "好",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    let ids = [1i64, 2, 3, 4, 0, 5, 5, 0, 6, 6];
+    let vocab = tokens.len();
+    let logits = ids
+        .iter()
+        .flat_map(|&id| (0..vocab).map(move |index| if index as i64 == id { 1.0 } else { 0.0 }))
+        .collect::<Vec<f32>>();
+    let from_logits = decode_outputs(
+        vec![OrtTensorOutput {
+            name: "ctc_logits".to_string(),
+            shape: vec![1, ids.len(), vocab],
+            data: OrtTensorData::F32(logits),
+        }],
+        &tokens,
+        60,
+    )
+    .expect("logits");
+    let from_ids = decode_outputs(
+        vec![OrtTensorOutput {
+            name: cuda_graph::IDS_OUTPUT.to_string(),
+            shape: vec![1, ids.len()],
+            data: OrtTensorData::I64(ids.to_vec()),
+        }],
+        &tokens,
+        60,
+    )
+    .expect("ids");
+    assert_eq!(from_ids.text, "你好。");
+    assert_eq!(from_ids.text, from_logits.text);
+    assert_eq!(
+        from_ids
+            .tokens
+            .iter()
+            .map(|t| t.start_ms)
+            .collect::<Vec<_>>(),
+        from_logits
+            .tokens
+            .iter()
+            .map(|t| t.start_ms)
+            .collect::<Vec<_>>()
+    );
+    assert!(decode_ids(&[-1], &tokens, 60).is_err());
+}
+
+#[test]
+fn shared_weights_manifest_sits_beside_the_graph() {
+    assert_eq!(
+        cuda_graph::manifest_path(Path::new("pkg/asr/model_gpu_int8.onnx")),
+        Path::new("pkg/asr/model_gpu_int8.shared.json")
+    );
+}
+
+/// The CUDA graph buckets decode real speech segments exactly as the
+/// session does. `LOCAL_SENSEVOICE_ASR_MODEL_DIR` with a package that has
+/// `ctc_ids` and its `.shared.json` (`LOCAL_SENSEVOICE_ASR_MODEL_FILE`, e.g.
+/// model_gpu_int8.onnx), `--features cuda`.
+#[test]
+fn real_cuda_graph_matches_session_if_env_set() {
+    let (Ok(model_dir), Ok(file)) = (
+        std::env::var("LOCAL_SENSEVOICE_ASR_MODEL_DIR"),
+        std::env::var("LOCAL_SENSEVOICE_ASR_MODEL_FILE"),
+    ) else {
+        return;
+    };
+    let audio = std::env::var_os("LOCAL_SENSEVOICE_ASR_TEST_AUDIO")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../../scripts/assets/tts-input-mon3tr.wav")
+        });
+    let mut spec = model_spec(PathBuf::from(model_dir));
+    spec.metadata
+        .insert(ASR_MODEL_FILE_KEY.to_string(), serde_json::json!(file));
+    spec.metadata.insert(
+        CUDA_GRAPH_FRAMES_KEY.to_string(),
+        serde_json::json!([64, 128, 256, 352]),
+    );
+    let mut adapter = SenseVoiceAsrAdapter::load(&spec).expect("load real SenseVoice model");
+    assert_eq!(adapter.cuda_graph_frames(), [64, 128, 256, 352]);
+    let samples = audio::read_audio_mono_16k(&audio).expect("read audio");
+    let segments = adapter.vad.segment(&samples).expect("vad");
+    let mut compared = 0;
+    for segment in segments.iter().take(40) {
+        let features = features::extract(
+            &samples[segment.start_sample..segment.end_sample],
+            &adapter.config.frontend_conf,
+            &adapter.cmvn,
+        )
+        .expect("features");
+        if features.frames == 0 {
+            continue;
+        }
+        let graph = adapter.infer_features(features.clone()).expect("graph");
+        let session = Asr {
+            session: &mut adapter.session,
+            graphs: None,
+            tokens: &adapter.tokens,
+            frontend: &adapter.config.frontend_conf,
+        }
+        .infer(features)
+        .expect("session");
+        assert_eq!(graph.text, session.text, "segment {segment:?}");
+        compared += 1;
+    }
+    eprintln!("{compared} segments decoded alike with and without CUDA graphs");
+    assert!(compared > 0);
+}
+
 #[test]
 fn real_speaker_benchmark_if_env_set() {
     if std::env::var("LOCAL_SENSEVOICE_ASR_SPEAKER_BENCH").as_deref() != Ok("1") {
@@ -432,7 +624,7 @@ fn real_speaker_benchmark_if_env_set() {
         std::env::var_os("LOCAL_SENSEVOICE_ASR_TEST_AUDIO").expect("benchmark audio path"),
     );
     let mut adapter = SenseVoiceAsrAdapter::load(&model_spec(model_dir)).expect("load model");
-    let samples = audio::read_wav_mono_f32(&audio).expect("read benchmark audio");
+    let samples = audio::read_audio_mono_16k(&audio).expect("read benchmark audio");
     let segments = adapter.vad.segment(&samples).expect("benchmark VAD");
     let mut elapsed_ms = Vec::new();
     let mut labels = Vec::new();
@@ -459,6 +651,16 @@ fn model_spec(root: PathBuf) -> ModelSpec {
             "speaker_batch_size".to_string(),
             serde_json::json!(batch_size.parse::<u64>().expect("speaker batch size")),
         );
+    }
+    if let Some(frames) = std::env::var("LOCAL_SENSEVOICE_ASR_CUDA_GRAPH_FRAMES")
+        .ok()
+        .filter(|frames| !frames.is_empty())
+    {
+        let frames = frames
+            .split(',')
+            .map(|value| value.trim().parse::<u64>().expect("frame count"))
+            .collect::<Vec<_>>();
+        metadata.insert(CUDA_GRAPH_FRAMES_KEY.to_string(), serde_json::json!(frames));
     }
     if let Ok(value) = std::env::var("LOCAL_SENSEVOICE_ASR_SPEAKER_IO_BINDING") {
         metadata.insert(
@@ -503,7 +705,7 @@ fn model_spec(root: PathBuf) -> ModelSpec {
 /// diarization, as the cascade asks): FSMN-VAD, features, SenseVoice.
 /// `LOCAL_SENSEVOICE_ASR_STAGE_TIMING=1` with the model directory set
 /// (`LOCAL_SENSEVOICE_ASR_MODEL_FILE`: its graph in asr/, e.g.
-/// model_fp16.onnx); `LOCAL_SENSEVOICE_ASR_STAGE_SECONDS` cuts the audio
+/// model_gpu_int8.onnx); `LOCAL_SENSEVOICE_ASR_STAGE_SECONDS` cuts the audio
 /// (default 1.5).
 #[test]
 fn real_model_stage_timing_if_env_set() {
@@ -528,7 +730,7 @@ fn real_model_stage_timing_if_env_set() {
     }
     let mut adapter = SenseVoiceAsrAdapter::load(&spec).expect("load real SenseVoice model");
     eprintln!("providers: {:?}", adapter.pipeline_provider_report());
-    let mut samples = audio::read_wav_mono_f32(&audio).expect("read audio");
+    let mut samples = audio::read_audio_mono_16k(&audio).expect("read audio");
     samples.truncate((seconds * 16_000.0) as usize);
     let cut = std::env::temp_dir().join("sensevoice-stage-timing.wav");
     let spec = hound::WavSpec {
@@ -554,7 +756,7 @@ fn real_model_stage_timing_if_env_set() {
     .into();
     for round in 0..6 {
         let started = std::time::Instant::now();
-        let read = audio::read_wav_mono_f32(&cut).expect("read cut audio");
+        let read = audio::read_audio_mono_16k(&cut).expect("read cut audio");
         let read_ms = started.elapsed().as_secs_f64() * 1000.0;
         let at = std::time::Instant::now();
         let segments = adapter.vad.segment(&read).expect("vad");

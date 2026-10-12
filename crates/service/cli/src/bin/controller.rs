@@ -40,6 +40,11 @@ async fn main() -> Result<()> {
     if let Ok(secret) = std::env::var("LOCAL_UPLOAD_SIGNING_SECRET") {
         config.upload_signing_secret = Some(secret);
     }
+    if let Ok(megabytes) = std::env::var("LOCAL_MAX_UPLOAD_MB") {
+        config.max_upload_mb = Some(megabytes.trim().parse().map_err(|e| {
+            InfraError::Config(format!("invalid LOCAL_MAX_UPLOAD_MB `{megabytes}`: {e}"))
+        })?);
+    }
     if let Ok(token) = std::env::var("LOCAL_ADMIN_TOKEN") {
         config.admin_token = non_empty_token(token);
     }
@@ -71,6 +76,8 @@ async fn main() -> Result<()> {
         "glm-ocr-onnx-q4f16",
         "glm-ocr-onnx-fp16",
         "qwen3-asr-0.6b-onnx",
+        // Renamed: its spec now goes by the current id.
+        "sensevoice-small-fp16-onnx",
     ])?;
     store.seed_models(local_registry::default_catalog(&layout.model_dir))?;
     store.seed_models(local_registry::load_yaml_specs(&layout.providers_conf_dir)?)?;
@@ -89,6 +96,11 @@ async fn main() -> Result<()> {
             upload_signing_secret: config.upload_signing_secret.clone(),
             admin_token: config.admin_token.clone(),
             mcp_infer_tokens: config.mcp_infer_tokens.clone(),
+            max_upload_bytes: config
+                .max_upload_mb
+                .map_or(local_controller::DEFAULT_MAX_UPLOAD_BYTES, |megabytes| {
+                    megabytes.saturating_mul(1024 * 1024)
+                }),
             ..ControllerOptions::default()
         },
     );

@@ -34,7 +34,7 @@
 | 文档 OCR | `unlimited-ocr-onnx` | 本地导出后启用（int8 专家，需 NVIDIA GPU） | 页面文本（Markdown/HTML 表格），带版面类别与坐标 |
 | 画面文字行 OCR | `ppocrv5-mobile-onnx` | 默认启用 | 每行文字、置信度与像素框（场景文字、界面、名牌） |
 | 语音识别 | `sensevoice-small-onnx` | 默认启用 | 文本、时间轴、语言、情绪、发言人 |
-| 语音识别（低延迟） | `sensevoice-small-fp16-onnx` | 本地导出后启用 | 同上；float16 图，CUDA 上每句约 40–90 ms |
+| 语音识别（低延迟） | `sensevoice-small-int8-gpu-onnx` | 本地导出后启用 | 同上；GPU int8 图（仅权重 int8）按长度分桶以 CUDA graph 重放，CUDA 上 1.5 s 约 16 ms |
 | 语音合成 | `indextts-1.5-onnx` | 默认启用 | WAV 音频 |
 | 语音合成 | `indextts-2.5-onnx` | 默认启用（FP16，建议 NVIDIA GPU） | WAV 音频，支持情绪控制 |
 | 语音合成 | `qwen3-tts-0.6b-onnx` | 本地导出后启用（INT8 权重，建议 NVIDIA GPU） | 流式 24 kHz 音频，3 秒参考音频克隆声音，可边接收文字边合成 |
@@ -58,7 +58,7 @@
 
 最近的推理记录：`GET /v1/inferences[?limit=100&kind=&exclude=]`（受推理 token 保护）返回所有 worker 内存里最近的推理（每个 worker 保留 1000 条，默认取最新 100 条），每条有任务种类、模型、开始与结束时间（Unix 毫秒）、总耗时和各阶段耗时（排队、加载、执行、首个输出）。实时语音每次回复另记一条 `voice.turn`：从说话结束到回复首段音频，分为 `vad`（等静音判定结束）、`asr`、`gate`（等唤醒词判断）、`llm`（到回复首段文字）、`tts`（到首段音频）。`kind` 只取这些种类，`exclude` 去掉这些种类或模型（逗号分隔），如 `exclude=ocr.lines` 去掉高频的 OCR。
 
-低延迟语音识别 `sensevoice-small-fp16-onnx` 与 `sensevoice-small-onnx` 是同一个 SenseVoiceSmall：后者的 int8 图里 281 个 `DynamicQuantizeLinear` 在 CUDA provider 下回落到 CPU，每层在 CPU 与 GPU 间往返，一句话约 200–350 ms；float16 图全程在 GPU 上，约 40–90 ms，转写相同。由 `python -m scripts.local.sensevoice_fp16_export --base-dir <models>/sensevoice-small-onnx --output-dir <models>/sensevoice-small-fp16-onnx` 从固定 revision 导出（约 470 MB），其余文件取自 `sensevoice-small-onnx`；元数据 `asr_model_file` 指定 `asr/` 中的图。实时语音级联在 `voice-cascade.yaml` 的 `asr_model` 中选用；默认即为它，未导出时会话启动时自动改用 `asr_fallback_model`（`sensevoice-small-onnx`）。
+低延迟语音识别 `sensevoice-small-int8-gpu-onnx` 与 `sensevoice-small-onnx` 是同一个 SenseVoiceSmall：后者的动态 int8 图里 281 个 `DynamicQuantizeLinear` 在 CUDA provider 下回落到 CPU，每层在 CPU 与 GPU 间往返，一句话约 200–350 ms；`asr/model_gpu_int8.onnx` 只把这 281 个线性层的权重量化为 int8（`MatMulNBits`），激活保持 float32，全程在 GPU 上，转写与 float32 图一致度 99.8%。一次推理约 2400 个小 kernel，不论长短都约 23 ms，因此按元数据 `asr_cuda_graph_frames`（默认 64/128/256/352 个 LFR 帧，即 3.8/7.7/15.4/21.1 s）每档建一个定长会话以 CUDA graph 重放，共享一份显存中的权重（四档约多占 0.6 GB）：SenseVoice 1.5 s 约 9 ms、整次转写约 16 ms，6 s 约 40 ms。由 `python -m scripts.local.sensevoice_cuda_export export --base-dir <models>/sensevoice-small-onnx --output-dir <models>/sensevoice-small-int8-gpu-onnx` 从固定 revision 导出（`asr/model_gpu_int8.onnx`、权重 `.onnx.data` 约 270 MB 及其字节范围 `model_gpu_int8.shared.json`），其余文件取自 `sensevoice-small-onnx`；元数据 `asr_model_file` 指定 `asr/` 中的图。实时语音级联在 `voice-cascade.yaml` 的 `asr_model` 中选用；默认即为它，未导出时会话启动时自动改用 `asr_fallback_model`（`sensevoice-small-onnx`）。
 
 实时语音的群聊会话用唤醒词决定哪些话要回应：k2-fsa 开放词表的中英混合 zipformer transducer 唤醒词模型（`sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20`，Apache-2.0，3.3M 参数，fp32 chunk-16 约 13 MB），由 `local-adapter-kws-zipformer` 移植 sherpa-onnx 的检测流程（Kaldi fbank、320 ms 一块的流式编码器、沿唤醒词加分的束搜索）在 CPU 上运行，每路约占 2% 的核，词说完后 0.2–0.6 s 检出，输入先做音量归一；转写中某句以唤醒词开头或结尾的话也算叫到（ASR 能听出检测器漏掉的名字）。唤醒词直接写文字（机器人名字、别名、`wake_words`），中文按拼音、英文按模型词典、字母与数字各有读法；用 `python -m scripts.local.fetch_kws_model` 下载并校验发布包，放到 `<models>/voice-cascade/kws`。详见 `docs/realtime-voice.md` 的 Wake words。
 
@@ -168,9 +168,9 @@ curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
 - `mmarco-minilm-l12-onnx`
 - `indextts-1.5-onnx`
 - `indextts-2.5-onnx`（FP16，约 2.8 GB）
-- `voice-cascade`（只下载 Silero VAD；对话所用的 ASR、对话与 TTS 模型需各自下载或导出，默认 ASR `sensevoice-small-fp16-onnx` 需本地导出，见上文；群聊唤醒词模型用 `python -m scripts.local.fetch_kws_model` 放到 `voice-cascade/kws`）
+- `voice-cascade`（只下载 Silero VAD；对话所用的 ASR、对话与 TTS 模型需各自下载或导出，默认 ASR `sensevoice-small-int8-gpu-onnx` 需本地导出，见上文；群聊唤醒词模型用 `python -m scripts.local.fetch_kws_model` 放到 `voice-cascade/kws`）
 
-`depth-anything-v2-metric-indoor-small-onnx` 与 `sensevoice-small-fp16-onnx` 没有发布的包，按上文的导出命令本地导出。
+`depth-anything-v2-metric-indoor-small-onnx` 与 `sensevoice-small-int8-gpu-onnx` 没有发布的包，按上文的导出命令本地导出。
 
 `qwen3guard-gen-0.6b-int4-onnx`、`qwen3guard-gen-0.6b-onnx`、`freepik-nsfw-image-detector-onnx` 与 `falconsai-nsfw-image-detection-onnx` 没有发布的包，按 [`configs/providers/moderation`](configs/providers/moderation) 中的命令本地导出（NSFW 分类器用 `python -m scripts.local.nsfw_export`）。
 
@@ -273,7 +273,7 @@ python -m scripts.local.smoke --tests mcp \
 | Freepik NSFW image detector（本地导出 ONNX 的源模型） | [Freepik/nsfw_image_detector](https://huggingface.co/Freepik/nsfw_image_detector) | `15b85477e4fd2000db76ae9aae0f89a72f95e2e3` |
 | Falconsai NSFW image detection（本地导出 ONNX 的源模型） | [Falconsai/nsfw_image_detection](https://huggingface.co/Falconsai/nsfw_image_detection) | `96cb0d0342c7afb80cab76ecc58b265fa44da256` |
 | Depth Anything V2 Metric Indoor Small（本地导出 ONNX 的源模型） | [depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf](https://huggingface.co/depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf) | `8078d68a9c75a972131914f6afd0c1723be0da7f` |
-| SenseVoiceSmall（本地导出 float16 ONNX 的源模型） | [FunAudioLLM/SenseVoiceSmall](https://huggingface.co/FunAudioLLM/SenseVoiceSmall) | `3847d57b6bdf2dd8875cb1508d2af43d80a16bf7` |
+| SenseVoiceSmall（本地导出 GPU int8 ONNX 的源模型） | [FunAudioLLM/SenseVoiceSmall](https://huggingface.co/FunAudioLLM/SenseVoiceSmall) | `3847d57b6bdf2dd8875cb1508d2af43d80a16bf7` |
 | Silero VAD v6.2.3 | [snakers4/silero-vad](https://github.com/snakers4/silero-vad) | `5cd7945676eb32225748052e2e6a0580e4686a08` |
 | sherpa-onnx KWS zipformer zh-en 3M（唤醒词） | [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models) | `sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20` |
 

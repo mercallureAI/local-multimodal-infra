@@ -197,7 +197,9 @@ impl RuntimeManager {
 
     /// The adapter a configured model runs on.
     pub fn adapter(&self, model_id: &str) -> Option<AdapterKind> {
-        self.specs.get(model_id).map(|spec| spec.adapter)
+        self.specs
+            .get(local_core::current_model_id(model_id))
+            .map(|spec| spec.adapter)
     }
 
     /// Like [`Self::infer_streaming`] for a TTS task whose text is still
@@ -475,15 +477,16 @@ impl RuntimeManager {
 
     fn resolve_spec(&self, task: &InferenceTask) -> Result<ModelSpec> {
         if let Some(model_id) = &task.model_id {
+            let model_id = local_core::current_model_id(model_id);
             let spec = self.specs.get(model_id).cloned().ok_or_else(|| {
                 InfraError::ModelNotConfigured {
-                    model_id: model_id.clone(),
+                    model_id: model_id.to_string(),
                     reason: "model id is not present in worker registry snapshot".to_string(),
                 }
             })?;
             if !spec.enabled {
                 return Err(InfraError::ModelNotConfigured {
-                    model_id: model_id.clone(),
+                    model_id: model_id.to_string(),
                     reason: "model is disabled".to_string(),
                 });
             }
@@ -774,7 +777,7 @@ fn validated_runtime_providers_for_model(model_id: &str) -> Option<&'static [&'s
         "yolo11n.onnx" => Some(&["cuda", "dml", "cpu"]),
         // The FunASR ASR pipeline loads FSMN-VAD, SenseVoice, and CAM++ ONNX
         // sessions with one shared provider policy.
-        "sensevoice-small-onnx" | "sensevoice-small-fp16-onnx" => Some(&["cuda", "cpu"]),
+        "sensevoice-small-onnx" | "sensevoice-small-int8-gpu-onnx" => Some(&["cuda", "cpu"]),
         // All A-F/prefill sessions receive the same provider selection. Root
         // FP32 CUDA is policy-enabled, but still needs real NVIDIA validation.
         "indextts-1.5-onnx" => Some(&["cuda", "cpu"]),

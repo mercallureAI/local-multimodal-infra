@@ -532,3 +532,23 @@ fn simple_glob_matches_hf_allow_patterns() {
     assert!(glob_match("tokenizer.?son", "tokenizer.json"));
     assert!(!glob_match("*.onnx", "model.bin"));
 }
+
+#[test]
+fn a_renamed_model_uses_the_directory_of_its_former_id_until_its_own_exists() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let models = dir.path().join("models");
+    let store = SqliteModelStore::new(dir.path().join("data/local.db"), &models).expect("store");
+    let (old, current) = local_core::RENAMED_MODELS[0];
+    let spec = || base_spec(current, vec![artifact(ArtifactKind::Local, PathBuf::new())]);
+    // Neither directory: the current id's.
+    let normalized = store.normalize_model_spec(spec()).expect("normalize");
+    assert_eq!(normalized.artifacts[0].path, models.join(current));
+    // Only the former one: that.
+    fs::create_dir_all(models.join(old)).expect("old dir");
+    let normalized = store.normalize_model_spec(spec()).expect("normalize");
+    assert_eq!(normalized.artifacts[0].path, models.join(old));
+    // Both: the current id's.
+    fs::create_dir_all(models.join(current)).expect("new dir");
+    let normalized = store.normalize_model_spec(spec()).expect("normalize");
+    assert_eq!(normalized.artifacts[0].path, models.join(current));
+}

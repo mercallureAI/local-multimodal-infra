@@ -32,6 +32,7 @@ pub use shared_initializers::{InitializerRange, SharedInitializers};
 #[derive(Default)]
 struct SessionExtras<'a> {
     config_entries: &'a [(String, String)],
+    dimension_overrides: &'a [(String, i64)],
     initializers: &'a [(String, std::sync::Arc<DynValue>)],
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     cuda_memory: Option<CudaMemoryOptions>,
@@ -485,6 +486,7 @@ pub struct OrtBackend {
     config_entries: Vec<(String, String)>,
     cuda_memory: Option<CudaMemoryOptions>,
     cuda_options: CudaSessionOptions,
+    dimension_overrides: Vec<(String, i64)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -501,6 +503,7 @@ impl OrtBackend {
             config_entries: Vec::new(),
             cuda_memory: None,
             cuda_options: CudaSessionOptions::default(),
+            dimension_overrides: Vec::new(),
         }
     }
 
@@ -537,6 +540,14 @@ impl OrtBackend {
         self
     }
 
+    /// Fixes the free (symbolic) input dimension `name` to `size` in every
+    /// session this backend loads, so shape computations fold into constants
+    /// (all nodes can then run on the GPU, and be captured as a CUDA graph).
+    pub fn with_dimension_override(mut self, name: impl Into<String>, size: i64) -> Self {
+        self.dimension_overrides.push((name.into(), size));
+        self
+    }
+
     pub fn with_cpu_session_options(mut self, options: CpuSessionOptions) -> Result<Self> {
         if options.intra_threads == 0 || options.inter_threads == 0 {
             return Err(InfraError::Backend(
@@ -569,6 +580,7 @@ impl OrtBackend {
     ) -> Result<OrtSession> {
         let extras = SessionExtras {
             config_entries: &self.config_entries,
+            dimension_overrides: &self.dimension_overrides,
             initializers,
             cuda_memory: self.cuda_memory,
             cuda: self.cuda_options,
@@ -838,6 +850,11 @@ impl RealSession {
     ) -> Result<ort::session::builder::SessionBuilder> {
         for (key, value) in extras.config_entries {
             builder = builder.with_config_entry(key, value).map_err(map_ort_err)?;
+        }
+        for (name, size) in extras.dimension_overrides {
+            builder = builder
+                .with_dimension_override(name, *size)
+                .map_err(map_ort_err)?;
         }
         for (name, value) in extras.initializers {
             builder = builder

@@ -1,0 +1,65 @@
+id: sensevoice-small-int8-gpu-onnx
+# Low latency: a weight-only int8 graph (MatMulNBits, float32 activations)
+# that runs on the GPU throughout, replayed as CUDA graphs: ~9 ms of
+# SenseVoice (~16 ms in all) for 1.5 s on CUDA against ~200-350 ms for
+# sensevoice-small-onnx's dynamic int8 graph (its DynamicQuantizeLinear nodes
+# run on the CPU). Requests for sensevoice-small-fp16-onnx, the float16 graph
+# it replaced, get this model (local_core::RENAMED_MODELS).
+name: FunASR Full ASR ONNX, GPU int8 (low latency)
+enabled: true
+task_kinds:
+  - asr.transcribe
+adapter: sense_voice_asr
+backend: ort
+artifacts:
+  # Local export (path omitted: <model_dir>/sensevoice-small-int8-gpu-onnx,
+  # or <model_dir>/sensevoice-small-fp16-onnx where only that exists) of
+  # FunAudioLLM/SenseVoiceSmall at revision
+  # 3847d57b6bdf2dd8875cb1508d2af43d80a16bf7 (FunASR model license):
+  #   python -m scripts.local.sensevoice_cuda_export export \
+  #     --base-dir <model_dir>/sensevoice-small-onnx \
+  #     --output-dir <model_dir>/sensevoice-small-int8-gpu-onnx
+  # or, from an earlier float16 export (needs only onnx + onnxruntime):
+  #   python -m scripts.local.sensevoice_cuda_export from-fp16 \
+  #     --model-dir <model_dir>/sensevoice-small-fp16-onnx
+  # The directory is sensevoice-small-onnx's (asr/am.mvn, config.yaml,
+  # tokens.json, vad/, speaker/) with asr/model_gpu_int8.onnx, its weights
+  # (.onnx.data, ~270 MB) and their byte ranges (model_gpu_int8.shared.json)
+  # in place of asr/model_quant.onnx.
+  - type: local
+runtime:
+  provider_order: [cuda, cpu]
+  max_concurrency: 1
+  idle_ttl_sec: 600
+resources:
+  min_ram_mb: 1536
+  min_vram_mb: 0
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  # Used where it is named (voice-cascade's asr_model), never picked for a
+  # task naming no model: most installs lack the local export.
+  auto_select: false
+  license: FunASR Model License
+  runtime: onnxruntime
+  model_family: funasr_full_asr
+  task: automatic-speech-recognition
+  source: FunAudioLLM/SenseVoiceSmall
+  huggingface_revision: 3847d57b6bdf2dd8875cb1508d2af43d80a16bf7
+  # The SenseVoice graph in asr/ (default model_quant.onnx, the int8 one).
+  asr_model_file: model_gpu_int8.onnx
+  # Speech segments are cut (at the weakest speech) at this length.
+  vad_max_segment_seconds: 20
+  # Input lengths (LFR frames of 60 ms) run as CUDA graphs, one session each
+  # sharing one copy of the weights (~0.6 GB of GPU memory for the four):
+  # 3.8, 7.7, 15.4 and 21.1 s; a longer input runs without a graph.
+  asr_cuda_graph_frames: [64, 128, 256, 352]
+  vad_provider_order: [cpu]
+  speaker_batch_size: 32
+  speaker_io_binding: true
+  speaker_diarization_default: true
+  timestamps_default: true
+  timestamp_granularity_sec: 10
+  token_timestamps_default: false

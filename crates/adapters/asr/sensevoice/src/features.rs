@@ -87,7 +87,7 @@ impl Cmvn {
         Ok(Self { means, vars })
     }
 
-    fn apply(&self, frame: &mut [f32]) {
+    pub fn apply(&self, frame: &mut [f32]) {
         for ((value, mean), var) in frame.iter_mut().zip(&self.means).zip(&self.vars) {
             *value = (*value + *mean) * *var;
         }
@@ -115,12 +115,28 @@ pub fn extract(
     frontend: &FrontendConfig,
     cmvn: &Cmvn,
 ) -> Result<SenseVoiceFeatures> {
+    let raw = fbank_frames(samples, frontend)?;
+    if raw.is_empty() {
+        return Ok(SenseVoiceFeatures {
+            frames: 0,
+            dim: frontend.n_mels * frontend.lfr_m,
+            data: Vec::new(),
+        });
+    }
+    lfr_cmvn(raw, frontend, cmvn)
+}
+
+/// Kaldi FBANK frames of `samples` (16 kHz, [-1, 1]). Edges are snipped, so
+/// frame `i` depends on samples `i * shift .. i * shift + length` alone and a
+/// stream may be cut into pieces on frame-shift boundaries.
+pub fn fbank_frames(samples: &[f32], frontend: &FrontendConfig) -> Result<Vec<Vec<f32>>> {
     let mut options = FbankOptions::default();
     options.frame_opts.dither = 0.0;
     options.frame_opts.samp_freq = frontend.fs as f32;
     options.frame_opts.window_type = frontend.window.clone();
     options.frame_opts.frame_length_ms = frontend.frame_length as f32;
     options.frame_opts.frame_shift_ms = frontend.frame_shift as f32;
+    options.frame_opts.snip_edges = true;
     options.mel_opts.num_bins = frontend.n_mels;
     options.energy_floor = 0.0;
     // kaldi-native-fbank C++ defaults to false; the Rust port defaults to true.
@@ -135,18 +151,17 @@ pub fn extract(
         .map(|sample| sample * 32_768.0)
         .collect::<Vec<_>>();
     fbank.accept_waveform(frontend.fs as f32, &scaled);
-    let frames = fbank.num_frames_ready();
-    if frames == 0 {
-        return Ok(SenseVoiceFeatures {
-            frames: 0,
-            dim: frontend.n_mels * frontend.lfr_m,
-            data: Vec::new(),
-        });
+    Ok(std::mem::take(&mut fbank.features))
+}
+
+impl FrontendConfig {
+    pub fn frame_shift_samples(&self) -> usize {
+        (self.fs as usize * self.frame_shift as usize) / 1000
     }
-    let raw = (0..frames)
-        .map(|index| fbank.get_frame(index).expect("ready FBANK frame").to_vec())
-        .collect::<Vec<_>>();
-    lfr_cmvn(raw, frontend, cmvn)
+
+    pub fn frame_length_samples(&self) -> usize {
+        (self.fs as usize * self.frame_length as usize) / 1000
+    }
 }
 
 fn lfr_cmvn(

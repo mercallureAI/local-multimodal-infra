@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{mpsc, RwLock};
 
+mod files;
 #[cfg(feature = "realtime")]
 mod realtime;
 
@@ -37,6 +38,8 @@ pub struct WorkerState {
     data_dir: Arc<std::path::PathBuf>,
     _idle_maintenance_loop: Arc<IdleMaintenanceLoopHandle>,
     http: reqwest::Client,
+    /// Set on registration.
+    controller: Arc<RwLock<Option<files::ControllerLink>>>,
 }
 
 impl WorkerState {
@@ -64,6 +67,7 @@ impl WorkerState {
             data_dir: Arc::new(std::path::PathBuf::from("workdir/data")),
             _idle_maintenance_loop: idle_maintenance_loop,
             http: reqwest::Client::new(),
+            controller: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -128,6 +132,14 @@ impl WorkerState {
             .map_err(|e| {
                 InfraError::Backend(format!("decode worker registration response: {e}"))
             })?;
+        let link = files::ControllerLink::new(controller_url, &body);
+        tracing::info!(
+            controller = %link.url,
+            shared_files = link.shared_files,
+            "registered with the controller (task files {})",
+            if link.shared_files { "read by path" } else { "fetched over HTTP" }
+        );
+        *self.controller.write().await = Some(link);
         *self.session_token.write().await = Some(body.session_token);
         Ok(())
     }
@@ -230,14 +242,24 @@ async fn inferences(State(state): State<WorkerState>, headers: HeaderMap) -> imp
 async fn infer(
     State(state): State<WorkerState>,
     headers: HeaderMap,
-    Json(task): Json<InferenceTask>,
+    Json(mut task): Json<InferenceTask>,
 ) -> impl IntoResponse {
     let handler_started = std::time::Instant::now();
     if !authorized(&state, &headers).await {
         return unauthorized();
     }
     let request_id = task.id;
-    let result = state.runtime.infer(task).await;
+    let result = match state.stage_inputs(&mut task).await {
+        Ok(staged) => {
+            let result = state.runtime.infer(task).await;
+            drop(staged);
+            match result {
+                Ok(mut output) => state.publish_outputs(&mut output).await.map(|()| output),
+                Err(err) => Err(err),
+            }
+        }
+        Err(err) => Err(err),
+    };
     tracing::info!(
         request_id = %request_id,
         handler_total_ms = handler_started.elapsed().as_millis() as u64,
@@ -264,17 +286,30 @@ async fn infer(
 async fn infer_stream(
     State(state): State<WorkerState>,
     headers: HeaderMap,
-    Json(task): Json<InferenceTask>,
+    Json(mut task): Json<InferenceTask>,
 ) -> axum::response::Response {
     if !authorized(&state, &headers).await {
         return unauthorized();
     }
     let (events, receiver) = mpsc::channel::<InferenceEvent>(64);
-    let runtime = state.runtime.clone();
     tokio::spawn(async move {
         let request_id = task.id;
         let started = std::time::Instant::now();
-        let result = runtime.infer_streaming(task, events.clone()).await;
+        let result = match state.stage_inputs(&mut task).await {
+            Ok(staged) => {
+                let result = state
+                    .runtime
+                    .clone()
+                    .infer_streaming(task, events.clone())
+                    .await;
+                drop(staged);
+                match result {
+                    Ok(mut output) => state.publish_outputs(&mut output).await.map(|()| output),
+                    Err(err) => Err(err),
+                }
+            }
+            Err(err) => Err(err),
+        };
         tracing::info!(
             request_id = %request_id,
             handler_total_ms = started.elapsed().as_millis() as u64,

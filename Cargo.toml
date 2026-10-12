@@ -42,6 +42,9 @@ serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
 sysinfo = "0.30"
+# Audio input for ASR: WAV/FLAC/Vorbis by default, plus AAC (MP4/M4A and
+# Bilibili's fragmented .m4s), MP3 and ALAC.
+symphonia = { version = "0.6", features = ["aac", "alac", "isomp4", "mp3"] }
 thiserror = "1"
 tokio-tungstenite = "0.24"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "net", "sync"] }

@@ -693,6 +693,27 @@ pub enum InferenceInput {
     },
 }
 
+impl InferenceInput {
+    /// The files the input names (audio, images, reference audio).
+    pub fn files_mut(&mut self) -> Vec<&mut FileRef> {
+        match self {
+            Self::AsrTranscribe { audio } => vec![audio],
+            Self::ObjectDetect { image }
+            | Self::OcrRecognize { image }
+            | Self::OcrLines { image }
+            | Self::DepthEstimate { image, .. }
+            | Self::ImageNsfw { image } => vec![image],
+            Self::TtsSynthesize {
+                reference_audio, ..
+            } => reference_audio.iter_mut().collect(),
+            Self::TextEmbed { .. }
+            | Self::TextRerank { .. }
+            | Self::ChatComplete { .. }
+            | Self::TextModerate { .. } => Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InferenceOutput {
@@ -760,6 +781,26 @@ pub enum InferenceOutput {
     Accepted {
         job_id: String,
     },
+}
+
+impl InferenceOutput {
+    /// The files the output names (synthesized audio).
+    pub fn files_mut(&mut self) -> Vec<&mut FileRef> {
+        match self {
+            Self::TtsAudio { audio } => vec![audio],
+            Self::AsrTranscription { .. }
+            | Self::ObjectDetections { .. }
+            | Self::TextEmbeddings { .. }
+            | Self::TextRerank { .. }
+            | Self::ChatCompletion { .. }
+            | Self::OcrText { .. }
+            | Self::OcrLines { .. }
+            | Self::DepthMap { .. }
+            | Self::TextModerations { .. }
+            | Self::ImageNsfw { .. }
+            | Self::Accepted { .. } => Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -1064,6 +1105,45 @@ pub struct WorkerRegistration {
 pub struct WorkerRegistrationResponse {
     pub status: NodeStatus,
     pub session_token: String,
+    /// The controller's data directory, absolute. A worker that finds
+    /// [`CONTROLLER_INSTANCE_FILE`] there holding [`Self::controller_instance`]
+    /// shares the controller's files (same machine or volume) and reads task
+    /// files by path; any other worker fetches them over HTTP
+    /// (`/internal/files`). Absent from older controllers: shared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_data_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_instance: Option<String>,
+}
+
+/// The file in the controller's data directory naming its instance.
+pub const CONTROLLER_INSTANCE_FILE: &str = ".controller-instance";
+
+/// Models renamed (old id, current id): a request naming the old id gets the
+/// current model, and a local model directory still named after the old id
+/// serves the current one.
+pub const RENAMED_MODELS: &[(&str, &str)] = &[
+    // The float16 graph overflowed on CUDA; its replacement is int8.
+    (
+        "sensevoice-small-fp16-onnx",
+        "sensevoice-small-int8-gpu-onnx",
+    ),
+];
+
+/// `id`, or the current id of a renamed model.
+pub fn current_model_id(id: &str) -> &str {
+    RENAMED_MODELS
+        .iter()
+        .find(|(old, _)| *old == id)
+        .map_or(id, |(_, current)| current)
+}
+
+/// The ids a model had before it was renamed.
+pub fn former_model_ids(id: &str) -> impl Iterator<Item = &'static str> + '_ {
+    RENAMED_MODELS
+        .iter()
+        .filter(move |(_, current)| *current == id)
+        .map(|(old, _)| *old)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1205,6 +1285,26 @@ pub struct WaitTaskRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renamed_model_ids_map_to_the_current_one() {
+        assert_eq!(
+            current_model_id("sensevoice-small-fp16-onnx"),
+            "sensevoice-small-int8-gpu-onnx"
+        );
+        assert_eq!(
+            current_model_id("sensevoice-small-onnx"),
+            "sensevoice-small-onnx"
+        );
+        assert_eq!(
+            former_model_ids("sensevoice-small-int8-gpu-onnx").collect::<Vec<_>>(),
+            ["sensevoice-small-fp16-onnx"]
+        );
+        // No chains: a current id is never renamed again.
+        for (_, current) in RENAMED_MODELS {
+            assert_eq!(current_model_id(current), *current);
+        }
+    }
 
     #[test]
     fn only_auto_select_false_keeps_a_model_from_auto_selection() {

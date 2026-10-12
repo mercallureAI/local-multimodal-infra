@@ -15,11 +15,25 @@ const CHUNK_SHIFT_SAMPLES: usize = 12_000;
 const NEW_SPEAKER_COSINE: f32 = 0.65;
 const MERGE_SPEAKER_COSINE: f32 = 0.78;
 
+/// A 1.5 s window of one speech segment, its FBANK computed: CAM++ input.
 #[derive(Debug, Clone)]
-struct SpeakerChunk {
-    start_sample: usize,
-    end_sample: usize,
-    samples: Vec<f32>,
+pub struct SpeakerChunk {
+    pub start_sample: usize,
+    pub end_sample: usize,
+    frames: usize,
+    fbank: Vec<f32>,
+}
+
+impl SpeakerChunk {
+    /// Without its FBANK, once embedded.
+    pub fn range(&self) -> SpeakerChunk {
+        SpeakerChunk {
+            start_sample: self.start_sample,
+            end_sample: self.end_sample,
+            frames: 0,
+            fbank: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -61,47 +75,34 @@ impl CampPlus {
         })
     }
 
+    #[cfg(test)]
     pub fn label_segments(
         &mut self,
         samples: &[f32],
         vad_segments: &[SpeechSegment],
     ) -> Result<Vec<usize>> {
-        let chunks = speaker_chunks(samples, vad_segments);
-        if chunks.is_empty() {
-            return Ok(vec![0; vad_segments.len()]);
+        let mut chunks = Vec::new();
+        for segment in vad_segments {
+            chunks.extend(segment_chunks(
+                &samples[segment.start_sample..segment.end_sample],
+                *segment,
+            )?);
         }
+        let embeddings = self.embed(&chunks)?;
+        Ok(label_segments(vad_segments, &chunks, &embeddings))
+    }
+
+    /// One L2-normalised embedding per chunk, `batch_size` chunks a run.
+    pub fn embed(&mut self, chunks: &[SpeakerChunk]) -> Result<Vec<Vec<f32>>> {
         let mut embeddings = Vec::with_capacity(chunks.len());
         for batch in chunks.chunks(self.batch_size) {
             embeddings.extend(self.embedding_batch(batch)?);
         }
-        let labels = cluster_embeddings(&embeddings);
-        Ok(vad_segments
-            .iter()
-            .map(|segment| dominant_label(segment, &chunks, &labels))
-            .collect())
+        Ok(embeddings)
     }
 
-    /// The mean embedding of the speech in `vad_segments`, L2-normalised
-    /// (`None` without speech): one voiceprint for the whole input.
-    pub fn utterance_embedding(
-        &mut self,
-        samples: &[f32],
-        vad_segments: &[SpeechSegment],
-    ) -> Result<Option<Vec<f32>>> {
-        let chunks = speaker_chunks(samples, vad_segments);
-        let mut sum: Option<Vec<f32>> = None;
-        for batch in chunks.chunks(self.batch_size) {
-            for embedding in self.embedding_batch(batch)? {
-                match &mut sum {
-                    Some(sum) => sum.iter_mut().zip(&embedding).for_each(|(s, e)| *s += e),
-                    None => sum = Some(embedding),
-                }
-            }
-        }
-        Ok(sum.map(|mut sum| {
-            normalize(&mut sum);
-            sum
-        }))
+    pub fn batch_size(&self) -> usize {
+        self.batch_size
     }
 
     pub fn provider_report(&self) -> SessionProviderReport {
@@ -112,18 +113,18 @@ impl CampPlus {
         let mut frames = None;
         let mut data = Vec::new();
         for chunk in chunks {
-            let (chunk_frames, chunk_data) = fbank(&chunk.samples)?;
             if let Some(frames) = frames {
-                if chunk_frames != frames {
+                if chunk.frames != frames {
                     return Err(InfraError::Adapter(format!(
-                        "CAM++ batch contains inconsistent frame counts: {chunk_frames} and {frames}"
+                        "CAM++ batch contains inconsistent frame counts: {} and {frames}",
+                        chunk.frames
                     )));
                 }
             } else {
-                frames = Some(chunk_frames);
-                data.reserve(chunks.len() * chunk_data.len());
+                frames = Some(chunk.frames);
+                data.reserve(chunks.len() * chunk.fbank.len());
             }
-            data.extend(chunk_data);
+            data.extend_from_slice(&chunk.fbank);
         }
         let frames = frames.unwrap_or(0);
         if frames == 0 {
@@ -190,30 +191,64 @@ fn decode_embedding_batch(mut data: Vec<f32>, batch: usize) -> Result<Vec<Vec<f3
     Ok(embeddings)
 }
 
-fn speaker_chunks(samples: &[f32], segments: &[SpeechSegment]) -> Vec<SpeakerChunk> {
+/// The overlapping 1.5 s windows (0.75 s apart, the last one ending at the
+/// segment's end, zero-padded when the segment is shorter) of one speech
+/// segment, `samples` being its audio.
+pub fn segment_chunks(samples: &[f32], segment: SpeechSegment) -> Result<Vec<SpeakerChunk>> {
     let mut chunks = Vec::new();
-    for segment in segments {
-        let data = &samples[segment.start_sample..segment.end_sample];
-        let mut offset = 0usize;
-        let mut last_end = 0usize;
-        while offset < data.len() {
-            let end = (offset + CHUNK_SAMPLES).min(data.len());
-            if end <= last_end {
-                break;
-            }
-            last_end = end;
-            let start = end.saturating_sub(CHUNK_SAMPLES);
-            let mut chunk = data[start..end].to_vec();
-            chunk.resize(CHUNK_SAMPLES, 0.0);
-            chunks.push(SpeakerChunk {
-                start_sample: segment.start_sample + start,
-                end_sample: segment.start_sample + end,
-                samples: chunk,
-            });
-            offset += CHUNK_SHIFT_SAMPLES;
+    let mut offset = 0usize;
+    let mut last_end = 0usize;
+    while offset < samples.len() {
+        let end = (offset + CHUNK_SAMPLES).min(samples.len());
+        if end <= last_end {
+            break;
+        }
+        last_end = end;
+        let start = end.saturating_sub(CHUNK_SAMPLES);
+        let mut chunk = samples[start..end].to_vec();
+        chunk.resize(CHUNK_SAMPLES, 0.0);
+        let (frames, fbank) = fbank(&chunk)?;
+        chunks.push(SpeakerChunk {
+            start_sample: segment.start_sample + start,
+            end_sample: segment.start_sample + end,
+            frames,
+            fbank,
+        });
+        offset += CHUNK_SHIFT_SAMPLES;
+    }
+    Ok(chunks)
+}
+
+/// Each segment's speaker: the cluster covering most of it.
+pub fn label_segments(
+    segments: &[SpeechSegment],
+    chunks: &[SpeakerChunk],
+    embeddings: &[Vec<f32>],
+) -> Vec<usize> {
+    if chunks.is_empty() {
+        return vec![0; segments.len()];
+    }
+    let labels = cluster_embeddings(embeddings);
+    segments
+        .iter()
+        .map(|segment| dominant_label(segment, chunks, &labels))
+        .collect()
+}
+
+/// The mean of the chunk embeddings, L2-normalised (`None` without speech):
+/// one voiceprint for the whole input.
+pub fn mean_embedding(embeddings: &[Vec<f32>]) -> Option<Vec<f32>> {
+    let mut sum: Option<Vec<f32>> = None;
+    for embedding in embeddings {
+        match &mut sum {
+            Some(sum) => sum.iter_mut().zip(embedding).for_each(|(s, e)| *s += e),
+            None => sum = Some(embedding.clone()),
         }
     }
-    chunks
+    sum.map(|mut sum| {
+        normalize(&mut sum);
+        sum
+    })
 }
 
 fn fbank(samples: &[f32]) -> Result<(usize, Vec<f32>)> {

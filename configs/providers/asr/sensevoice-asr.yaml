@@ -60,7 +60,6 @@ metadata:
   vad_huggingface_revision: f6e9fbb4cefa7397216c763f21307993f147f585
   vad_config_source: MoYoYoTech/Translator
   vad_config_huggingface_revision: 58fbad4088820ed1253955c8faf1444cd0b2dc69
-  sensevoice_max_chunk_seconds: 30
   vad_max_segment_seconds: 20
   vad_provider_order: [cpu]
   speaker_batch_size: 32

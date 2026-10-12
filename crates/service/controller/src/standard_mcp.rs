@@ -965,6 +965,7 @@ mod tests {
                 data_dir: dir.path().to_path_buf(),
                 upload_signing_secret: Some("result-test-secret".to_string()),
                 asset_cleanup_interval: None,
+                max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
                 ..ControllerOptions::default()
             },
         );
@@ -1382,6 +1383,7 @@ mod tests {
                 admin_token: admin_token.map(str::to_string),
                 mcp_infer_tokens: infer_tokens.iter().map(|token| token.to_string()).collect(),
                 asset_cleanup_interval: None,
+                max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
                 ..ControllerOptions::default()
             },
         )

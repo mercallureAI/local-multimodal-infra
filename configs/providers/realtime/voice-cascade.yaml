@@ -28,9 +28,9 @@ metadata:
   runtime: onnxruntime
   task: realtime-voice
   chat_model: qwen3-4b-instruct-2507-int4-onnx
-  # The low-latency float16 SenseVoice (~40-90 ms per utterance on CUDA;
-  # sensevoice-small-onnx, int8: ~200-350 ms).
-  asr_model: sensevoice-small-fp16-onnx
+  # The low-latency GPU int8 SenseVoice (~16 ms for 1.5 s on CUDA;
+  # sensevoice-small-onnx, dynamic int8: ~200-350 ms).
+  asr_model: sensevoice-small-int8-gpu-onnx
   # Used instead when asr_model cannot load (not exported here).
   asr_fallback_model: sensevoice-small-onnx
   # Qwen3-TTS streams: a clause starts playing ~50 ms after it is asked

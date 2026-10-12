@@ -80,8 +80,13 @@ impl ModelRegistry {
         self.inner.read().await.values().cloned().collect()
     }
 
+    /// The model `id` names (a renamed model's old id included).
     pub async fn get(&self, id: &str) -> Option<ModelSpec> {
-        self.inner.read().await.get(id).cloned()
+        self.inner
+            .read()
+            .await
+            .get(local_core::current_model_id(id))
+            .cloned()
     }
 
     pub async fn set_enabled(&self, id: &str, enabled: bool) -> Result<ModelSpec> {
@@ -479,7 +484,6 @@ fn sensevoice_asr_default(model_dir: &Path) -> ModelSpec {
     metadata.insert("timestamps_default".to_string(), json!(true));
     metadata.insert("timestamp_granularity_sec".to_string(), json!(10));
     metadata.insert("token_timestamps_default".to_string(), json!(false));
-    metadata.insert("sensevoice_max_chunk_seconds".to_string(), json!(30));
     metadata.insert("vad_max_segment_seconds".to_string(), json!(20));
     metadata.insert(
         "mvp_status".to_string(),

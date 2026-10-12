@@ -33,6 +33,9 @@ pub struct ControllerConfig {
     pub file_upload_base_url: Option<String>,
     #[serde(default)]
     pub upload_signing_secret: Option<String>,
+    /// The largest file a signed upload URL accepts, in MiB (default 4096).
+    #[serde(default)]
+    pub max_upload_mb: Option<u64>,
 }
 
 impl Default for ControllerConfig {
@@ -50,6 +53,7 @@ impl Default for ControllerConfig {
             public_base_url: None,
             file_upload_base_url: None,
             upload_signing_secret: None,
+            max_upload_mb: None,
         }
     }
 }
