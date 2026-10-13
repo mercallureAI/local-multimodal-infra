@@ -56,8 +56,8 @@ experts run only on the CUDA kernels, so the worker must be built with
 `--features cuda`; `--expert-precision fp16` exports FP16 experts instead
 (~5.6 GB).
 
-Calling: MCP / JSON-RPC `ocr_recognize` (`image` file ref or `image_path`), or
-the generic task `ocr.recognize` (upload `image`). `max_new_tokens` (8192)
+Calling: the task `ocr.recognize` with an `image` file (MCP and JSON-RPC), or
+JSON-RPC `ocr_recognize` (`image` file ref or `image_path`). `max_new_tokens` (8192)
 bounds the decode per page.
 
 On an RTX 4090: ~145 tokens/s, ~6.6 GB of GPU memory; the 14-page paper takes

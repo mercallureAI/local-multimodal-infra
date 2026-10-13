@@ -287,10 +287,12 @@ fn validate_deployment_config(root: &Path) -> Result<()> {
             return deployment_config_error(&path, format!("`{pointer}` must be false"));
         }
     }
+    // The small manifests are hashed; IndexTTS_E.onnx (1.9 GB, checked at
+    // every load) is checked by the size the verified manifest gives it, and
+    // the manifest must name the same SHA-256 as this config.
     let hash_files = [
         ("/contract/manifest_json_sha256", "manifest.json"),
         ("/contract/manifest_yaml_sha256", "manifest.yaml"),
-        ("/contract/index_tts_e_sha256", "IndexTTS_E.onnx"),
     ];
     for (pointer, filename) in hash_files {
         let expected = required_sha256(&value, pointer, &path)?;
@@ -317,11 +319,68 @@ fn validate_deployment_config(root: &Path) -> Result<()> {
             );
         }
     }
+    check_e_against_manifest(
+        &canonical_root,
+        required_sha256(&value, "/contract/index_tts_e_sha256", &path)?,
+        &path,
+    )?;
     let provenance = required_sha256(&value, "/source_provenance_reference/sha256", &path)?;
     if provenance != "3bfb39cc326d834be4fda72000e4cc53ebbb6c52e154150f1fdbe7323d1e909c" {
         return deployment_config_error(
             &path,
             "source provenance reference must match the pinned informational hash".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// IndexTTS_E.onnx against the (already hashed) manifest.json: the manifest
+/// names the config's SHA-256 for it, and the file has the manifest's size.
+fn check_e_against_manifest(root: &Path, expected_sha256: &str, path: &Path) -> Result<()> {
+    const E_FILE: &str = "IndexTTS_E.onnx";
+    let manifest_path = root.join("manifest.json");
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(&manifest_path).map_err(|e| InfraError::io(Some(manifest_path.clone()), e))?,
+    )?;
+    let entry = manifest
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .and_then(|artifacts| {
+            artifacts
+                .iter()
+                .find(|artifact| artifact.get("path").and_then(Value::as_str) == Some(E_FILE))
+        });
+    let Some(entry) = entry else {
+        return deployment_config_error(path, format!("manifest.json does not list {E_FILE}"));
+    };
+    if entry.get("sha256").and_then(Value::as_str) != Some(expected_sha256) {
+        return deployment_config_error(
+            path,
+            format!("manifest.json names another SHA-256 for {E_FILE} than this config"),
+        );
+    }
+    let Some(size) = entry.get("size_bytes").and_then(Value::as_u64) else {
+        return deployment_config_error(path, format!("manifest.json has no size for {E_FILE}"));
+    };
+    let target = root.join(E_FILE);
+    let canonical_target =
+        fs::canonicalize(&target).map_err(|e| InfraError::io(Some(target.clone()), e))?;
+    if !canonical_target.starts_with(root) {
+        return deployment_config_error(
+            path,
+            format!("fixed integrity target escapes model root: {}", target.display()),
+        );
+    }
+    let actual = fs::metadata(&canonical_target)
+        .map_err(|e| InfraError::io(Some(canonical_target.clone()), e))?
+        .len();
+    if actual != size {
+        return deployment_config_error(
+            path,
+            format!(
+                "size mismatch for {}: expected {size} bytes, got {actual}",
+                canonical_target.display()
+            ),
         );
     }
     Ok(())

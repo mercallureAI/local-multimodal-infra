@@ -1548,7 +1548,19 @@ fn unsupported_diagnostic_manifest_is_never_runtime_loadable() {
 
 #[test]
 fn deployment_config_tracks_immutable_source_and_v2_contract() {
-    let (_dir, artifacts) = config_fixture("");
+    // The published manifest lists IndexTTS_E.onnx with its size and hash:
+    // E is checked by that size, the hash only against the config's.
+    let placeholder = tempfile::NamedTempFile::new().expect("temp file");
+    fs::write(placeholder.path(), b"placeholder").expect("placeholder");
+    let (_dir, artifacts) = config_fixture(&format!(
+        "artifacts:
+  - path: IndexTTS_E.onnx
+    size_bytes: {}
+    sha256: {}
+",
+        b"placeholder".len(),
+        local_files::sha256_file(placeholder.path()).unwrap()
+    ));
     let manifest: Value =
         serde_yaml::from_slice(&fs::read(artifacts.root.join("manifest.yaml")).unwrap()).unwrap();
     fs::write(
@@ -1601,7 +1613,7 @@ fn deployment_config_tracks_immutable_source_and_v2_contract() {
         &model_spec(artifacts.root.clone(), vec!["cpu".to_string()]),
     )
     .expect_err("actual content mismatch");
-    assert!(err.to_string().contains("integrity mismatch"));
+    assert!(err.to_string().contains("size mismatch"), "{err}");
 }
 
 fn deployment_config_fixture(root: &Path) -> Value {
@@ -2032,6 +2044,7 @@ fn model_spec(path: PathBuf, provider_order: Vec<String>) -> ModelSpec {
             path,
             source_path: None,
             sha256: None,
+            size: None,
             url: None,
             repo_id: None,
             revision: None,

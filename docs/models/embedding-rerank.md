@@ -25,7 +25,7 @@ uv run --with onnx --python 3.12 python -m scripts.local.e5_pooling_export --mod
 
 `POST /v1/embeddings` takes OpenAI input (a string or a list), plus
 `input_type`: `passage` (default) or `query`; `encoding_format: base64` is
-supported. MCP / JSON-RPC: `text_embed`. Benchmark:
+supported. MCP: task `text.embed`; JSON-RPC: `text_embed`. Benchmark:
 `python -m scripts.local.benchmark_text_embeddings`.
 
 ## `mmarco-minilm-l12-onnx`
@@ -42,5 +42,5 @@ the official AVX2 uint8 graph, CUDA the O4 graph.
 {"model": "mmarco-minilm-l12-onnx", "query": "...", "documents": ["...", "..."], "top_n": 3}
 ```
 
-returns `results[{index, document: {text}, relevance_score}]`. MCP / JSON-RPC:
-`text_rerank`.
+returns `results[{index, document: {text}, relevance_score}]`. MCP: task
+`text.rerank`; JSON-RPC: `text_rerank`.

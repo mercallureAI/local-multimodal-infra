@@ -37,7 +37,7 @@ Repo-specific instructions for future OpenCode agents. Higher-priority user inst
   - `python -m scripts.local.smoke --tests all --workdir ./workdir --model-dir ./workdir/models` (both groups; skip flags still apply)
   - `python -m scripts.local.smoke --tests assets,yolo,sensevoice-asr,indextts --workdir ./workdir --model-dir ./workdir/models`
   - `python -m scripts.local.smoke --tests indextts_asr --indextts-frontend auto --workdir ./workdir --model-dir ./workdir/models`
-  - `python -m scripts.local.smoke --skip-build --release --tests ocr --workdir ./workdir --model-dir ./workdir/models --request-timeout 300` (Unlimited-OCR: generic task flow plus direct `ocr_recognize` on `scripts/assets/ocr-input.png`; build first with `cargo build --release --bins -p local-cli --features cuda`, the int8 package runs only on CUDA)
+  - `python -m scripts.local.smoke --skip-build --release --tests ocr --workdir ./workdir --model-dir ./workdir/models --request-timeout 300` (Unlimited-OCR: generic task flow plus legacy RPC `ocr_recognize` on `scripts/assets/ocr-input.png`; build first with `cargo build --release --bins -p local-cli --features cuda`, the int8 package runs only on CUDA)
   - `python -m scripts.local.smoke --tests ppocr --workdir ./workdir --model-dir ./workdir/models` (PP-OCRv5 mobile: `POST /v1/ocr/lines` on `scripts/assets/ppocr-input.png`, its token check, and the generic `ocr.lines` task); `--tests depth` does the same for `POST /v1/depth` and `depth.estimate` on `scripts/assets/depth-input.jpg`
   - `python -m scripts.local.smoke --tests moderation --workdir ./workdir --model-dir ./workdir/models` (`POST /v1/moderations` on texts and on `ppocr-input.png` + `yolo-input.jpg` as `data:` URLs, its token check, and the generic `text.moderate` task; needs the local exports `qwen3guard-gen-0.6b-int4-onnx` and `freepik-nsfw-image-detector-onnx`)
   - `python scripts/smoke_api_mcp.py --tests yolo,sensevoice-asr --workdir ./workdir --model-dir ./workdir/models`
@@ -53,7 +53,7 @@ Repo-specific instructions for future OpenCode agents. Higher-priority user inst
 - Upload URLs derive from `--public-base-url` / `public_base_url` / `LOCAL_PUBLIC_BASE_URL`; local default is `http://127.0.0.1:17890`.
 - Signed upload HMAC uses `--upload-signing-secret` / `upload_signing_secret` / `LOCAL_UPLOAD_SIGNING_SECRET`; if absent, a random per-process secret makes old upload URLs fail after restart.
 - Generic legacy RPC upload flow: `create_task` via `/rpc/infer` -> raw-byte `POST /files/upload/<task_id>/<slot>?expires=...&sig=...` -> `start_task` / `wait_task`.
-- Standard MCP upload flow uses MCP tools (`create_task`, `start_task`, `wait_task`, `get_task`) through the official SDK; raw HTTP is acceptable only for data transfer to signed `upload_url` / `download_url`, not for MCP protocol calls.
+- Standard MCP inference catalog (`/mcp/infer`) is generic tasks only: `list_models` (installed models, their task kinds and a per-kind guide of files/params/output, `task_kind_guide` in `standard_mcp.rs`), `run_task`, `create_task`, `start_task`, `wait_task`, `get_task`, `sign_assets`. Keep `task_kind_guide` in step with `inference_task_from_status` when a task kind or its params change. Task results re-sign every `assets://` file URL on return. The upload flow uses these tools through the official SDK; raw HTTP is acceptable only for data transfer to signed `upload_url` / `download_url`, not for MCP protocol calls. Legacy RPC `/rpc/infer` keeps its direct methods.
 
 ## Verification commands
 

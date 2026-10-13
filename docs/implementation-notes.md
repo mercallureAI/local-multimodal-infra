@@ -106,7 +106,7 @@ independent of actual ORT EP selection.
 
 ## Document OCR (Unlimited-OCR)
 
-`unlimited-ocr-onnx` serves `ocr.recognize` (generic task flow with an `image` upload, legacy RPC `ocr_recognize`, standard MCP tool `ocr_recognize`) through `crates/adapters/ocr/unlimited-ocr`. The model is baidu/Unlimited-OCR: the DeepSeek-OCR DeepEncoder (SAM ViT-B + CLIP-L, linear projector) and a 12-layer DeepSeek-V2 MoE decoder (64 routed experts, top-6, 2 shared) whose attention is R-SWA.
+`unlimited-ocr-onnx` serves `ocr.recognize` (generic task flow with an `image` upload over standard MCP or legacy RPC, and legacy RPC `ocr_recognize`) through `crates/adapters/ocr/unlimited-ocr`. The model is baidu/Unlimited-OCR: the DeepSeek-OCR DeepEncoder (SAM ViT-B + CLIP-L, linear projector) and a 12-layer DeepSeek-V2 MoE decoder (64 routed experts, top-6, 2 shared) whose attention is R-SWA.
 
 Package (`scripts/local/unlimited_ocr_export.py export`, traced from the PyTorch checkpoint with the upstream module code):
 
@@ -210,7 +210,7 @@ Errors use:
 ```
 
 
-The API accepts core `ModelSpec` JSON, not MCP/OpenAI-specific schemas. `list_models` and `get_model` add the computed `downloaded` and `download_state` fields without persisting those runtime fields into `ModelSpec`. `download_model` only queues background work and immediately returns `accepted`, `deduplicated`, and the aggregate status. Calls for the same model are deduplicated while a download is active, and calls for an already complete model do not start another task. Query `get_model_download_status` on either the admin MCP catalog or legacy `/rpc/admin` for aggregate and per-artifact state. A destination is reused only when it has a matching persisted completion record or passes its configured SHA-256 check; partial URL downloads are written to a side file and replaced only after the complete response is durable. Artifact configuration changes transactionally invalidate obsolete download rows, and successful files remain reusable when a failed multi-file download is retried.
+The API accepts core `ModelSpec` JSON, not MCP/OpenAI-specific schemas. `list_models` and `get_model` add the computed `downloaded` and `download_state` fields without persisting those runtime fields into `ModelSpec`. `download_model` only queues background work and immediately returns `accepted`, `deduplicated`, and the aggregate status. Calls for the same model are deduplicated while a download is active, and calls for an already complete model do not start another task. Query `get_model_download_status` on either the admin MCP catalog or legacy `/rpc/admin` for aggregate and per-artifact state. Status (`list_models`, `get_model`, `get_model_download_status`, startup) never hashes: an artifact counts as downloaded with a matching completion record, or when its file is present with the spec's pinned `size` (URL artifacts pin `sha256` and `size`; a present file of another size is `failed`, and `download_model` replaces it); a present file with no pinned size counts as present. `download_model` itself verifies the configured SHA-256 when it writes a file or reuses an existing one; partial URL downloads are written to a side file and replaced only after the complete response is durable. Artifact configuration changes transactionally invalidate obsolete download rows, and successful files remain reusable when a failed multi-file download is retried.
 
 ## Standard MCP Streamable HTTP API
 
@@ -272,7 +272,7 @@ The controller depends on the store for metadata/status only. It still does not 
 
 Every model in `configs/providers`, with its source, revision, export command and options, is described per category in [`docs/models/`](models/README.md).
 
-Remote downloads use Hugging Face resolve URLs or direct URLs. `HF_TOKEN`/`HUGGINGFACE_HUB_TOKEN` is used for Hugging Face metadata and file requests when present. Explicit HF `files` remain supported; `allow_patterns` are expanded by reading HF model metadata siblings and matching simple `*`/`?` globs. SHA-256 is verified only when configured; otherwise status explicitly records that verification was skipped. No Candle/Python/C++/sidecar path is implemented.
+Remote downloads use Hugging Face resolve URLs or direct URLs. `HF_TOKEN`/`HUGGINGFACE_HUB_TOKEN` is used for Hugging Face metadata and file requests when present. Explicit HF `files` remain supported; `allow_patterns` are expanded by reading HF model metadata siblings and matching simple `*`/`?` globs. SHA-256 is verified by downloads only when configured; otherwise status records that verification was skipped. IndexTTS 1.5 likewise hashes only its two manifests at load and checks the 1.9 GB `IndexTTS_E.onnx` by the size its (hashed) `manifest.json` gives it. No Candle/Python/C++/sidecar path is implemented.
 
 Release smoke examples:
 

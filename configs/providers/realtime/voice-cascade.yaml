@@ -11,6 +11,7 @@ artifacts:
   - type: url
     url: https://github.com/snakers4/silero-vad/raw/5cd7945676eb32225748052e2e6a0580e4686a08/src/silero_vad/data/silero_vad.onnx
     sha256: 1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3
+    size: 2327524
 runtime:
   # The VAD always runs on CPU (one small session per conversation); the
   # named models keep their own provider order.

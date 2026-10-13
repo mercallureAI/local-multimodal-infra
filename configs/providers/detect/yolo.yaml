@@ -13,6 +13,7 @@ artifacts:
   - type: url
     url: https://raw.githubusercontent.com/ultralytics/ultralytics/eba96641b5cea142e21641909d6400fef7134244/ultralytics/cfg/datasets/coco.yaml
     sha256: 38ed1eb122fad6eed8e18dcf8da56a4b26db9c2064be41530485e2644fae9f7f
+    size: 2583
     # Labels are not in the HF repo; path materializes to <model_dir>/yolo11n.onnx/coco.yaml.
 runtime:
   # CUDA is preferred when available; CPU remains the portable fallback.

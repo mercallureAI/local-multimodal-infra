@@ -58,6 +58,7 @@ fn spec(model_dir: String, metadata: serde_json::Value) -> ModelSpec {
             path: PathBuf::from(model_dir),
             source_path: None,
             sha256: None,
+            size: None,
             url: None,
             repo_id: None,
             revision: None,

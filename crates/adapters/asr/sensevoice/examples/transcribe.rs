@@ -22,6 +22,7 @@ fn main() {
             path: model_dir,
             source_path: None,
             sha256: None,
+            size: None,
             url: None,
             repo_id: None,
             revision: None,

@@ -22,8 +22,8 @@ curl --data-binary @frame.jpg -H "authorization: Bearer $TOKEN" \
 # {"objects": [{"label", "confidence", "bbox"}]}
 ```
 
-Also MCP / JSON-RPC `object_detect` (`image` file ref) and the generic task
-`object.detect`.
+Also the task `object.detect` with an `image` file (MCP and JSON-RPC), and
+JSON-RPC `object_detect` (`image` file ref).
 
 ## `depth-anything-v2-metric-indoor-small-onnx`
 

@@ -394,6 +394,12 @@ pub struct ModelArtifact {
     pub source_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// Bytes of the file (URL and local artifacts). Without a download record
+    /// a present file counts when its size matches; `sha256` is checked only
+    /// when a download writes or reuses the file (hashing large models at
+    /// every startup or status call would be slow).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

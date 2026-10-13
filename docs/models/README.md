@@ -20,8 +20,8 @@ in `configs/{controller,worker}.yaml`) and keep the catalog in SQLite.
 Each spec's `artifacts` say where its files come from:
 
 - `hugging_face` / `url`: published files, pinned to a commit (URL artifacts
-  also by SHA-256). Download them through the admin API, then the model loads
-  on first use:
+  also by SHA-256 and size). Download them through the admin API, then the
+  model loads on first use:
 
   ```bash
   curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
@@ -35,6 +35,10 @@ Each spec's `artifacts` say where its files come from:
 
   The same methods are admin MCP tools (`download_model`,
   `get_model_download_status`, `list_models`). `HF_TOKEN` is used when set.
+  Files already in place count without a download: status checks that they
+  exist and have their pinned size, never hashes them (models are large);
+  `download_model` verifies SHA-256 when it writes or reuses a file, and
+  replaces a file of the wrong size.
 - `local`: there is no published ONNX package. Export it from the upstream
   checkpoint with the command in the model's doc (and in the spec's comments)
   into `workdir/models/<model id>/`. Nothing needs downloading afterwards.

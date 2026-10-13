@@ -20,6 +20,7 @@ DEFAULT_INFER_URL = "http://127.0.0.1:17892/mcp/infer"
 YOLO_MODEL_ID = "yolo11n.onnx"
 SENSEVOICE_ASR_MODEL_ID = "sensevoice-small-onnx"
 INDEXTTS_MODEL_ID = "indextts-1.5-onnx"
+EMBEDDING_MODEL_ID = "multilingual-e5-small-onnx"
 OCR_MODEL_ID = "unlimited-ocr-onnx"
 # Text of scripts/assets/ocr-input.png that the OCR result must contain.
 OCR_EXPECTED_TEXT = ("Local Multimodal Infra", "OCR smoke test", "2026-0042", "1,280.50")
@@ -35,19 +36,13 @@ OCR_WORKER_OPTIONAL = False
 def ocr_unavailable(text: str) -> bool:
     return OCR_NEEDS_CUDA in text or (OCR_WORKER_OPTIONAL and OCR_NO_WORKER in text)
 INFER_TOOLS = {
+    "list_models",
     "create_task",
     "start_task",
     "get_task",
     "wait_task",
     "run_task",
     "sign_assets",
-    "sign_asset_urls",
-    "asr_transcribe",
-    "object_detect",
-    "ocr_recognize",
-    "tts_synthesize",
-    "text_embed",
-    "text_rerank",
 }
 ADMIN_TOOLS = {
     "list_models",
@@ -63,7 +58,10 @@ ADMIN_TOOLS = {
     "list_assets",
     "search_assets",
 }
-URL_RESULT_TOOLS = INFER_TOOLS - {"sign_assets", "sign_asset_urls"}
+# list_models is in both catalogs (installed models for inference, every
+# configured model for admin); every other tool belongs to one.
+SHARED_TOOLS = {"list_models"}
+URL_RESULT_TOOLS = {"create_task", "start_task", "get_task", "wait_task", "run_task"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -180,7 +178,7 @@ async def run(
                         "tools": admin_tools,
                         "missing_tools": admin_missing,
                     }
-                leaked_admin = sorted(set(admin_tools) & INFER_TOOLS)
+                leaked_admin = sorted(set(admin_tools) & (INFER_TOOLS - SHARED_TOOLS))
                 if leaked_admin:
                     raise RuntimeError(f"admin MCP leaked inference tools: {leaked_admin}")
                 list_models_result = await call_tool_checked(admin_session, "list_models", {})
@@ -215,10 +213,13 @@ async def run(
                                     "tools": infer_tools,
                                     "missing_tools": infer_missing,
                                 }
-                            leaked_infer = sorted(set(infer_tools) & ADMIN_TOOLS)
+                            leaked_infer = sorted(set(infer_tools) & (ADMIN_TOOLS - SHARED_TOOLS))
                             if leaked_infer:
                                 raise RuntimeError(f"inference MCP leaked admin tools: {leaked_infer}")
                             validate_url_result_schemas(infer_tools_result.tools)
+                            installed = validate_installed_models(
+                                await call_tool_checked(infer_session, "list_models", {}), models
+                            )
                             summary = {
                                 "ok": True,
                                 "admin_url": admin_url,
@@ -228,6 +229,7 @@ async def run(
                                 "admin_tools": admin_tools,
                                 "infer_tools": infer_tools,
                                 "list_models": list_models_result,
+                                "installed_models": installed,
                                 "model_download_status": model_download_status,
                                 "get_cluster_status": cluster_status_result,
                                 "list_nodes": list_nodes_result,
@@ -247,7 +249,7 @@ async def run(
                                     models,
                                     indextts_artifacts_ready=indextts_artifacts_ready,
                                 )
-                                summary["direct_inference"] = await run_direct_smoke(
+                                summary["run_task"] = await run_task_smoke(
                                     admin_session,
                                     infer_session,
                                     sample_image,
@@ -281,16 +283,16 @@ async def run_assets_smoke(admin_session: Any, infer_session: Any, timeout: floa
             "url_ttl_sec": 600,
         },
     ]
-    signed = await call_tool_checked(infer_session, "sign_asset_urls", {"items": requests})
+    signed = await call_tool_checked(infer_session, "sign_assets", {"items": requests})
     signed_items = signed.get("items") if isinstance(signed, dict) else None
     if not isinstance(signed_items, list) or len(signed_items) != 2:
-        raise RuntimeError(f"MCP sign_asset_urls returned malformed batch: {signed}")
+        raise RuntimeError(f"MCP sign_assets returned malformed batch: {signed}")
     if signed_items[0].get("method") != "POST" or signed_items[1].get("method") != "GET":
-        raise RuntimeError(f"MCP sign_asset_urls did not preserve upload/download methods: {signed}")
+        raise RuntimeError(f"MCP sign_assets did not preserve upload/download methods: {signed}")
     alias_signed = await call_tool_checked(infer_session, "sign_assets", {"requests": requests})
     alias_items = alias_signed.get("items") if isinstance(alias_signed, dict) else None
     if not isinstance(alias_items, list) or [item.get("method") for item in alias_items] != ["POST", "GET"]:
-        raise RuntimeError(f"MCP sign_assets alias returned malformed batch: {alias_signed}")
+        raise RuntimeError(f"MCP sign_assets `requests` alias returned malformed batch: {alias_signed}")
 
     upload_url = signed_items[0].get("signed_url")
     download_url = signed_items[1].get("signed_url")
@@ -522,7 +524,30 @@ async def generic_tts_synthesize(
     return {"status": "passed", "create_task": create, "start_task": start, "wait_task": wait, "get_task": get}
 
 
-async def run_direct_smoke(
+def validate_installed_models(payload: Any, configured: list[Any]) -> dict[str, Any]:
+    """The inference list_models: installed models and a guide per task kind."""
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"inference list_models returned malformed result: {payload!r}")
+    installed = payload.get("models")
+    guides = payload.get("task_kinds")
+    if not isinstance(installed, list) or not isinstance(guides, dict):
+        raise RuntimeError(f"inference list_models lacks models/task_kinds: {payload!r}")
+    # Installed: enabled, and downloaded or its files already in the model directory.
+    enabled = {item.get("id") for item in configured if isinstance(item, dict) and item.get("enabled") is True}
+    for model in installed:
+        if not isinstance(model, dict) or model.get("id") not in enabled:
+            raise RuntimeError(f"inference list_models lists a model that is not enabled: {model!r}")
+        kinds = model.get("task_kinds")
+        if not isinstance(kinds, list) or not kinds or "voice.realtime" in kinds:
+            raise RuntimeError(f"inference list_models has bad task_kinds: {model!r}")
+        for kind in kinds:
+            guide = guides.get(kind)
+            if not isinstance(guide, dict) or not {"does", "files", "params", "output"} <= set(guide):
+                raise RuntimeError(f"inference list_models has no guide for {kind}: {guide!r}")
+    return {"status": "passed", "models": [model["id"] for model in installed], "task_kinds": sorted(guides)}
+
+
+async def run_task_smoke(
     admin_session: Any,
     infer_session: Any,
     sample_image: Path | None,
@@ -535,11 +560,13 @@ async def run_direct_smoke(
     *,
     indextts_artifacts_ready: bool,
 ) -> dict[str, Any]:
+    """One-call tasks: run_task with params only, or with files uploaded through sign_assets."""
     results: dict[str, Any] = {}
-    results["object_detect"] = await direct_object_detect(infer_session, sample_image, models)
-    results["ocr_recognize"] = await direct_ocr_recognize(infer_session, ocr_image, models)
-    results["asr_transcribe"] = await direct_asr_transcribe(infer_session, sample_audio, models)
-    results["tts_synthesize"] = await direct_tts_synthesize(
+    results["text.embed"] = await run_task_embed(infer_session, timeout, models)
+    results["object.detect"] = await run_task_object_detect(infer_session, sample_image, timeout, models)
+    results["ocr.recognize"] = await run_task_ocr(infer_session, ocr_image, timeout, models)
+    results["asr.transcribe"] = await run_task_asr(infer_session, sample_audio, timeout, models)
+    results["tts.synthesize"] = await run_task_tts(
         admin_session,
         infer_session,
         reference_audio,
@@ -552,7 +579,81 @@ async def run_direct_smoke(
     return results
 
 
-async def direct_ocr_recognize(session: Any, image: Path | None, models: list[Any]) -> dict[str, Any]:
+async def upload_asset(session: Any, path: Path, content_type: str, timeout: float) -> str:
+    """Upload a file through sign_assets; returns its asset uri for files[].asset_uri."""
+    asset_path = f"smoke/mcp/run-task/{int(time.time() * 1000)}/{path.name}"
+    signed = await call_tool_checked(
+        session,
+        "sign_assets",
+        {"items": [{"operation": "upload", "kind": "material", "path": asset_path, "content_type": content_type}]},
+    )
+    items = signed.get("items") if isinstance(signed, dict) else None
+    if not isinstance(items, list) or not items or not items[0].get("signed_url"):
+        raise RuntimeError(f"MCP sign_assets returned no upload URL: {signed}")
+    uri = upload_file(items[0]["signed_url"], path, content_type, timeout).get("uri")
+    if not isinstance(uri, str) or not uri:
+        raise RuntimeError(f"asset upload of {path} returned no uri")
+    return uri
+
+
+async def run_task_with_file(
+    session: Any,
+    task_kind: str,
+    model: str,
+    path: Path,
+    role: str,
+    content_type: str,
+    timeout: float,
+    params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    uri = await upload_asset(session, path, content_type, timeout)
+    return await call_tool_checked(
+        session,
+        "run_task",
+        {
+            "task_kind": task_kind,
+            "model": model,
+            "files": [{"name": path.name, "role": role, "mime": content_type, "required": True, "asset_uri": uri}],
+            "params": params or {},
+            "wait_timeout_sec": int(timeout),
+        },
+    )
+
+
+async def run_task_embed(session: Any, timeout: float, models: list[Any]) -> dict[str, Any]:
+    if not model_enabled(models, EMBEDDING_MODEL_ID):
+        return skipped(f"{EMBEDDING_MODEL_ID} is not enabled")
+    payload = await call_tool_checked(
+        session,
+        "run_task",
+        {
+            "task_kind": "text.embed",
+            "model": EMBEDDING_MODEL_ID,
+            "params": {"input": ["local multimodal infra", "本地多模态"], "input_type": "query"},
+            "wait_timeout_sec": int(timeout),
+        },
+    )
+    validate_task_output(payload, "text_embeddings", "MCP run_task text.embed")
+    embeddings = payload["output"].get("embeddings")
+    if not isinstance(embeddings, list) or len(embeddings) != 2:
+        raise RuntimeError(f"MCP run_task text.embed returned {embeddings!r}")
+    return {"status": "passed", "dimensions": len(embeddings[0])}
+
+
+async def run_task_object_detect(session: Any, image: Path | None, timeout: float, models: list[Any]) -> dict[str, Any]:
+    if image is None:
+        return skipped("no --sample-image supplied")
+    if not image.exists():
+        return skipped(f"sample image does not exist: {image}")
+    if not model_enabled(models, YOLO_MODEL_ID):
+        return skipped(f"{YOLO_MODEL_ID} is not enabled")
+    payload = await run_task_with_file(session, "object.detect", YOLO_MODEL_ID, image, "image", image_mime(image), timeout)
+    validate_task_output(payload, "object_detections", "MCP run_task object.detect")
+    object_count, car_count = object_detection_counts(payload.get("output"), "MCP run_task object.detect")
+    return {"status": "passed", "input_image": str(image), "object_count": object_count, "car_count": car_count, "result": payload}
+
+
+async def run_task_ocr(session: Any, image: Path | None, timeout: float, models: list[Any]) -> dict[str, Any]:
     if image is None:
         return skipped("no --ocr-image supplied")
     if not image.exists():
@@ -560,69 +661,36 @@ async def direct_ocr_recognize(session: Any, image: Path | None, models: list[An
     if not model_enabled(models, OCR_MODEL_ID):
         return skipped(f"{OCR_MODEL_ID} is not enabled")
     try:
-        payload = await call_tool_checked(
-            session,
-            "ocr_recognize",
-            {"model": OCR_MODEL_ID, "image": {"path": str(image), "mime": image_mime(image)}},
-        )
+        payload = await run_task_with_file(session, "ocr.recognize", OCR_MODEL_ID, image, "image", image_mime(image), timeout)
     except RuntimeError as exc:
         if ocr_unavailable(str(exc)):
             return skipped(f"OCR cannot run on this worker: {exc}")
         raise
-    text = ocr_text(payload, "MCP direct ocr_recognize")
+    if isinstance(payload, dict) and payload.get("state") == "failed" and ocr_unavailable(json.dumps(payload)):
+        return skipped(f"OCR cannot run on this worker: {payload.get('error')}")
+    validate_task_output(payload, "ocr_text", "MCP run_task ocr.recognize")
+    text = ocr_text(payload.get("output"), "MCP run_task ocr.recognize")
     return {"status": "passed", "input_image": str(image), "text": text, "result": payload}
 
 
-async def direct_object_detect(session: Any, image: Path | None, models: list[Any]) -> dict[str, Any]:
-    if image is None:
-        return skipped("no --sample-image supplied")
-    if not image.exists():
-        return skipped(f"sample image does not exist: {image}")
-    if not model_enabled(models, YOLO_MODEL_ID):
-        return skipped(f"{YOLO_MODEL_ID} is not enabled")
-    payload = await call_tool_checked(
-        session,
-        "object_detect",
-        {"model": YOLO_MODEL_ID, "image": {"path": str(image), "mime": image_mime(image)}},
-    )
-    validate_direct_output(payload, "object_detections", "MCP direct object_detect")
-    object_count, car_count = object_detection_counts(payload, "MCP direct object_detect")
-    return {
-        "status": "passed",
-        "input_image": str(image),
-        "object_count": object_count,
-        "car_count": car_count,
-        "result": payload,
-    }
-
-
-async def direct_asr_transcribe(session: Any, audio: Path | None, models: list[Any]) -> dict[str, Any]:
+async def run_task_asr(session: Any, audio: Path | None, timeout: float, models: list[Any]) -> dict[str, Any]:
     if audio is None:
         return skipped("no --sample-audio supplied")
     if not audio.exists():
         return skipped(f"sample audio does not exist: {audio}")
     if not model_enabled(models, SENSEVOICE_ASR_MODEL_ID):
         return skipped(f"{SENSEVOICE_ASR_MODEL_ID} is not enabled")
-    payload = await call_tool_checked(
-        session,
-        "asr_transcribe",
-        {"model": SENSEVOICE_ASR_MODEL_ID, "audio": {"path": str(audio), "mime": "audio/wav"}},
-    )
-    validate_direct_output(payload, "asr_transcription", "MCP direct asr_transcribe")
-    asr_text = extract_direct_asr_text(payload)
+    payload = await run_task_with_file(session, "asr.transcribe", SENSEVOICE_ASR_MODEL_ID, audio, "audio", "audio/wav", timeout)
+    validate_task_output(payload, "asr_transcription", "MCP run_task asr.transcribe")
+    output = payload.get("output")
+    asr_text = extract_direct_asr_text(output)
     if not asr_text.strip():
-        raise RuntimeError(f"MCP direct asr_transcribe returned empty text: {payload}")
-    validate_asr_timeline(payload, "MCP direct asr_transcribe")
-    return {
-        "status": "passed",
-        "input_audio": str(audio),
-        "asr_text": asr_text,
-        "asr_text_length": len(asr_text),
-        "result": payload,
-    }
+        raise RuntimeError(f"MCP run_task asr.transcribe returned empty text: {payload}")
+    validate_asr_timeline(output, "MCP run_task asr.transcribe")
+    return {"status": "passed", "input_audio": str(audio), "asr_text": asr_text, "asr_text_length": len(asr_text), "result": payload}
 
 
-async def direct_tts_synthesize(
+async def run_task_tts(
     admin_session: Any,
     infer_session: Any,
     reference_audio: Path | None,
@@ -641,34 +709,33 @@ async def direct_tts_synthesize(
         return skipped(f"reference audio does not exist: {reference_audio}")
     if not model_enabled(models, INDEXTTS_MODEL_ID):
         await call_tool_checked(admin_session, "enable_model", {"id": INDEXTTS_MODEL_ID})
-    payload = await call_tool_checked(
+    payload = await run_task_with_file(
         infer_session,
-        "tts_synthesize",
-        {
-            "model": INDEXTTS_MODEL_ID,
-            "text": text,
-            "reference_audio": {"path": str(reference_audio), "mime": "audio/wav"},
-        },
+        "tts.synthesize",
+        INDEXTTS_MODEL_ID,
+        reference_audio,
+        "reference_audio",
+        "audio/wav",
+        timeout,
+        {"text": text},
     )
-    validate_direct_output(payload, "tts_audio", "MCP direct tts_synthesize")
+    validate_task_output(payload, "tts_audio", "MCP run_task tts.synthesize")
     result: dict[str, Any] = {"status": "passed", "result": payload}
     if not asr_enabled:
         result["tts_asr_cross_check"] = skipped(f"{SENSEVOICE_ASR_MODEL_ID} is not enabled")
         return result
-    audio_path, cleanup_path = resolve_tts_audio_for_asr(payload, timeout)
+    audio_path, cleanup_path = resolve_tts_audio_for_asr(payload.get("output"), timeout)
     try:
         if audio_path is None:
-            result["tts_asr_cross_check"] = skipped("tts_synthesize returned no local or downloadable audio path")
+            result["tts_asr_cross_check"] = skipped("tts.synthesize returned no local or downloadable audio")
         else:
-            asr_payload = await call_tool_checked(
-                infer_session,
-                "asr_transcribe",
-                {"model": SENSEVOICE_ASR_MODEL_ID, "audio": {"path": str(audio_path), "mime": "audio/wav"}},
+            asr_payload = await run_task_with_file(
+                infer_session, "asr.transcribe", SENSEVOICE_ASR_MODEL_ID, audio_path, "audio", "audio/wav", timeout
             )
-            validate_direct_output(asr_payload, "asr_transcription", "MCP direct tts_synthesize ASR cross-check")
-            asr_text = extract_direct_asr_text(asr_payload)
+            validate_task_output(asr_payload, "asr_transcription", "MCP run_task TTS ASR cross-check")
+            asr_text = extract_direct_asr_text(asr_payload.get("output"))
             if not asr_text.strip():
-                raise RuntimeError(f"MCP direct tts_synthesize ASR cross-check returned empty text: {asr_payload}")
+                raise RuntimeError(f"MCP run_task TTS ASR cross-check returned empty text: {asr_payload}")
             result["tts_asr_cross_check"] = {"status": "passed", "input_audio": str(audio_path), "result": asr_payload}
             result["tts_asr_text"] = asr_text
             result["tts_asr_text_length"] = len(asr_text)
@@ -679,7 +746,6 @@ async def direct_tts_synthesize(
             except OSError:
                 pass
     return result
-
 
 
 async def call_tool_checked(session: Any, name: str, arguments: dict[str, Any]) -> Any:
@@ -836,7 +902,7 @@ def resolve_tts_audio_for_asr(payload: Any, timeout: float) -> tuple[Path | None
     if isinstance(audio_url, str) and audio_url:
         downloaded = download_bytes(audio_url, timeout)
         if not downloaded:
-            raise RuntimeError("MCP direct tts_synthesize returned an empty downloadable audio file")
+            raise RuntimeError("tts.synthesize returned an empty downloadable audio file")
         with tempfile.NamedTemporaryFile(prefix="local-mcp-tts-", suffix=".wav", delete=False) as handle:
             handle.write(downloaded)
             return Path(handle.name), Path(handle.name)

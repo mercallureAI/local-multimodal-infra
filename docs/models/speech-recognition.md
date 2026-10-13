@@ -78,8 +78,8 @@ Spec `metadata` (defaults) and per-request parameters of the same name:
 
 ## Calling it
 
-- MCP / JSON-RPC `asr_transcribe` (`audio` file ref), or the generic task
-  `asr.transcribe` with an `audio` upload: full output (`text`,
+- The task `asr.transcribe` with an `audio` file (MCP and JSON-RPC), or
+  JSON-RPC `asr_transcribe` (`audio` file ref): full output (`text`,
   `timestamped_text`, `segments`, `speakers`).
 - `POST /v1/audio/transcriptions` (JSON `{"model", "file": {"path"}}`, a path
   the worker can read): `{"text"}` only.

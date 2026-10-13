@@ -10,9 +10,9 @@ All three clone the voice of a reference recording (`reference_audio`).
 
 ## Calling it
 
-- MCP / JSON-RPC `tts_synthesize` (`text`, `reference_audio` file ref), or
-  the generic task `tts.synthesize` with a `reference_audio` input uploaded:
-  a WAV artifact.
+- The task `tts.synthesize` (`params.text`, optional `reference_audio`
+  file; MCP and JSON-RPC), or JSON-RPC `tts_synthesize` (`text`,
+  `reference_audio` file ref): a WAV with a signed download URL.
 - `POST /v1/audio/speech`: JSON `{"model", "input" | "text", "reference_path"}`;
   every other field is passed to the model as a parameter (below). Returns
   `{"audio": <file ref>}`.

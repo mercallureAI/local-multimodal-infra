@@ -12,6 +12,14 @@ use serde_json::{Map, Value};
 
 const MCP_RESULT_PREVIEW_MAX_BYTES: usize = 1_000;
 
+const INFER_INSTRUCTIONS: &str = "Local multimodal inference as tasks. \
+1. list_models: the installed models, their task kinds, and what each task kind takes (files, params) and returns. \
+2. Without files: run_task {task_kind, model, params} returns the result. \
+3. With files: create_task {task_kind, model, files, params}, POST each file's raw bytes to its uploads[].upload_url, then start_task {task_id} (it waits and returns the result). \
+Alternatively upload through sign_assets and pass the returned uri as files[].asset_uri to run_task. \
+Results are in output (output.type names its shape); generated files (speech audio) carry a download URL. \
+Long results come back as a preview plus download_url unless with_url_result is \"off\".";
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 enum WithUrlResult {
@@ -151,12 +159,13 @@ impl ServerHandler for StandardMcpServer {
                 icons: None,
                 website_url: None,
             },
-            instructions: Some(
-                format!(
-                    "Standard MCP {} tools for the local controller. Results preserve the legacy JSON-RPC payloads where possible.",
-                    self.access.label()
-                ),
-            ),
+            instructions: Some(match self.access {
+                McpAccess::Infer => INFER_INSTRUCTIONS.to_string(),
+                McpAccess::Admin => {
+                    "Standard MCP admin tools for the local controller: models, downloads, nodes and assets."
+                        .to_string()
+                }
+            }),
         }
     }
 
@@ -225,17 +234,13 @@ impl StandardMcpServer {
                 let request = serde_json::from_value::<CreateTaskRequest>(arguments)?;
                 Ok(json!(InferenceApi::run_task(&self.state, request).await?))
             }
-            "sign_assets" | "sign_asset_urls" => {
+            "sign_assets" => {
                 let request = serde_json::from_value::<AssetSignRequest>(arguments)?;
                 Ok(json!(
                     InferenceApi::sign_assets(&self.state, request).await?
                 ))
             }
-            "asr_transcribe" | "object_detect" | "ocr_recognize" | "tts_synthesize"
-            | "text_embed" | "text_rerank" => {
-                let task = task_from_method(name, &arguments)?;
-                Ok(json!(InferenceApi::dispatch(&self.state, task).await?))
-            }
+            "list_models" if self.access == McpAccess::Infer => self.installed_models().await,
             "list_models" => Ok(json!(AdminApi::list_models(&self.state).await?)),
             "get_model" => Ok(json!(
                 AdminApi::get_model(&self.state, required_id_value(&arguments)).await?
@@ -268,9 +273,92 @@ impl StandardMcpServer {
             ))),
         }?;
         match with_url_result {
-            Some(policy) => self.present_inference_result(value, policy),
+            Some(policy) => {
+                let mut value = value;
+                self.refresh_asset_urls(&mut value);
+                self.present_inference_result(value, policy)
+            }
             None => Ok(value),
         }
+    }
+
+    /// Gives every stored asset in a task result (an `assets://` uri, such as
+    /// speech a task generated) a fresh signed download URL: the URL saved
+    /// with the task stops working DEFAULT_ASSET_URL_TTL_SECS after the task
+    /// ends, and a result is often read later.
+    fn refresh_asset_urls(&self, value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                let uri = object
+                    .get("uri")
+                    .and_then(Value::as_str)
+                    .filter(|uri| uri.starts_with("assets://"))
+                    .map(str::to_string);
+                if let Some(uri) = uri {
+                    let signed = self.state.sign_asset_url_public(AssetSignItem {
+                        operation: AssetUrlOperation::Download,
+                        kind: None,
+                        path: None,
+                        uri: Some(uri),
+                        content_type: None,
+                        ttl_sec: None,
+                        expires: None,
+                        url_ttl_sec: None,
+                    });
+                    if let Ok(signed) = signed {
+                        object.insert("url".to_string(), json!(signed.signed_url));
+                    }
+                }
+                for child in object.values_mut() {
+                    self.refresh_asset_urls(child);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    self.refresh_asset_urls(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The models a task can use now (enabled, downloaded) with their task
+    /// kinds, and what each of those kinds takes and returns.
+    async fn installed_models(&self) -> Result<Value> {
+        let mut models = Vec::new();
+        let mut task_kinds = Map::new();
+        for info in AdminApi::list_models(&self.state).await? {
+            // Downloaded: every artifact recorded, or present with its
+            // pinned size (the store's status, which does not hash).
+            if !info.spec.enabled || !info.downloaded {
+                continue;
+            }
+            let kinds = info
+                .spec
+                .task_kinds
+                .iter()
+                .copied()
+                // Served over the /v1/realtime WebSocket, not as a task.
+                .filter(|kind| *kind != local_core::TaskKind::VoiceRealtime)
+                .collect::<Vec<_>>();
+            if kinds.is_empty() {
+                continue;
+            }
+            for kind in &kinds {
+                if let Value::String(name) = json!(kind) {
+                    task_kinds
+                        .entry(name)
+                        .or_insert_with(|| task_kind_guide(*kind));
+                }
+            }
+            models.push(json!({
+                "id": info.spec.id,
+                "name": info.spec.name,
+                "task_kinds": kinds,
+                "auto_select": info.spec.auto_selectable(),
+            }));
+        }
+        Ok(json!({ "models": models, "task_kinds": task_kinds }))
     }
 
     fn present_inference_result(&self, value: Value, policy: WithUrlResult) -> Result<Value> {
@@ -328,17 +416,7 @@ fn result_url_policy(name: &str, mut arguments: Value) -> Result<(Option<WithUrl
 fn is_inference_result_tool(name: &str) -> bool {
     matches!(
         name,
-        "create_task"
-            | "start_task"
-            | "get_task"
-            | "wait_task"
-            | "run_task"
-            | "asr_transcribe"
-            | "object_detect"
-            | "ocr_recognize"
-            | "tts_synthesize"
-            | "text_embed"
-            | "text_rerank"
+        "create_task" | "start_task" | "get_task" | "wait_task" | "run_task"
     )
 }
 
@@ -377,19 +455,13 @@ impl McpAccess {
             ),
             Self::Infer => matches!(
                 name,
-                "create_task"
+                "list_models"
+                    | "create_task"
                     | "start_task"
                     | "get_task"
                     | "wait_task"
                     | "run_task"
                     | "sign_assets"
-                    | "sign_asset_urls"
-                    | "asr_transcribe"
-                    | "object_detect"
-                    | "ocr_recognize"
-                    | "tts_synthesize"
-                    | "text_embed"
-                    | "text_rerank"
             ),
         }
     }
@@ -412,187 +484,6 @@ fn task_id_param(params: &Value) -> Result<String> {
         .ok_or_else(|| InfraError::BadRequest("params.task_id is required".to_string()))
 }
 
-fn task_from_method(method: &str, params: &Value) -> Result<InferenceTask> {
-    let model_id = params
-        .get("model")
-        .and_then(Value::as_str)
-        .or_else(|| params.get("model_id").and_then(Value::as_str))
-        .map(ToOwned::to_owned);
-    match method {
-        "asr_transcribe" => {
-            let audio = direct_file_ref(params, "audio", "audio_path", "asr_transcribe")?;
-            let mut task = InferenceTask::new(
-                local_core::TaskKind::AsrTranscribe,
-                model_id,
-                InferenceInput::AsrTranscribe { audio },
-            );
-            task.params = params
-                .as_object()
-                .map(|object| {
-                    object
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            Ok(task)
-        }
-        "object_detect" => {
-            let image = direct_file_ref(params, "image", "image_path", "object_detect")?;
-            Ok(InferenceTask::new(
-                local_core::TaskKind::ObjectDetect,
-                model_id,
-                InferenceInput::ObjectDetect { image },
-            ))
-        }
-        "ocr_recognize" => {
-            let image = direct_file_ref(params, "image", "image_path", "ocr_recognize")?;
-            Ok(InferenceTask::new(
-                local_core::TaskKind::OcrRecognize,
-                model_id,
-                InferenceInput::OcrRecognize { image },
-            ))
-        }
-        "tts_synthesize" => {
-            let text = params
-                .get("text")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    InfraError::BadRequest("tts_synthesize params.text is required".to_string())
-                })?
-                .to_string();
-            let reference_audio = optional_file_ref(params.get("reference_audio"))?
-                .or_else(|| path_file_ref(params.get("reference_audio_path")))
-                .or_else(|| path_file_ref(params.get("reference_path")));
-            let mut task = InferenceTask::new(
-                local_core::TaskKind::TtsSynthesize,
-                model_id,
-                InferenceInput::TtsSynthesize {
-                    text,
-                    reference_audio,
-                },
-            );
-            task.params = params
-                .as_object()
-                .map(|object| {
-                    object
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            Ok(task)
-        }
-        "text_embed" => {
-            let texts = value_text_list(params, &["input", "texts", "text"])?;
-            let input_type = params
-                .get("input_type")
-                .cloned()
-                .map(serde_json::from_value)
-                .transpose()?
-                .unwrap_or_default();
-            Ok(InferenceTask::new(
-                local_core::TaskKind::TextEmbed,
-                model_id,
-                InferenceInput::TextEmbed { texts, input_type },
-            ))
-        }
-        "text_rerank" => {
-            let query = params
-                .get("query")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    InfraError::BadRequest("text_rerank params.query is required".to_string())
-                })?
-                .to_string();
-            let documents = value_text_list(params, &["documents"])?;
-            let top_n = params
-                .get("top_n")
-                .and_then(Value::as_u64)
-                .map(|value| value as usize);
-            Ok(InferenceTask::new(
-                local_core::TaskKind::TextRerank,
-                model_id,
-                InferenceInput::TextRerank {
-                    query,
-                    documents,
-                    top_n,
-                },
-            ))
-        }
-        other => Err(InfraError::BadRequest(format!(
-            "unknown MCP tool `{other}`"
-        ))),
-    }
-}
-
-fn value_text_list(params: &Value, keys: &[&str]) -> Result<Vec<String>> {
-    let value = keys
-        .iter()
-        .find_map(|key| params.get(*key))
-        .ok_or_else(|| InfraError::BadRequest(format!("params.{} is required", keys[0])))?;
-    let texts = match value {
-        Value::String(text) => vec![text.clone()],
-        Value::Array(values) => values
-            .iter()
-            .map(|value| {
-                value.as_str().map(str::to_string).ok_or_else(|| {
-                    InfraError::BadRequest(format!("params.{} must contain strings", keys[0]))
-                })
-            })
-            .collect::<Result<Vec<_>>>()?,
-        _ => {
-            return Err(InfraError::BadRequest(format!(
-                "params.{} must be a string or array of strings",
-                keys[0]
-            )))
-        }
-    };
-    if texts.is_empty() || texts.iter().any(|text| text.trim().is_empty()) {
-        return Err(InfraError::BadRequest(format!(
-            "params.{} must contain non-empty strings",
-            keys[0]
-        )));
-    }
-    Ok(texts)
-}
-
-fn file_ref(value: &Value) -> Result<FileRef> {
-    serde_json::from_value(value.clone()).map_err(InfraError::from)
-}
-
-fn optional_file_ref(value: Option<&Value>) -> Result<Option<FileRef>> {
-    value.map(file_ref).transpose()
-}
-
-fn direct_file_ref(
-    params: &Value,
-    object_key: &str,
-    path_key: &str,
-    method: &str,
-) -> Result<FileRef> {
-    if let Some(file) = optional_file_ref(params.get(object_key))? {
-        return Ok(file);
-    }
-    if let Some(file) = path_file_ref(params.get(path_key)) {
-        return Ok(file);
-    }
-    let file = file_ref(params)?;
-    if file.file_id.is_some() || file.path.is_some() || file.url.is_some() || file.uri.is_some() {
-        return Ok(file);
-    }
-    Err(InfraError::BadRequest(format!(
-        "{method} params.{object_key} or params.{path_key} is required"
-    )))
-}
-
-fn path_file_ref(value: Option<&Value>) -> Option<FileRef> {
-    value
-        .and_then(Value::as_str)
-        .map(|path| FileRef::local(std::path::PathBuf::from(path)))
-}
-
 fn parse_model_spec_value(params: &Value) -> Result<ModelSpec> {
     if let Some(spec) = params.get("spec") {
         Ok(serde_json::from_value(spec.clone())?)
@@ -610,23 +501,57 @@ fn required_id_value(params: &Value) -> &str {
 }
 
 fn tool_definitions(access: McpAccess) -> Vec<Tool> {
+    let task_request = || {
+        object_schema(&[
+            ("task_kind", task_kind_schema()),
+            (
+                "model",
+                described(
+                    string_schema(),
+                    "Model id from list_models; omit for the default model of task_kind.",
+                ),
+            ),
+            (
+                "files",
+                described(
+                    array_schema(),
+                    "Input files, e.g. [{\"name\": \"photo.jpg\", \"role\": \"image\", \"mime\": \"image/jpeg\", \"required\": true}]; give an \"asset_uri\" from sign_assets instead of uploading to the task.",
+                ),
+            ),
+            (
+                "params",
+                described(
+                    object_schema(&[]),
+                    "Task inputs and options of task_kind, as list_models describes.",
+                ),
+            ),
+            ("wait_timeout_sec", number_schema()),
+            ("with_url_result", with_url_result_schema()),
+        ])
+    };
+    let list_models = match access {
+        McpAccess::Infer => tool(
+            "list_models",
+            "List the installed models (enabled, files present) with the task kinds each runs, and for every task kind the files and params it takes and the output it returns. Call this first.",
+            object_schema(&[]),
+        ),
+        McpAccess::Admin => tool("list_models", "List configured models.", object_schema(&[])),
+    };
     vec![
+        list_models,
+        tool(
+            "run_task",
+            "Run a task in one call: create it, start it and wait for its result. For tasks without files (texts, chat, speech without a reference voice) or with files given as asset_uri from sign_assets.",
+            task_request(),
+        ),
         tool(
             "create_task",
-            "Create a generic inference task and return upload slots.",
-            object_schema(&[
-                ("task_kind", string_schema()),
-                ("model", string_schema()),
-                ("model_id", string_schema()),
-                ("files", array_schema()),
-                ("params", object_schema(&[])),
-                ("wait_timeout_sec", number_schema()),
-                ("with_url_result", with_url_result_schema()),
-            ]),
+            "Create a task that takes files. Returns uploads[]: POST each file's raw bytes to its upload_url, then call start_task.",
+            task_request(),
         ),
         tool(
             "start_task",
-            "Start a previously created generic inference task.",
+            "Start a created task once its files are uploaded; wait=true (the default) returns the result.",
             object_schema(&[
                 ("task_id", string_schema()),
                 ("wait", bool_schema()),
@@ -635,16 +560,8 @@ fn tool_definitions(access: McpAccess) -> Vec<Tool> {
             ]),
         ),
         tool(
-            "get_task",
-            "Fetch generic task status by task_id.",
-            object_schema(&[
-                ("task_id", string_schema()),
-                ("with_url_result", with_url_result_schema()),
-            ]),
-        ),
-        tool(
             "wait_task",
-            "Wait for a generic task to leave running states.",
+            "Wait until a started task finishes; returns its state, output and files.",
             object_schema(&[
                 ("task_id", string_schema()),
                 ("timeout_sec", number_schema()),
@@ -652,104 +569,18 @@ fn tool_definitions(access: McpAccess) -> Vec<Tool> {
             ]),
         ),
         tool(
-            "run_task",
-            "Create and start a generic task, waiting for completion by default.",
+            "get_task",
+            "Return a task's current state, upload slots, output and files without waiting.",
             object_schema(&[
-                ("task_kind", string_schema()),
-                ("model", string_schema()),
-                ("model_id", string_schema()),
-                ("files", array_schema()),
-                ("params", object_schema(&[])),
-                ("wait_timeout_sec", number_schema()),
+                ("task_id", string_schema()),
                 ("with_url_result", with_url_result_schema()),
             ]),
         ),
         tool(
             "sign_assets",
-            "Create signed asset upload/download URLs.",
+            "Create signed URLs: operation \"upload\" (POST the bytes to the URL, then pass the returned uri as a task file's asset_uri) or \"download\" (GET an asset by its uri).",
             asset_sign_schema(),
         ),
-        tool(
-            "sign_asset_urls",
-            "Alias for sign_assets.",
-            asset_sign_schema(),
-        ),
-        tool(
-            "asr_transcribe",
-            "Run direct ASR. By default returns ~10s timestamped_text/segments plus segments[].speaker and speakers[]; set timestamps=false to disable the timeline.",
-            object_schema(&[
-                ("model", string_schema()),
-                ("model_id", string_schema()),
-                ("audio", file_ref_schema()),
-                ("audio_path", string_schema()),
-                ("timestamps", bool_schema()),
-                ("timestamp_granularity_sec", timestamp_granularity_schema()),
-                ("token_timestamps", bool_schema()),
-                ("speaker_diarization", bool_schema()),
-                ("with_url_result", with_url_result_schema()),
-            ]),
-        ),
-        tool(
-            "object_detect",
-            "Run direct object detection using model/model_id and an image FileRef.",
-            object_schema(&[
-                ("model", string_schema()),
-                ("model_id", string_schema()),
-                ("image", file_ref_schema()),
-                ("image_path", string_schema()),
-                ("with_url_result", with_url_result_schema()),
-            ]),
-        ),
-        tool(
-            "ocr_recognize",
-            "Run document OCR on one page image (FileRef or image_path); returns the page text with layout tags.",
-            object_schema(&[
-                ("model", string_schema()),
-                ("model_id", string_schema()),
-                ("image", file_ref_schema()),
-                ("image_path", string_schema()),
-                ("with_url_result", with_url_result_schema()),
-            ]),
-        ),
-        tool(
-            "tts_synthesize",
-            "Run direct TTS synthesis and pass all original params through task.params.",
-            object_schema(&[
-                ("text", string_schema()),
-                ("model", string_schema()),
-                ("model_id", string_schema()),
-                ("reference_audio", file_ref_schema()),
-                ("reference_audio_path", string_schema()),
-                ("reference_path", string_schema()),
-                ("with_url_result", with_url_result_schema()),
-            ]),
-        ),
-        tool(
-            "text_embed",
-            "Create multilingual E5 embeddings for input/texts with query or passage input_type.",
-            object_schema(&[
-                ("model", string_schema()),
-                ("model_id", string_schema()),
-                ("input", array_schema()),
-                ("texts", array_schema()),
-                ("text", string_schema()),
-                ("input_type", string_schema()),
-                ("with_url_result", with_url_result_schema()),
-            ]),
-        ),
-        tool(
-            "text_rerank",
-            "Rerank documents for a query with mMARCO MiniLM.",
-            object_schema(&[
-                ("model", string_schema()),
-                ("model_id", string_schema()),
-                ("query", string_schema()),
-                ("documents", array_schema()),
-                ("top_n", number_schema()),
-                ("with_url_result", with_url_result_schema()),
-            ]),
-        ),
-        tool("list_models", "List configured models.", object_schema(&[])),
         tool(
             "get_model",
             "Get a configured model by id/model_id.",
@@ -828,7 +659,146 @@ fn object_schema(properties: &[(&str, JsonObject)]) -> JsonObject {
 }
 
 fn asset_sign_schema() -> JsonObject {
-    object_schema(&[("items", array_schema()), ("requests", array_schema())])
+    object_schema(&[(
+        "items",
+        described(
+            array_schema(),
+            "e.g. [{\"operation\": \"upload\", \"kind\": \"material\", \"path\": \"photo.jpg\", \"content_type\": \"image/jpeg\"}]",
+        ),
+    )])
+}
+
+/// Task kinds a task can run (`voice.realtime` is a WebSocket).
+const TASK_KINDS: [local_core::TaskKind; 11] = {
+    use local_core::TaskKind::*;
+    [
+        AsrTranscribe,
+        TtsSynthesize,
+        ChatComplete,
+        TextEmbed,
+        TextRerank,
+        ObjectDetect,
+        DepthEstimate,
+        OcrRecognize,
+        OcrLines,
+        TextModerate,
+        ImageNsfw,
+    ]
+};
+
+fn task_kind_schema() -> JsonObject {
+    let mut schema = described(
+        string_schema(),
+        "What to run; list_models says which task kinds the installed models serve.",
+    );
+    schema.insert("enum".to_string(), json!(TASK_KINDS));
+    schema
+}
+
+/// What a task kind takes and returns, for agents choosing how to call it.
+fn task_kind_guide(kind: local_core::TaskKind) -> Value {
+    use local_core::TaskKind::*;
+    let image = |what: &str| json!([{ "role": "image", "required": true, "what": what }]);
+    match kind {
+        AsrTranscribe => json!({
+            "does": "Speech to text with timeline, language, emotion and speakers.",
+            "files": [{ "role": "audio", "required": true, "what": "WAV, FLAC, MP3, AAC/M4A or Ogg audio" }],
+            "params": {
+                "timestamps": "bool, default true: timestamped_text and timed segments",
+                "timestamp_granularity_sec": "number, default 10: length of the timeline's segments",
+                "token_timestamps": "bool, default false: per-token times",
+                "speaker_diarization": "bool, default true: segments[].speaker and speakers[]",
+            },
+            "output": "asr_transcription: text, timestamped_text, segments[{start_ms, end_ms, text, speaker, language, emotion}], speakers",
+        }),
+        TtsSynthesize => json!({
+            "does": "Text to speech in the voice of a reference recording.",
+            "files": [{ "role": "reference_audio", "required": false, "what": "WAV of the voice to clone (a few seconds)" }],
+            "params": {
+                "text": "string, required: what to say",
+                "language": "string: zh, en, ja, ... (IndexTTS) or chinese, english, ... (Qwen3-TTS); guessed when absent",
+                "reference_text": "string (Qwen3-TTS): what the reference audio says, for a closer voice",
+                "emotion_vector": "IndexTTS-2.5: 8 weights (happy, angry, sad, afraid, disgusted, melancholic, surprised, calm) or an object keyed by those names",
+                "emotion_alpha": "number (IndexTTS-2.5): emotion strength, default 1",
+                "speed": "number (IndexTTS-2.5): 2 speaks twice as fast",
+                "seed": "integer: sampling seed",
+            },
+            "output": "tts_audio: audio, a WAV file with a download URL",
+        }),
+        ChatComplete => json!({
+            "does": "Chat completion with tool calls.",
+            "files": [],
+            "params": {
+                "messages": "required: [{role: system|user|assistant|tool, content, tool_calls, tool_call_id}]",
+                "tools": "OpenAI-style function tools: [{type: function, function: {name, description, parameters}}]",
+                "options": "{max_tokens, temperature (0 = greedy), top_p, top_k, presence_penalty, frequency_penalty, seed, stop}",
+            },
+            "output": "chat_completion: content, tool_calls, finish_reason, usage",
+        }),
+        TextEmbed => json!({
+            "does": "Text embeddings for search.",
+            "files": [],
+            "params": {
+                "input": "string or array of strings, required",
+                "input_type": "query or passage (default)",
+            },
+            "output": "text_embeddings: embeddings (one vector per input)",
+        }),
+        TextRerank => json!({
+            "does": "Order documents by relevance to a query.",
+            "files": [],
+            "params": {
+                "query": "string, required",
+                "documents": "array of strings, required",
+                "top_n": "integer: keep the best n",
+            },
+            "output": "text_rerank: results[{index, relevance_score, document}], best first",
+        }),
+        ObjectDetect => json!({
+            "does": "Objects in an image (80 COCO classes).",
+            "files": image("PNG, JPEG or BMP"),
+            "params": {},
+            "output": "object_detections: objects[{label, confidence, bbox{x, y, width, height}}]",
+        }),
+        DepthEstimate => json!({
+            "does": "Metric depth of an image (meters), averaged over a grid.",
+            "files": image("PNG, JPEG or BMP"),
+            "params": { "cols": "integer, default 64", "rows": "integer, default 36" },
+            "output": "depth_map: cols, rows, max_depth, depth (meters, row by row from the top)",
+        }),
+        OcrRecognize => json!({
+            "does": "Document OCR of one page: its text with layout, tables as HTML.",
+            "files": image("one page image"),
+            "params": {},
+            "output": "ocr_text: text, each block preceded by <|det|>category [x1, y1, x2, y2]<|/det|> (coordinates 0-999)",
+        }),
+        OcrLines => json!({
+            "does": "Text lines in a photo, screenshot or game frame, with boxes.",
+            "files": image("PNG, JPEG or BMP"),
+            "params": {},
+            "output": "ocr_lines: lines[{text, confidence, bbox{x, y, width, height}}], top to bottom",
+        }),
+        TextModerate => json!({
+            "does": "Safety verdict of texts (Qwen3Guard categories).",
+            "files": [],
+            "params": { "input": "string or array of strings, required" },
+            "output": "text_moderations: results[{safe, controversial, unsafe, categories}]",
+        }),
+        ImageNsfw => json!({
+            "does": "NSFW probability of an image.",
+            "files": image("PNG, JPEG, BMP, WebP or GIF"),
+            "params": {},
+            "output": "image_nsfw: nsfw (probability), scores[{label, score}]",
+        }),
+        VoiceRealtime => json!({
+            "does": "Voice conversation over the /v1/realtime WebSocket; not a task.",
+        }),
+    }
+}
+
+fn described(mut schema: JsonObject, description: &str) -> JsonObject {
+    schema.insert("description".to_string(), json!(description));
+    schema
 }
 
 fn asset_list_schema() -> JsonObject {
@@ -844,35 +814,12 @@ fn id_schema() -> JsonObject {
     object_schema(&[("id", string_schema()), ("model_id", string_schema())])
 }
 
-fn file_ref_schema() -> JsonObject {
-    object_schema(&[
-        ("file_id", string_schema()),
-        ("path", string_schema()),
-        ("url", string_schema()),
-        ("uri", string_schema()),
-        ("mime", string_schema()),
-        ("sha256", string_schema()),
-    ])
-}
-
 fn string_schema() -> JsonObject {
     typed_schema("string")
 }
 
 fn number_schema() -> JsonObject {
     typed_schema("number")
-}
-
-fn timestamp_granularity_schema() -> JsonObject {
-    let mut schema = number_schema();
-    schema.insert("default".to_string(), json!(10));
-    schema.insert("minimum".to_string(), json!(1));
-    schema.insert("maximum".to_string(), json!(120));
-    schema.insert(
-        "description".to_string(),
-        json!("Target timeline segment duration in seconds; defaults to 10."),
-    );
-    schema
 }
 
 fn with_url_result_schema() -> JsonObject {
@@ -903,18 +850,7 @@ fn typed_schema(kind: &str) -> JsonObject {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use local_core::{EmbeddingInputType, TaskKind};
     use local_registry::ModelRegistry;
-
-    #[test]
-    fn text_tools_are_registered() {
-        let names = tool_definitions(McpAccess::Infer)
-            .into_iter()
-            .map(|tool| tool.name.to_string())
-            .collect::<Vec<_>>();
-        assert!(names.iter().any(|name| name == "text_embed"));
-        assert!(names.iter().any(|name| name == "text_rerank"));
-    }
 
     #[test]
     fn inference_tools_expose_url_result_policy() {
@@ -932,16 +868,16 @@ mod tests {
     #[test]
     fn url_result_policy_is_removed_before_inference_dispatch() {
         let (policy, arguments) = result_url_policy(
-            "asr_transcribe",
-            json!({"audio_path": "audio.wav", "with_url_result": "on"}),
+            "run_task",
+            json!({"task_kind": "text.embed", "params": {"input": ["q"]}, "with_url_result": "on"}),
         )
         .expect("valid policy");
         assert_eq!(policy, Some(WithUrlResult::On));
         assert!(arguments.get("with_url_result").is_none());
 
         let err = result_url_policy(
-            "text_embed",
-            json!({"input": ["q"], "with_url_result": "sometimes"}),
+            "get_task",
+            json!({"task_id": "t", "with_url_result": "sometimes"}),
         )
         .expect_err("invalid policy must fail");
         assert!(err.to_string().contains("unknown variant"), "{err}");
@@ -1033,125 +969,233 @@ mod tests {
     }
 
     #[test]
-    fn admin_and_infer_tool_catalogs_are_disjoint() {
-        let admin = tool_definitions(McpAccess::Admin)
-            .into_iter()
-            .map(|tool| tool.name.to_string())
-            .collect::<std::collections::BTreeSet<_>>();
+    fn inference_catalog_is_the_generic_task_tools_and_list_models() {
         let infer = tool_definitions(McpAccess::Infer)
             .into_iter()
             .map(|tool| tool.name.to_string())
             .collect::<std::collections::BTreeSet<_>>();
-        assert!(admin.is_disjoint(&infer));
-        assert!(admin.contains("enable_model"));
-        assert!(!admin.contains("text_embed"));
-        assert!(infer.contains("text_embed"));
-        assert!(!infer.contains("enable_model"));
-    }
-
-    #[test]
-    fn text_tools_map_to_core_tasks() {
-        let embed = task_from_method(
-            "text_embed",
-            &json!({
-                "model": "multilingual-e5-small-onnx",
-                "input": ["q"],
-                "input_type": "query"
-            }),
-        )
-        .expect("embed task");
-        assert_eq!(embed.kind, TaskKind::TextEmbed);
-        assert!(matches!(
-            embed.input,
-            InferenceInput::TextEmbed {
-                input_type: EmbeddingInputType::Query,
-                ..
-            }
-        ));
-
-        let rerank = task_from_method(
-            "text_rerank",
-            &json!({
-                "model": "mmarco-minilm-l12-onnx",
-                "query": "q",
-                "documents": ["a", "b"],
-                "top_n": 1
-            }),
-        )
-        .expect("rerank task");
-        assert_eq!(rerank.kind, TaskKind::TextRerank);
-        assert!(matches!(
-            rerank.input,
-            InferenceInput::TextRerank { top_n: Some(1), .. }
-        ));
-    }
-
-    #[test]
-    fn ocr_tool_builds_an_ocr_task_from_an_image_path() {
-        let tool = tool_definitions(McpAccess::Infer)
+        let expected = [
+            "create_task",
+            "get_task",
+            "list_models",
+            "run_task",
+            "sign_assets",
+            "start_task",
+            "wait_task",
+        ];
+        assert_eq!(infer, expected.map(String::from).into_iter().collect());
+        for name in expected {
+            assert!(McpAccess::Infer.allows(name), "{name}");
+        }
+        for removed in ["asr_transcribe", "object_detect", "text_embed", "sign_asset_urls"] {
+            assert!(!McpAccess::Infer.allows(removed), "{removed}");
+        }
+        // The catalogs share only list_models, which differs per catalog.
+        let admin = tool_definitions(McpAccess::Admin)
             .into_iter()
-            .find(|tool| tool.name.as_ref() == "ocr_recognize")
-            .expect("OCR tool");
-        let schema = serde_json::to_value(tool).expect("serialize tool");
-        for name in ["image", "image_path", "model", "with_url_result"] {
+            .map(|tool| tool.name.to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            admin.intersection(&infer).collect::<Vec<_>>(),
+            vec!["list_models"]
+        );
+        assert!(admin.contains("enable_model") && !infer.contains("enable_model"));
+    }
+
+    #[tokio::test]
+    async fn inference_list_models_shows_installed_models_and_their_task_kinds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let models_dir = dir.path().join("models");
+        let store = local_model_store::SqliteModelStore::new(
+            dir.path().join("data/local.db"),
+            models_dir.clone(),
+        )
+        .expect("store");
+        // A local artifact counts as present when its file exists.
+        let model = |id: &str, kinds: Vec<local_core::TaskKind>, present: bool| {
+            let path = models_dir.join(id).join("model.onnx");
+            if present {
+                std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+                std::fs::write(&path, b"onnx").expect("write model");
+            }
+            let mut spec = crate::tests::test_model();
+            spec.id = id.to_string();
+            spec.task_kinds = kinds;
+            spec.artifacts = vec![local_core::ModelArtifact {
+                kind: local_core::ArtifactKind::Local,
+                path,
+                source_path: None,
+                sha256: None,
+                size: None,
+                url: None,
+                repo_id: None,
+                revision: None,
+                files: Vec::new(),
+                allow_patterns: Vec::new(),
+                metadata: Default::default(),
+            }];
+            spec
+        };
+        use local_core::TaskKind::*;
+        let mut named_only = model("ocr-export", vec![OcrRecognize], true);
+        named_only
+            .metadata
+            .insert("auto_select".to_string(), json!(false));
+        let mut disabled = model("disabled", vec![TextEmbed], true);
+        disabled.enabled = false;
+        // A downloadable artifact copied into the model directory, with no
+        // download record, is installed too.
+        let mut copied = model("copied", vec![TextRerank], false);
+        let copied_file = models_dir.join("copied").join("model.onnx");
+        std::fs::create_dir_all(copied_file.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&copied_file, b"onnx").expect("write copied");
+        copied.artifacts[0].kind = local_core::ArtifactKind::Url;
+        copied.artifacts[0].url = Some("https://example.invalid/model.onnx".to_string());
+        let specs = [
+            model("detector", vec![ObjectDetect], true),
+            named_only,
+            model("missing", vec![TtsSynthesize], false),
+            model("voice", vec![VoiceRealtime], true),
+            disabled,
+            copied,
+        ]
+        .map(|spec| store.upsert_model(spec).expect("upsert"));
+        let server = StandardMcpServer {
+            state: ControllerState::with_store(ModelRegistry::from_models(specs.to_vec()), store),
+            access: McpAccess::Infer,
+        };
+
+        let listed = server
+            .call_tool_json("list_models", json!({}))
+            .await
+            .expect("list_models");
+        let ids = listed["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .map(|model| model["id"].as_str().expect("id"))
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["copied", "detector", "ocr-export"], "{listed}");
+        assert_eq!(listed["models"][1]["task_kinds"], json!(["object.detect"]));
+        assert_eq!(listed["models"][1]["auto_select"], true);
+        assert_eq!(listed["models"][2]["auto_select"], false);
+        let kinds = listed["task_kinds"].as_object().expect("task kinds");
+        // Key order depends on serde_json's preserve_order feature, which
+        // other crates in the workspace turn on.
+        let mut names = kinds.keys().collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, ["object.detect", "ocr.recognize", "text.rerank"]);
+        assert_eq!(kinds["object.detect"]["files"][0]["role"], "image");
+
+        // The admin catalog still lists every configured model.
+        let admin = StandardMcpServer {
+            access: McpAccess::Admin,
+            ..server
+        };
+        let all = admin
+            .call_tool_json("list_models", json!({}))
+            .await
+            .expect("admin list_models");
+        assert_eq!(all.as_array().expect("models").len(), 6);
+    }
+
+    #[tokio::test]
+    async fn url_results_and_the_assets_in_them_download_over_http() {
+        let dir = tempfile::tempdir().expect("temp data dir");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let state = ControllerState::new_with_options(
+            ModelRegistry::from_models(Vec::new()),
+            None,
+            ControllerOptions {
+                public_base_url: base_url.clone(),
+                data_dir: dir.path().to_path_buf(),
+                upload_signing_secret: Some("download-test-secret".to_string()),
+                asset_cleanup_interval: None,
+                max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
+                ..ControllerOptions::default()
+            },
+        );
+        let app = state.clone().app();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+        let server = StandardMcpServer {
+            state: state.clone(),
+            access: McpAccess::Infer,
+        };
+        // Speech a task generated, as its stored result names it: the URL
+        // signed when the task ended has expired.
+        let speech = b"RIFF....WAVEfmt speech bytes";
+        let record = state
+            .assets
+            .put(
+                AssetKind::Artifact,
+                "tasks/t1/outputs/speech.wav",
+                Some("audio/wav".to_string()),
+                None,
+                speech,
+            )
+            .expect("store speech");
+        let mut result = json!({
+            "task_id": "t1",
+            "state": "succeeded",
+            "output": {"type": "tts_audio", "audio": {"uri": record.uri, "url": "http://stale.invalid/x"}},
+            "files": [{"uri": record.uri}],
+        });
+        server.refresh_asset_urls(&mut result);
+        let client = reqwest::Client::new();
+        for url in [&result["output"]["audio"]["url"], &result["files"][0]["url"]] {
+            let url = url.as_str().expect("fresh url");
+            assert!(url.starts_with(&base_url), "{url}");
+            let response = client.get(url).send().await.expect("download speech");
+            assert_eq!(response.status(), StatusCode::OK, "{url}");
+            assert_eq!(response.bytes().await.expect("speech bytes").as_ref(), speech);
+        }
+
+        // A result too long to inline comes back as a text artifact whose
+        // download URL serves the whole result.
+        let long = json!({"text": "界".repeat(600), "audio": result["output"]["audio"].clone()});
+        let wrapped = server
+            .present_inference_result(long.clone(), WithUrlResult::Auto)
+            .expect("url result");
+        let url = wrapped["download_url"].as_str().expect("download_url");
+        let response = client.get(url).send().await.expect("download result");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/plain; charset=utf-8"
+        );
+        let downloaded: Value =
+            serde_json::from_slice(&response.bytes().await.expect("result bytes")).expect("json");
+        assert_eq!(downloaded, long);
+        server_task.abort();
+    }
+
+    #[test]
+    fn task_tools_describe_task_kinds_and_files() {
+        let run = tool_definitions(McpAccess::Infer)
+            .into_iter()
+            .find(|tool| tool.name.as_ref() == "run_task")
+            .expect("run_task");
+        let schema = serde_json::to_value(run).expect("serialize tool");
+        let kinds = &schema["inputSchema"]["properties"]["task_kind"]["enum"];
+        assert!(kinds.as_array().is_some_and(|kinds| kinds.contains(&json!("asr.transcribe"))));
+        assert!(!kinds.as_array().unwrap().contains(&json!("voice.realtime")));
+        for name in ["model", "files", "params"] {
             assert!(
-                schema["inputSchema"]["properties"].get(name).is_some(),
-                "missing {name}: {schema}"
+                schema["inputSchema"]["properties"][name]["description"].is_string(),
+                "{name}: {schema}"
             );
         }
-        let task = task_from_method(
-            "ocr_recognize",
-            &json!({"model": "unlimited-ocr-onnx", "image_path": "./page.png"}),
-        )
-        .expect("OCR task");
-        assert_eq!(task.kind, TaskKind::OcrRecognize);
-        assert_eq!(task.model_id.as_deref(), Some("unlimited-ocr-onnx"));
-        match task.input {
-            InferenceInput::OcrRecognize { image } => {
-                assert_eq!(
-                    image.path.as_deref(),
-                    Some(std::path::Path::new("./page.png"))
-                );
+        for kind in TASK_KINDS {
+            let guide = task_kind_guide(kind);
+            for field in ["does", "files", "params", "output"] {
+                assert!(guide.get(field).is_some(), "{kind:?} lacks {field}");
             }
-            other => panic!("unexpected input: {other:?}"),
         }
-    }
-
-    #[test]
-    fn asr_tool_exposes_timeline_and_speaker_params() {
-        let tool = tool_definitions(McpAccess::Infer)
-            .into_iter()
-            .find(|tool| tool.name.as_ref() == "asr_transcribe")
-            .expect("ASR tool");
-        let schema = serde_json::to_value(tool).expect("serialize tool");
-        let properties = &schema["inputSchema"]["properties"];
-        for name in [
-            "timestamps",
-            "timestamp_granularity_sec",
-            "token_timestamps",
-            "speaker_diarization",
-        ] {
-            assert!(properties.get(name).is_some(), "missing {name}: {schema}");
-        }
-        assert_eq!(properties["timestamp_granularity_sec"]["default"], 10);
-
-        let task = task_from_method(
-            "asr_transcribe",
-            &json!({
-                "model": "sensevoice-small-onnx",
-                "audio_path": "./audio.wav",
-                "timestamps": false,
-                "timestamp_granularity_sec": 15,
-                "token_timestamps": true,
-                "speaker_diarization": false
-            }),
-        )
-        .expect("ASR task");
-        assert_eq!(task.kind, TaskKind::AsrTranscribe);
-        assert_eq!(task.params["timestamps"], false);
-        assert_eq!(task.params["timestamp_granularity_sec"], 15);
-        assert_eq!(task.params["token_timestamps"], true);
-        assert_eq!(task.params["speaker_diarization"], false);
     }
 
     #[tokio::test]

@@ -28,6 +28,7 @@ fn spec(id: &str, adapter: AdapterKind, path: PathBuf) -> ModelSpec {
             path,
             source_path: None,
             sha256: None,
+            size: None,
             url: None,
             repo_id: None,
             revision: None,

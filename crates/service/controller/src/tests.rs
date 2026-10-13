@@ -29,6 +29,7 @@ async fn admin_model_download_is_async_queryable_and_deduplicated() {
         path: source,
         source_path: None,
         sha256: None,
+        size: None,
         url: None,
         repo_id: None,
         revision: None,
@@ -865,7 +866,7 @@ async fn capture_worker_task(
     })
 }
 
-fn test_model() -> ModelSpec {
+pub(super) fn test_model() -> ModelSpec {
     ModelSpec {
         id: "yolo11n.onnx".to_string(),
         name: "YOLO11n ONNX".to_string(),

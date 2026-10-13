@@ -17,6 +17,7 @@ artifacts:
   - type: url
     url: https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/a38c087bcb2579f9ccc2068aea02ec893b1c2311/ppocr/utils/dict/ppocrv5_dict.txt
     sha256: d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b
+    size: 74012
     path: ppocrv5_dict.txt
 runtime:
   provider_order: [cuda, cpu]

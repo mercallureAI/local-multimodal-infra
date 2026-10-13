@@ -24,6 +24,7 @@ fn artifact(kind: ArtifactKind, path: PathBuf) -> ModelArtifact {
         path,
         source_path: None,
         sha256: None,
+        size: None,
         url: None,
         repo_id: None,
         revision: None,
@@ -131,7 +132,7 @@ async fn repeated_local_download_reuses_stable_artifact() {
 }
 
 #[test]
-fn unrecorded_url_file_is_not_reported_as_downloaded() {
+fn unrecorded_url_file_counts_by_presence_and_pinned_size_not_hash() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = SqliteModelStore::new(dir.path().join("data/local.db"), dir.path().join("models"))
         .expect("store");
@@ -140,12 +141,32 @@ fn unrecorded_url_file_is_not_reported_as_downloaded() {
     let spec = store
         .upsert_model(base_spec("m", vec![url]))
         .expect("upsert");
-    fs::create_dir_all(spec.artifacts[0].path.parent().expect("model parent")).expect("mkdir");
-    fs::write(&spec.artifacts[0].path, b"partial").expect("partial file");
+    let path = spec.artifacts[0].path.clone();
+    fs::create_dir_all(path.parent().expect("model parent")).expect("mkdir");
+    fs::write(&path, b"partial").expect("partial file");
 
+    // No size pinned: a present file counts.
     let status = store.model_download_status(&spec).expect("status");
+    assert!(status.downloaded);
+
+    // A pinned size it does not have: not this artifact.
+    let mut pinned = spec.clone();
+    pinned.artifacts[0].size = Some(b"complete".len() as u64);
+    pinned.artifacts[0].sha256 = Some(sha256_hex(b"complete"));
+    let pinned = store.upsert_model(pinned).expect("upsert pinned");
+    let status = store.model_download_status(&pinned).expect("status");
     assert!(!status.downloaded);
-    assert_eq!(status.state, DownloadState::NotStarted);
+    assert_eq!(status.state, DownloadState::Failed);
+    assert!(status.artifacts[0]
+        .message
+        .as_deref()
+        .is_some_and(|message| message.contains("size mismatch")));
+
+    // The pinned size with other bytes still counts: statuses do not hash.
+    fs::write(&path, b"COMPLETE").expect("same-size file");
+    let status = store.model_download_status(&pinned).expect("status");
+    assert!(status.downloaded);
+    assert_eq!(status.state, DownloadState::Downloaded);
 }
 
 #[test]
@@ -192,13 +213,16 @@ fn artifact_spec_change_clears_old_download_status() {
 
     let mut changed = spec;
     changed.artifacts[0].url = Some("https://example.test/new.bin".to_string());
+    changed.artifacts[0].size = Some(b"new model".len() as u64);
     let changed = store.upsert_model(changed).expect("upsert changed");
     let status = store
         .model_download_status(&changed)
         .expect("changed status");
 
+    // The old record no longer applies; the old file is judged by the new
+    // artifact's pinned size.
     assert!(!status.downloaded);
-    assert_eq!(status.state, DownloadState::NotStarted);
+    assert_eq!(status.state, DownloadState::Failed);
 }
 
 #[test]

@@ -246,6 +246,7 @@ fn e5_embedding_default(model_dir: &Path) -> ModelSpec {
             path: root,
             source_path: None,
             sha256: None,
+            size: None,
             url: None,
             repo_id: Some("intfloat/multilingual-e5-small".to_string()),
             revision: Some(revision.to_string()),
@@ -303,6 +304,7 @@ fn mmarco_reranker_default(model_dir: &Path) -> ModelSpec {
             path: root,
             source_path: None,
             sha256: None,
+            size: None,
             url: None,
             repo_id: Some("cross-encoder/mmarco-mMiniLMv2-L12-H384-v1".to_string()),
             revision: Some(revision.to_string()),
@@ -362,6 +364,7 @@ fn index_tts_default(model_dir: &Path) -> ModelSpec {
             path: root,
             source_path: None,
             sha256: None,
+            size: None,
             url: None,
             repo_id: Some("ModaLeap/indextts-1.5-onnx".to_string()),
             revision: Some("3f1a422cd97a0b7dbb9b6ad4698dc0fde66796d1".to_string()),
@@ -445,18 +448,20 @@ fn sensevoice_asr_default(model_dir: &Path) -> ModelSpec {
     let vad_revision = "f6e9fbb4cefa7397216c763f21307993f147f585";
     let vad_config_revision = "58fbad4088820ed1253955c8faf1444cd0b2dc69";
     let campplus_revision = "6265ff7af2a104d745b4389026ed9815c6c1c6ff";
-    let artifact = |target: &str, url: String, sha256: &str, revision: &str| ModelArtifact {
-        kind: ArtifactKind::Url,
-        path: root.join(target),
-        source_path: None,
-        sha256: Some(sha256.to_string()),
-        url: Some(url),
-        repo_id: None,
-        revision: Some(revision.to_string()),
-        files: Vec::new(),
-        allow_patterns: Vec::new(),
-        metadata: BTreeMap::new(),
-    };
+    let artifact =
+        |target: &str, url: String, sha256: &str, size: u64, revision: &str| ModelArtifact {
+            kind: ArtifactKind::Url,
+            path: root.join(target),
+            source_path: None,
+            sha256: Some(sha256.to_string()),
+            size: Some(size),
+            url: Some(url),
+            repo_id: None,
+            revision: Some(revision.to_string()),
+            files: Vec::new(),
+            allow_patterns: Vec::new(),
+            metadata: BTreeMap::new(),
+        };
     let mut metadata = BTreeMap::new();
     metadata.insert("license".to_string(), json!("Apache-2.0"));
     metadata.insert("runtime".to_string(), json!("onnxruntime"));
@@ -501,48 +506,56 @@ fn sensevoice_asr_default(model_dir: &Path) -> ModelSpec {
                 "asr/model_quant.onnx",
                 format!("https://huggingface.co/haixuantao/SenseVoiceSmall-onnx/resolve/{sensevoice_revision}/model_quant.onnx?download=true"),
                 "21dc965f689a78d1604717bf561e40d5a236087c85a95584567835750549e822",
+                241216270,
                 sensevoice_revision,
             ),
             artifact(
                 "asr/am.mvn",
                 format!("https://huggingface.co/haixuantao/SenseVoiceSmall-onnx/resolve/{sensevoice_revision}/am.mvn?download=true"),
                 "29b3c740a2c0cfc6b308126d31d7f265fa2be74f3bb095cd2f143ea970896ae5",
+                11203,
                 sensevoice_revision,
             ),
             artifact(
                 "asr/config.yaml",
                 format!("https://huggingface.co/haixuantao/SenseVoiceSmall-onnx/resolve/{sensevoice_revision}/config.yaml?download=true"),
                 "f71e239ba36705564b5bf2d2ffd07eece07b8e3f2bbf6d2c99d8df856339ac19",
+                1855,
                 sensevoice_revision,
             ),
             artifact(
                 "asr/tokens.json",
                 format!("https://huggingface.co/haixuantao/SenseVoiceSmall-onnx/resolve/{sensevoice_revision}/tokens.json?download=true"),
                 "a2594fc1474e78973149cba8cd1f603ebed8c39c7decb470631f66e70ce58e97",
+                352064,
                 sensevoice_revision,
             ),
             artifact(
                 "vad/model_quant.onnx",
                 format!("https://huggingface.co/funasr/fsmn-vad-onnx/resolve/{vad_revision}/model_quant.onnx?download=true"),
                 "9b28837838fce9685503c63139fadbad35d6c8ed485485dafdbb32e725969660",
+                508876,
                 vad_revision,
             ),
             artifact(
                 "vad/am.mvn",
                 format!("https://huggingface.co/funasr/fsmn-vad-onnx/resolve/{vad_revision}/vad.mvn?download=true"),
                 "6820fef9687708c4fc3fab2530179c8fcea6262daa25514380056cd8f6eb1754",
+                8040,
                 vad_revision,
             ),
             artifact(
                 "vad/config.yaml",
                 format!("https://huggingface.co/MoYoYoTech/Translator/resolve/{vad_config_revision}/moyoyo_asr_models/speech_fsmn_vad_zh-cn-16k-common-pytorch/config.yaml?download=true"),
                 "486861ca26ddb79081663b6179cb204c6bfae71c52f04aafc48a9e9d8dde1e93",
+                1215,
                 vad_config_revision,
             ),
             artifact(
                 "speaker/campplus_cn_en_common_200k.onnx",
                 format!("https://huggingface.co/welcomyou/campplus-3dspeaker-200k-onnx/resolve/{campplus_revision}/campplus_cn_en_common_200k.onnx"),
                 "dd1740aa1e1ffa3895f96aef2166b8af2bb2ad09c00769dd275ee36aef6a2a7f",
+                28283928,
                 campplus_revision,
             ),
         ],
@@ -591,6 +604,7 @@ fn yolo_default(model_dir: &Path) -> ModelSpec {
                 path: root.join("yolo11n.onnx"),
                 source_path: None,
                 sha256: None,
+                size: None,
                 url: None,
                 repo_id: Some("aaurelions/yolo11n.onnx".to_string()),
                 revision: Some("f46d9b72aa9a0f02bc00484446e2310b1a549bce".to_string()),
@@ -605,6 +619,7 @@ fn yolo_default(model_dir: &Path) -> ModelSpec {
                 sha256: Some(
                     "38ed1eb122fad6eed8e18dcf8da56a4b26db9c2064be41530485e2644fae9f7f".to_string(),
                 ),
+                size: Some(2583),
                 url: Some("https://raw.githubusercontent.com/ultralytics/ultralytics/eba96641b5cea142e21641909d6400fef7134244/ultralytics/cfg/datasets/coco.yaml".to_string()),
                 repo_id: None,
                 revision: None,
@@ -792,7 +807,8 @@ backend: ort
                 spec.id
             );
             // Downloads are pinned: a Hugging Face artifact names a commit,
-            // a URL artifact carries its SHA-256.
+            // a URL artifact carries its SHA-256 and size (the size is what a
+            // present file is checked against without hashing it).
             for artifact in &spec.artifacts {
                 match artifact.kind {
                     ArtifactKind::HuggingFace => assert!(
@@ -804,8 +820,8 @@ backend: ort
                         artifact.repo_id
                     ),
                     ArtifactKind::Url => assert!(
-                        artifact.sha256.is_some(),
-                        "{} pins {:?} by SHA-256",
+                        artifact.sha256.is_some() && artifact.size.is_some(),
+                        "{} pins {:?} by SHA-256 and size",
                         spec.id,
                         artifact.url
                     ),

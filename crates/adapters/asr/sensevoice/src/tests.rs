@@ -680,6 +680,7 @@ fn model_spec(root: PathBuf) -> ModelSpec {
             path: root,
             source_path: None,
             sha256: None,
+            size: None,
             url: None,
             repo_id: None,
             revision: None,

@@ -10,34 +10,42 @@ artifacts:
     path: asr/model_quant.onnx
     url: https://huggingface.co/haixuantao/SenseVoiceSmall-onnx/resolve/c4c8747214bed7ebbf2557e0412c19efa540023c/model_quant.onnx?download=true
     sha256: 21dc965f689a78d1604717bf561e40d5a236087c85a95584567835750549e822
+    size: 241216270
   - type: url
     path: asr/am.mvn
     url: https://huggingface.co/haixuantao/SenseVoiceSmall-onnx/resolve/c4c8747214bed7ebbf2557e0412c19efa540023c/am.mvn?download=true
     sha256: 29b3c740a2c0cfc6b308126d31d7f265fa2be74f3bb095cd2f143ea970896ae5
+    size: 11203
   - type: url
     path: asr/config.yaml
     url: https://huggingface.co/haixuantao/SenseVoiceSmall-onnx/resolve/c4c8747214bed7ebbf2557e0412c19efa540023c/config.yaml?download=true
     sha256: f71e239ba36705564b5bf2d2ffd07eece07b8e3f2bbf6d2c99d8df856339ac19
+    size: 1855
   - type: url
     path: asr/tokens.json
     url: https://huggingface.co/haixuantao/SenseVoiceSmall-onnx/resolve/c4c8747214bed7ebbf2557e0412c19efa540023c/tokens.json?download=true
     sha256: a2594fc1474e78973149cba8cd1f603ebed8c39c7decb470631f66e70ce58e97
+    size: 352064
   - type: url
     path: vad/model_quant.onnx
     url: https://huggingface.co/funasr/fsmn-vad-onnx/resolve/f6e9fbb4cefa7397216c763f21307993f147f585/model_quant.onnx?download=true
     sha256: 9b28837838fce9685503c63139fadbad35d6c8ed485485dafdbb32e725969660
+    size: 508876
   - type: url
     path: vad/am.mvn
     url: https://huggingface.co/funasr/fsmn-vad-onnx/resolve/f6e9fbb4cefa7397216c763f21307993f147f585/vad.mvn?download=true
     sha256: 6820fef9687708c4fc3fab2530179c8fcea6262daa25514380056cd8f6eb1754
+    size: 8040
   - type: url
     path: vad/config.yaml
     url: https://huggingface.co/MoYoYoTech/Translator/resolve/58fbad4088820ed1253955c8faf1444cd0b2dc69/moyoyo_asr_models/speech_fsmn_vad_zh-cn-16k-common-pytorch/config.yaml?download=true
     sha256: 486861ca26ddb79081663b6179cb204c6bfae71c52f04aafc48a9e9d8dde1e93
+    size: 1215
   - type: url
     path: speaker/campplus_cn_en_common_200k.onnx
     url: https://huggingface.co/welcomyou/campplus-3dspeaker-200k-onnx/resolve/6265ff7af2a104d745b4389026ed9815c6c1c6ff/campplus_cn_en_common_200k.onnx
     sha256: dd1740aa1e1ffa3895f96aef2166b8af2bb2ad09c00769dd275ee36aef6a2a7f
+    size: 28283928
 runtime:
   provider_order: [cuda, cpu]
   max_concurrency: 1

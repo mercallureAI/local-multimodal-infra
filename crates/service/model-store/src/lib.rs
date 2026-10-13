@@ -483,43 +483,12 @@ impl SqliteModelStore {
             });
             let status = match recorded_status {
                 Some(status) => refresh_recorded_status(status),
-                None if expected.path.is_file() && expected.sha256.is_some() => {
-                    let expected_sha256 = expected.sha256.as_deref().expect("sha256 checked");
-                    let actual = sha256_file(&expected.path)?;
-                    let (state, message) = if actual.eq_ignore_ascii_case(expected_sha256) {
-                        (
-                            DownloadState::Downloaded,
-                            format!("existing artifact verified with sha256 {actual}"),
-                        )
-                    } else {
-                        (
-                            DownloadState::Failed,
-                            format!(
-                                "artifact sha256 mismatch: expected {expected_sha256}, got {actual}"
-                            ),
-                        )
-                    };
-                    DownloadStatus {
-                        model_id: spec.id.clone(),
-                        artifact: expected.artifact,
-                        state,
-                        path: Some(expected.path),
-                        sha256: expected.sha256,
-                        message: Some(message),
-                        updated_at: Utc::now(),
-                    }
-                }
-                None if matches!(expected.kind, ArtifactKind::Local) && expected.path.exists() => {
-                    let (state, message) = match expected.sha256.as_deref() {
-                        Some(_) => (
-                            DownloadState::Failed,
-                            "cannot verify sha256 for a local directory artifact".to_string(),
-                        ),
-                        None => (
-                            DownloadState::Downloaded,
-                            "local artifact already exists".to_string(),
-                        ),
-                    };
+                // No download record: the file counts when it is there with
+                // its pinned size. Its sha256 is checked when a download
+                // writes or reuses it, not here: statuses are read at startup
+                // and by every catalog call, and model files are large.
+                None if expected.path.exists() => {
+                    let (state, message) = present_artifact_state(&expected)?;
                     DownloadStatus {
                         model_id: spec.id.clone(),
                         artifact: expected.artifact,
@@ -1306,6 +1275,45 @@ struct ExpectedDownload {
     kind: ArtifactKind,
     path: PathBuf,
     sha256: Option<String>,
+    size: Option<u64>,
+}
+
+/// The state of an artifact found on disk without a download record.
+fn present_artifact_state(expected: &ExpectedDownload) -> Result<(DownloadState, String)> {
+    if !expected.path.is_file() {
+        return Ok(match expected.sha256 {
+            Some(_) => (
+                DownloadState::Failed,
+                "cannot verify sha256 for a local directory artifact".to_string(),
+            ),
+            None => (
+                DownloadState::Downloaded,
+                "local artifact already exists".to_string(),
+            ),
+        });
+    }
+    let Some(size) = expected.size else {
+        return Ok((
+            DownloadState::Downloaded,
+            "existing artifact found (no size pinned)".to_string(),
+        ));
+    };
+    let actual = std::fs::metadata(&expected.path)
+        .map_err(|err| InfraError::io(Some(expected.path.clone()), err))?
+        .len();
+    Ok(if actual == size {
+        (
+            DownloadState::Downloaded,
+            format!("existing artifact has its pinned size ({size} bytes)"),
+        )
+    } else {
+        (
+            DownloadState::Failed,
+            format!(
+                "artifact size mismatch: expected {size} bytes, got {actual}; download_model replaces it"
+            ),
+        )
+    })
 }
 
 fn expected_downloads(spec: &ModelSpec) -> Vec<ExpectedDownload> {
@@ -1317,12 +1325,14 @@ fn expected_downloads(spec: &ModelSpec) -> Vec<ExpectedDownload> {
                 kind: artifact.kind,
                 path: artifact.path.clone(),
                 sha256: artifact.sha256.clone(),
+                size: artifact.size,
             }),
             ArtifactKind::Url => expected.push(ExpectedDownload {
                 artifact: format!("url:{index}"),
                 kind: artifact.kind,
                 path: artifact.path.clone(),
                 sha256: artifact.sha256.clone(),
+                size: artifact.size,
             }),
             ArtifactKind::HuggingFace => {
                 expected.extend(artifact.files.iter().map(|file| ExpectedDownload {
@@ -1330,6 +1340,7 @@ fn expected_downloads(spec: &ModelSpec) -> Vec<ExpectedDownload> {
                     kind: artifact.kind,
                     path: hf_target_path(artifact, file),
                     sha256: artifact.sha256.clone(),
+                    size: None,
                 }));
             }
         }
