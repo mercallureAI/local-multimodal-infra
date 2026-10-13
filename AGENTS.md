@@ -15,7 +15,7 @@ Repo-specific instructions for future OpenCode agents. Higher-priority user inst
 
 ## Config, routes, and storage
 
-- Default configs: `configs/controller.yaml`, `configs/worker.yaml`; model specs: `configs/providers/<category>/*.yaml` (`asr tts chat embedding rerank detect ocr moderation realtime`; a spec must sit under its adapter's category). Each category is also a cargo feature of the `cli` bins (all on by default); an audio-only worker is `cargo build --bins --no-default-features --features audio`.
+- Default configs: `configs/controller.yaml`, `configs/worker.yaml`; model specs: `configs/providers/<category>/*.yaml` (`asr tts chat embedding rerank detect ocr moderation realtime`; a spec must sit under its adapter's category). User docs per model category live in `docs/models/` and the model tables in `README.md` / `README.en.md`: update them when a spec, export command or endpoint changes, and keep the READMEs short (details go in `docs/`). Each category is also a cargo feature of the `cli` bins (all on by default); an audio-only worker is `cargo build --bins --no-default-features --features audio`.
 - Default addresses: controller HTTP API and legacy JSON-RPC `127.0.0.1:17890`, worker `127.0.0.1:17891`, standard MCP admin `127.0.0.1:17892/mcp/admin`, standard MCP inference `127.0.0.1:17892/mcp/infer`.
 - Admin MCP/RPC requires `LOCAL_ADMIN_TOKEN`; MCP, RPC, and OpenAI-compatible inference routes share the optional comma-separated `LOCAL_MCP_INFER_TOKENS` list. Keep the host publish loopback-only by default.
 - Start services with explicit storage args: `--workdir ./workdir --model-dir ./workdir/models`.

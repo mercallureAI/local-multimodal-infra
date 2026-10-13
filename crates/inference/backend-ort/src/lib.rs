@@ -10,12 +10,11 @@ use ort::{
     value::{DynTensor, DynValue, Tensor, TensorElementType, ValueType},
 };
 use serde::{Deserialize, Serialize};
-#[cfg(any(feature = "cuda", test))]
-use std::sync::OnceLock;
 use std::{
     borrow::Cow,
     collections::HashSet,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
 };
 
 mod device_binding;
@@ -202,7 +201,7 @@ fn probe_cuda_runtime_availability() -> bool {
     {
         cached_cuda_runtime_usability_with(&CUDA_RUNTIME_USABILITY, || {
             probe_cuda_runtime_usability_with(
-                || ort::ep::CUDA::default().is_available().map_err(map_ort_err),
+                || ort::ep::CUDA::is_available().map_err(map_ort_err),
                 create_cuda_usability_probe_session,
             )
         })
@@ -266,7 +265,7 @@ fn create_cuda_usability_probe_session() -> Result<()> {
     ];
 
     let cuda = ort::ep::CUDA::default();
-    Session::builder()
+    Session::builder(ort_environment()?)
         .map_err(map_ort_err)?
         .with_execution_providers([cuda.build().error_on_failure()])
         .map_err(map_ort_err)?
@@ -280,7 +279,7 @@ fn create_cuda_usability_probe_session() -> Result<()> {
 fn probe_dml_runtime_availability() -> bool {
     #[cfg(all(feature = "directml", target_os = "windows"))]
     {
-        match ort::ep::DirectML::default().is_available() {
+        match ort::ep::DirectML::is_available() {
             Ok(available) => available,
             Err(err) => {
                 let err = map_ort_err(err);
@@ -299,11 +298,7 @@ fn probe_dml_runtime_availability() -> bool {
 fn probe_trt_runtime_availability() -> bool {
     #[cfg(feature = "tensorrt")]
     {
-        let trt = ort::ep::TensorRT::default();
-        if !trt.supported_by_platform() {
-            return false;
-        }
-        match trt.is_available() {
+        match ort::ep::TensorRT::is_available() {
             Ok(available) => available,
             Err(err) => {
                 let err = map_ort_err(err);
@@ -869,10 +864,7 @@ impl RealSession {
         options: Option<CpuSessionOptions>,
         extras: &SessionExtras<'_>,
     ) -> Result<Self> {
-        // ONNX Runtime is loaded on first use (`load-dynamic`): from
-        // ORT_DYLIB_PATH, else onnxruntime.dll / libonnxruntime.so beside the
-        // executable or on the library search path. Building never needs it.
-        let mut builder = Session::builder().map_err(map_ort_err)?;
+        let mut builder = Session::builder(ort_environment()?).map_err(map_ort_err)?;
         if let Some(options) = options {
             builder = builder
                 .with_intra_threads(options.intra_threads)
@@ -894,7 +886,7 @@ impl RealSession {
         #[cfg(feature = "cuda")]
         {
             let cuda = ort::ep::CUDA::default();
-            if !cuda.is_available().map_err(map_ort_err)? {
+            if !ort::ep::CUDA::is_available().map_err(map_ort_err)? {
                 return Err(InfraError::Unsupported(format!(
                     "CUDA ORT execution provider is not available in the active ONNX Runtime binary (requested device {:?}); falling back to CPU if configured",
                     provider.device_id
@@ -921,7 +913,7 @@ impl RealSession {
                 cuda =
                     cuda.with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Heuristic);
             }
-            let builder = Session::builder()
+            let builder = Session::builder(ort_environment()?)
                 .map_err(map_ort_err)?
                 .with_execution_providers([cuda.build().error_on_failure()])
                 .map_err(map_ort_err)?;
@@ -943,7 +935,7 @@ impl RealSession {
         #[cfg(all(feature = "directml", target_os = "windows"))]
         {
             let dml = ort::ep::DirectML::default();
-            if !dml.is_available().map_err(map_ort_err)? {
+            if !ort::ep::DirectML::is_available().map_err(map_ort_err)? {
                 return Err(InfraError::Unsupported(format!(
                     "DirectML ORT execution provider is not available in the active ONNX Runtime binary (requested device {:?}); falling back to CPU if configured",
                     provider.device_id
@@ -953,7 +945,7 @@ impl RealSession {
             if let Some(device_id) = provider.device_id {
                 dml = dml.with_device_id(device_id as i32);
             }
-            let builder = Session::builder()
+            let builder = Session::builder(ort_environment()?)
                 .map_err(map_ort_err)?
                 .with_execution_providers([dml.build().error_on_failure()])
                 .map_err(map_ort_err)?;
@@ -973,24 +965,17 @@ impl RealSession {
     fn load_trt(model_path: &Path, provider: &ProviderOptions) -> Result<Self> {
         #[cfg(feature = "tensorrt")]
         {
-            let trt = ort::ep::TensorRT::default();
-            if !trt.supported_by_platform() {
-                return Err(InfraError::Unsupported(format!(
-                    "TensorRT ORT execution provider is not supported on this target by the active ort build (requested device {:?}); local-backend-ort does not yet model a same-session TensorRT+CUDA stack, so prefer provider_order [trt, cuda, cpu] across whole-session retries when available",
-                    provider.device_id
-                )));
-            }
-            if !trt.is_available().map_err(map_ort_err)? {
+            if !ort::ep::TensorRT::is_available().map_err(map_ort_err)? {
                 return Err(InfraError::Unsupported(format!(
                     "TensorRT ORT execution provider is not available in the active ONNX Runtime binary (requested device {:?}); local-backend-ort does not yet model a same-session TensorRT+CUDA stack, so prefer provider_order [trt, cuda, cpu] and fall back to CPU if configured",
                     provider.device_id
                 )));
             }
-            let mut trt = trt;
+            let mut trt = ort::ep::TensorRT::default();
             if let Some(device_id) = provider.device_id {
                 trt = trt.with_device_id(device_id as i32);
             }
-            let builder = Session::builder()
+            let builder = Session::builder(ort_environment()?)
                 .map_err(map_ort_err)?
                 .with_execution_providers([trt.build().error_on_failure()])
                 .map_err(map_ort_err)?;
@@ -1311,6 +1296,28 @@ fn format_names<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
     } else {
         names.join(", ")
     }
+}
+
+/// The process's ONNX Runtime environment, which every session is built in
+/// (ORT allows one per process). Made on first use, which is also when
+/// `load-dynamic` loads ONNX Runtime: from ORT_DYLIB_PATH, else
+/// onnxruntime.dll / libonnxruntime.so beside the executable or on the library
+/// search path. Building never needs it.
+fn ort_environment() -> Result<&'static ort::environment::Environment> {
+    static ENVIRONMENT: OnceLock<ort::environment::Environment> = OnceLock::new();
+    static INIT: Mutex<()> = Mutex::new(());
+    if let Some(environment) = ENVIRONMENT.get() {
+        return Ok(environment);
+    }
+    let _init = INIT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(environment) = ENVIRONMENT.get() {
+        return Ok(environment);
+    }
+    let environment = ort::init()
+        .with_name("local-multimodal-infra")
+        .build()
+        .map_err(map_ort_err)?;
+    Ok(ENVIRONMENT.get_or_init(|| environment))
 }
 
 fn map_ort_err<R>(err: ort::Error<R>) -> InfraError {

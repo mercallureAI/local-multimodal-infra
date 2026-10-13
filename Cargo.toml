@@ -26,15 +26,7 @@ hmac = "0.12"
 # WebP and GIF (first frame) for images sent to /v1/moderations.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "webp", "gif"] }
 ndarray = "0.15"
-# rc.13 bug (fixed upstream, not yet released): `MemoryInfo::to_owned` always
-# returns a CPU MemoryInfo, so `TensorRefMut::from_raw` over CUDA memory makes
-# ORT read device pointers as host memory (segfault; `Allocator::memory_info`
-# reports CPU too). Worked around by backend-ort
-# `shared_initializers::wrap_memory`, used by `static_binding`. When upgrading
-# ort: once `to_owned` keeps the device, drop `wrap_memory` and go back to
-# `TensorRefMut::from_raw`. The Qwen3-TTS CUDA graph real-model test
-# (`LOCAL_QWEN3_TTS_MODEL_DIR` + `LOCAL_QWEN3_TTS_REFERENCE`) covers it.
-ort = { version = "2.0.0-rc.13", default-features = false }
+ort = { version = "2.0.0-rc.14", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rmcp = { version = "0.16.0", features = ["server", "transport-streamable-http-server"] }
 serde = { version = "1", features = ["derive"] }

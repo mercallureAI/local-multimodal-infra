@@ -210,6 +210,7 @@ fn upload_packed(
         let view = unsafe {
             wrap_memory(
                 tensor.memory_info(),
+                &ort::memory::Allocator::default(),
                 base.add((range.offset - start) as usize) as *mut _,
                 range.length as usize,
                 &shape,
@@ -331,8 +332,10 @@ pub(crate) fn device_view(
     // SAFETY: the pointer, byte length, shape and element type all describe
     // `owner`'s live buffer, which the caller keeps alive alongside the view.
     unsafe {
+        // Only ever bound to sessions, never copied: see `wrap_memory`.
         wrap_memory(
             tensor.memory_info(),
+            &ort::memory::Allocator::default(),
             tensor.data_ptr() as *mut _,
             bytes,
             &shape,
@@ -343,15 +346,22 @@ pub(crate) fn device_view(
 }
 
 /// A value of `shape` and `element` over `bytes` at `data` in `memory`, not
-/// owning it (ort's `TensorRefMut::from_raw` loses a device `MemoryInfo` as of
-/// 2.0.0-rc.13: its `MemoryInfo::to_owned` always describes the CPU, so a
-/// CUDA buffer would be read as host memory).
+/// owning it. ort's `TensorRefMut::from_raw` makes only typed views that
+/// cannot become owned values; session initializers and fixed bindings need
+/// an owned `DynValue` whose element type is known at run time.
+///
+/// ORT runs the value in `memory`; ort itself describes it by `allocator`
+/// (`Value::memory_info`, and so the device `copy_into` copies on), which it
+/// keeps alive but never frees the data with. Views that are copied to or from
+/// need an allocator of `memory`'s device (a session's); views only bound to a
+/// session can take `Allocator::default()`.
 ///
 /// # Safety
 /// `data` must point to `bytes` live bytes in `memory`, kept alive for as long
 /// as the returned value.
 pub(crate) unsafe fn wrap_memory(
     memory: &ort::memory::MemoryInfo<'_>,
+    allocator: &ort::memory::Allocator,
     data: *mut std::ffi::c_void,
     bytes: usize,
     shape: &[i64],
@@ -386,7 +396,7 @@ pub(crate) unsafe fn wrap_memory(
     let out = std::ptr::NonNull::new(out)
         .ok_or_else(|| InfraError::Backend(format!("wrap `{what}` returned null")))?;
     // SAFETY: `out` is a fresh OrtValue owned by the returned Value.
-    Ok(unsafe { DynValue::from_ptr(out, None) })
+    Ok(unsafe { DynValue::from_ptr(out, Some(allocator)) })
 }
 
 impl Drop for SharedInitializers {

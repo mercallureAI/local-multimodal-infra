@@ -576,7 +576,7 @@ fn bind_fixed_output(
         // binding, which outlives the view (both live in the same
         // `StaticIoBinding`, whose allocator is dropped last). The view never
         // frees the memory.
-        let view = unsafe { raw_view::<T>(memory, data, &dims, &spec.name) }?;
+        let view = unsafe { raw_view::<T>(memory, allocator, data, &dims, &spec.name) }?;
         binding
             .bind_output(spec.name.as_str(), owner)
             .map_err(map_ort_err)?;
@@ -608,7 +608,7 @@ where
     let data = owner.data_ptr_mut();
     // SAFETY: as in `shared_kv`: the owner is moved into the binding below,
     // which lives as long as the view (both in one `StaticIoBinding`).
-    let view = unsafe { raw_view::<T>(memory, data, &dims, &pair.past_input) }?;
+    let view = unsafe { raw_view::<T>(memory, allocator, data, &dims, &pair.past_input) }?;
     binding
         .bind_input(pair.past_input.as_str(), &view)
         .map_err(map_ort_err)?;
@@ -618,13 +618,15 @@ where
     Ok(view)
 }
 
-/// A tensor of `dims` over `data` in `memory` that does not own it.
+/// A tensor of `dims` over `data` in `memory` (from `allocator`, which
+/// describes it to ort's copies) that does not own it.
 ///
 /// # Safety
 /// `data` must hold `dims` elements of `T` in `memory`, alive for as long as
 /// the view.
 unsafe fn raw_view<T>(
     memory: &MemoryInfo,
+    allocator: &Allocator,
     data: *mut std::ffi::c_void,
     dims: &Shape,
     what: &str,
@@ -637,6 +639,7 @@ where
     let value = unsafe {
         crate::shared_initializers::wrap_memory(
             memory,
+            allocator,
             data,
             bytes,
             dims,
