@@ -4,9 +4,9 @@
 
 This MVP intentionally implements only the ORT backend seam. Candle, Python, C++, sidecar, and external-process alternatives are not implemented. If a path would require a non-ORT backend it must return `Unsupported`, `NeedUserConfirmation`, or `NeedImplementation`.
 
-ONNX Runtime is loaded at run time (the `ort` crate's `load-dynamic` feature), so building and checking need no ONNX Runtime at all. The worker loads the library named by `ORT_DYLIB_PATH`, else `onnxruntime.dll` / `libonnxruntime.so` beside its executable, else from the library search path. The supported runtime is the official ONNX Runtime **1.30.0** (the `ort` 2.0.0-rc.14 bindings request C API 24, which newer runtimes keep serving; every session is built in one process-wide `Environment`, `backend-ort`'s `ort_environment`): the CPU Dockerfile installs the official CPU build and `Dockerfile.nvidia` the official CUDA 12 build, both pinned by digest, and set `ORT_DYLIB_PATH`. 1.30 is required, not only newer: the onnxruntime-genai decoder exports used for chat (GroupQueryAttention with a shared past/present buffer, shared quantized embeddings) produce wrong tokens on CUDA with the 1.24.x build `ort` used to bundle and with 1.28, and correct ones with 1.30. The backend remains ORT-specific at the API/config layer; CUDA/DML provider features are opt-in and must be validated against the active ORT execution providers before use. Both Dockerfiles download ONNX Runtime before copying the sources and build with BuildKit cache mounts for the Cargo registry and `target/` (BuildKit is the default builder since Docker 23; with Compose v2, `docker-compose build` uses it too), so a code change rebuilds only the crates it touches (`docker builder prune` drops them).
+ONNX Runtime is loaded at run time (the `ort` crate's `load-dynamic` feature), so building and checking need no ONNX Runtime at all. The worker loads the library named by `ORT_DYLIB_PATH`, else `onnxruntime.dll` / `libonnxruntime.so` beside its executable, else from the library search path. The supported runtime is the official ONNX Runtime **1.31.0** (the `ort` 2.0.0-rc.14 bindings request C API 24, which newer runtimes keep serving; every session is built in one process-wide `Environment`, `backend-ort`'s `ort_environment`): the CPU Dockerfile installs the official CPU build and `Dockerfile.nvidia` the official CUDA 12 build, both pinned by digest, and set `ORT_DYLIB_PATH`. At least 1.30 is required: the onnxruntime-genai decoder exports used for chat (GroupQueryAttention with a shared past/present buffer, shared quantized embeddings) produce wrong tokens on CUDA with the 1.24.x build `ort` used to bundle and with 1.28, and correct ones with 1.30 and 1.31. Against 1.30, 1.31 runs IndexTTS-2.5 about 14% faster (RTF 0.317 -> 0.271 on an RTX 4090) and the other models within 2%, with the same outputs; its CUDA 13 build was no faster on the RTX 4090 than the CUDA 12 one, so the CUDA 12 build stays. The backend remains ORT-specific at the API/config layer; CUDA/DML provider features are opt-in and must be validated against the active ORT execution providers before use. Both Dockerfiles download ONNX Runtime before copying the sources and build with BuildKit cache mounts for the Cargo registry and `target/` (BuildKit is the default builder since Docker 23; with Compose v2, `docker-compose build` uses it too), so a code change rebuilds only the crates it touches (`docker builder prune` drops them).
 
-On Windows, never rely on the search path: `C:\Windows\System32\onnxruntime.dll` (an older Windows ML copy) would be found. Put the 1.30 DLLs beside `worker.exe` or set `ORT_DYLIB_PATH`; `cargo test` binaries run from `target/<profile>/deps`, so tests that create sessions need `ORT_DYLIB_PATH`. The official Windows CUDA 12 zip needs a newer CUDA 12 runtime than 12.4 (its CUDA provider then fails to load with error 127); the DLLs of the `onnxruntime-gpu==1.30.0` Python wheel (`onnxruntime/capi/`) work with CUDA 12.4 and cuDNN 9 on `PATH`.
+On Windows, never rely on the search path: `C:\Windows\System32\onnxruntime.dll` (an older Windows ML copy) would be found. Put the 1.31 DLLs beside `worker.exe` or set `ORT_DYLIB_PATH`; `cargo test` binaries run from `target/<profile>/deps`, so tests that create sessions need `ORT_DYLIB_PATH`. `fetch_onnxruntime` takes the official Windows CUDA 12 zip, built with CUDA 12.8: put a CUDA 12.8+ runtime (cudart, cuBLAS) and cuDNN 9 on `PATH`, or the CUDA provider fails to load and models run on the CPU. The `onnxruntime-gpu==1.31.0` wheel on PyPI is a CUDA 13 build (it links `cublas64_13.dll`).
 
 
 ## Providers: CPU, CUDA, DML, TensorRT
@@ -38,9 +38,9 @@ Dockerfile/image and has no GPU request. Only the worker declares Compose
 `docker compose version`. The worker is constrained to Linux x86_64, the target
 of the official CUDA build.
 
-The worker image adds `onnxruntime-linux-x64-gpu_cuda12-1.30.0.tgz` from the
+The worker image adds `onnxruntime-linux-x64-gpu_cuda12-1.31.0.tgz` (built with CUDA 12.8) from the
 ONNX Runtime GitHub release (SHA-256
-`f9886932ee7bb0b4d3fcab736a392d4ff5efaa0672b47f19f0cec03437cf64f1`):
+`62d3af5269af2143b5d37494337573f1ffb8885f3ad7477ae0cb1cc79c8dedfd`):
 `libonnxruntime.so*`, `libonnxruntime_providers_shared.so` and
 `libonnxruntime_providers_cuda.so` go to `/usr/local/lib`, and
 `ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so`. The runtime base stays
@@ -54,7 +54,7 @@ library is missing.
 
 Evidence:
 
-- ONNX Runtime 1.30.0 release assets and digests: <https://github.com/microsoft/onnxruntime/releases/tag/v1.30.0>
+- ONNX Runtime 1.31.0 release assets and digests: <https://github.com/microsoft/onnxruntime/releases/tag/v1.31.0>
 - ONNX Runtime CUDA/cuDNN compatibility: <https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements>
 - Official NVIDIA image/tag and Container Toolkit requirement: <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/cuda/12.8.1-cudnn-runtime-ubuntu24.04>
 - NVIDIA CUDA minor-version/driver compatibility: <https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html>
@@ -63,10 +63,10 @@ Reproducible inspection used for this choice:
 
 ```bash
 # The release API lists each asset's sha256 digest:
-curl -s https://api.github.com/repos/microsoft/onnxruntime/releases/tags/v1.30.0 \
+curl -s https://api.github.com/repos/microsoft/onnxruntime/releases/tags/v1.31.0 \
   | jq -r '.assets[] | select(.name | test("linux-x64")) | "\(.name) \(.digest)"'
-tar -xzf onnxruntime-linux-x64-gpu_cuda12-1.30.0.tgz
-readelf -d onnxruntime-linux-x64-gpu_cuda12-1.30.0/lib/libonnxruntime_providers_cuda.so | grep NEEDED
+tar -xzf onnxruntime-linux-x64-gpu_cuda12-1.31.0.tgz
+readelf -d onnxruntime-linux-x64-gpu_cuda12-1.31.0/lib/libonnxruntime_providers_cuda.so | grep NEEDED
 # Resolve the official tag's multi-arch manifest digest:
 docker buildx imagetools inspect nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 ```
@@ -141,7 +141,7 @@ The directory (`<model_dir>/qwen3-4b-instruct-2507-int4-onnx`, a `local` artifac
 - **Streaming**: `stream: true` answers with server-sent events (`chat.completion.chunk`, then `[DONE]`; `stream_options.include_usage` adds a usage chunk; the final chunk carries `timings` with `prefill_ms`, `first_token_ms`, `decode_ms`). Internally the controller forwards to the worker's `/internal/infer_stream` (newline-delimited `InferenceEvent`s) and the runtime passes each token to a sink while the model is held; when the client disconnects, the worker's sink fails and generation stops at the next token (finish reason `cancelled`), freeing the model for the next request.
 - Generic tasks accept `chat.complete` with `params.messages`, `params.tools` and `params.options` (`ChatOptions`).
 
-Opt-in real-model test: `LOCAL_QWEN3_CHAT_MODEL_DIR=<dir> ORT_DYLIB_PATH=<onnxruntime 1.30> cargo test --release -p local-adapter-qwen3-chat --features cuda real_model -- --nocapture`.
+Opt-in real-model test: `LOCAL_QWEN3_CHAT_MODEL_DIR=<dir> ORT_DYLIB_PATH=<onnxruntime 1.31> cargo test --release -p local-adapter-qwen3-chat --features cuda real_model -- --nocapture`.
 
 ## Streaming TTS (Qwen3-TTS) and the GPU gate
 
@@ -153,7 +153,7 @@ ORT keeps CUDA graphs per thread, so the adapter runs its sessions on a thread o
 - A type that owns device memory or a session ends with a `DropGate` field and implements `Drop` to fill it, so its memory is released under the gate.
 - Never drop such a type while the same thread holds a guard (the std `RwLock` is not re-entrant: a second read can wait behind a queued writer forever): build output tensors after the guard of the run is released.
 
-Opt-in real-model test: `LOCAL_QWEN3_TTS_MODEL_DIR=<abs dir> LOCAL_QWEN3_TTS_REFERENCE=<abs wav> ORT_DYLIB_PATH=<onnxruntime 1.30> cargo test --release -p local-adapter-qwen3-tts --features cuda real_model_smoke_if_env_set -- --nocapture`.
+Opt-in real-model test: `LOCAL_QWEN3_TTS_MODEL_DIR=<abs dir> LOCAL_QWEN3_TTS_REFERENCE=<abs wav> ORT_DYLIB_PATH=<onnxruntime 1.31> cargo test --release -p local-adapter-qwen3-tts --features cuda real_model_smoke_if_env_set -- --nocapture`.
 
 ## IndexTTS FP32 and text normalization boundary
 

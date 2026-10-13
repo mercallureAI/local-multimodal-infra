@@ -61,14 +61,14 @@ curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
 
 ## From source
 
-Rust 1.92 or newer. ONNX Runtime is loaded at run time (the official 1.30
+Rust 1.92 or newer. ONNX Runtime is loaded at run time (the official 1.31
 build; see [implementation notes](implementation-notes.md#ort-only-boundary)),
 so building needs none:
 
 ```bash
 cargo build --release --bins                 # CPU
 cargo build --release --bins --features cuda # NVIDIA GPU
-python -m scripts.local.fetch_onnxruntime    # ONNX Runtime 1.30 beside the binaries (--cpu for the CPU build)
+python -m scripts.local.fetch_onnxruntime    # ONNX Runtime 1.31 beside the binaries (--cpu for the CPU build)
 ```
 
 Then start both (in the background; they serve until stopped):

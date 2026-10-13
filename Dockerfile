@@ -5,11 +5,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl build-essential pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# The official ONNX Runtime 1.30.0 CPU build, pinned by digest and loaded at
+# The official ONNX Runtime 1.31.0 CPU build, pinned by digest and loaded at
 # run time (ort `load-dynamic`). Before the sources, so a code change does not
 # download it again.
-ARG ORT_VERSION=1.30.0
-ARG ORT_SHA256=a5ed5a3cac51fbb2e90da632ae43d19212faaa20e76484e62bcb7c23ddb3b3fd
+ARG ORT_VERSION=1.31.0
+ARG ORT_SHA256=cc5c72baf5ae5c8238a6841f0897227be2d02826b9cf98eaf02fdefaeeb03a57
 RUN set -eux; \
     curl -fsSL -o /tmp/ort.tgz \
         "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz"; \

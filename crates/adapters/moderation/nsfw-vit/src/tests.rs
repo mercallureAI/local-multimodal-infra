@@ -31,7 +31,7 @@ fn meta_names_its_nsfw_labels() {
     assert_eq!(meta.nsfw_labels.len(), 3);
 }
 
-/// `LOCAL_NSFW_VIT_MODEL_DIR=<export dir> ORT_DYLIB_PATH=<onnxruntime 1.30>
+/// `LOCAL_NSFW_VIT_MODEL_DIR=<export dir> ORT_DYLIB_PATH=<onnxruntime 1.31>
 /// cargo test -p local-adapter-nsfw-vit real_model -- --nocapture`
 /// (`LOCAL_TEST_PROVIDER_ORDER=cuda,cpu` and `--features cuda` for the GPU).
 /// The repository's test photos (a street, a VRChat room) are not NSFW.

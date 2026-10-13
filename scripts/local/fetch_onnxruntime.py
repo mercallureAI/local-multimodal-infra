@@ -2,17 +2,15 @@
 
 The worker loads ONNX Runtime dynamically (ort `load-dynamic`): the library
 must sit beside the binaries or be named by ORT_DYLIB_PATH. This downloads
-the pinned 1.30.0 build for this platform, checks its SHA-256 and copies the
+the pinned 1.31.0 build for this platform, checks its SHA-256 and copies the
 libraries into each destination (default: target/release and target/debug).
 
-- Windows, CUDA: the DLLs of the onnxruntime-gpu wheel on PyPI (a zip; no
-  Python install is used). They run with CUDA 12.4+ and cuDNN 9 on PATH; the
-  official CUDA 12 zip on GitHub needs a newer CUDA 12 runtime.
-- Windows CPU and Linux: the official GitHub release archives (the Docker
-  images use the same Linux archives).
+- The official GitHub release archives (the Docker images use the same Linux
+  ones). The CUDA builds are the CUDA 12 ones, built with CUDA 12.8: on
+  Windows put a CUDA 12.8+ runtime (cudart, cuBLAS) and cuDNN 9 on PATH. (The
+  onnxruntime-gpu 1.31 wheel on PyPI is a CUDA 13 build.)
 
-    python -m scripts.local.fetch_onnxruntime [--cpu] [--dest DIR ...]
-        [--pypi-mirror https://pypi.tuna.tsinghua.edu.cn]
+    python -m scripts.local.fetch_onnxruntime [--cpu] [--dest DIR ...] [--cache DIR]
 """
 
 from __future__ import annotations
@@ -24,6 +22,7 @@ import platform
 import shutil
 import sys
 import tarfile
+import time
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -31,7 +30,7 @@ from pathlib import Path
 
 from .paths import repo_root
 
-ORT_VERSION = "1.30.0"
+ORT_VERSION = "1.31.0"
 
 
 @dataclass(frozen=True)
@@ -42,27 +41,25 @@ class Package:
     members: tuple[str, ...]
 
 
-PYPI_FILES = "https://files.pythonhosted.org"
 GITHUB = f"https://github.com/microsoft/onnxruntime/releases/download/v{ORT_VERSION}"
 PACKAGES = {
     ("Windows", "cuda"): Package(
-        f"{PYPI_FILES}/packages/19/ef/e15db03ea1fce9bc60349add2604df8c39abac10d28d4eef27b621845139/"
-        f"onnxruntime_gpu-{ORT_VERSION}-cp312-cp312-win_amd64.whl",
-        "882da66f936e1f560b155118c5953dc45268cd92893abb8d31a940f4d1effb36",
+        f"{GITHUB}/onnxruntime-win-x64-gpu_cuda12-{ORT_VERSION}.zip",
+        "fa79097fa478961cbd31c297671ac169eb0d3f1dfdc9e8481e091850f8c4810b",
         (
-            "onnxruntime/capi/onnxruntime.dll",
-            "onnxruntime/capi/onnxruntime_providers_shared.dll",
-            "onnxruntime/capi/onnxruntime_providers_cuda.dll",
+            "/lib/onnxruntime.dll",
+            "/lib/onnxruntime_providers_shared.dll",
+            "/lib/onnxruntime_providers_cuda.dll",
         ),
     ),
     ("Windows", "cpu"): Package(
         f"{GITHUB}/onnxruntime-win-x64-{ORT_VERSION}.zip",
-        "c6ba983baf5681af108599675d2a89c2d145512d02de28aed0bff177cd0ba949",
+        "3958d8a44984160692c1b4ffd0de3cb48f8c39f9d34bb31e433db06e30b82195",
         ("/lib/onnxruntime.dll", "/lib/onnxruntime_providers_shared.dll"),
     ),
     ("Linux", "cuda"): Package(
         f"{GITHUB}/onnxruntime-linux-x64-gpu_cuda12-{ORT_VERSION}.tgz",
-        "f9886932ee7bb0b4d3fcab736a392d4ff5efaa0672b47f19f0cec03437cf64f1",
+        "62d3af5269af2143b5d37494337573f1ffb8885f3ad7477ae0cb1cc79c8dedfd",
         (
             f"/lib/libonnxruntime.so.{ORT_VERSION}",
             "/lib/libonnxruntime_providers_shared.so",
@@ -71,31 +68,31 @@ PACKAGES = {
     ),
     ("Linux", "cpu"): Package(
         f"{GITHUB}/onnxruntime-linux-x64-{ORT_VERSION}.tgz",
-        "a5ed5a3cac51fbb2e90da632ae43d19212faaa20e76484e62bcb7c23ddb3b3fd",
+        "cc5c72baf5ae5c8238a6841f0897227be2d02826b9cf98eaf02fdefaeeb03a57",
         (f"/lib/libonnxruntime.so.{ORT_VERSION}",),
     ),
 }
 
 
-def download(package: Package, cache: Path, pypi_mirror: str | None = None) -> bytes:
+def download(package: Package, cache: Path) -> bytes:
     path = cache / package.url.rsplit("/", 1)[1]
     if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == package.sha256:
         return path.read_bytes()
     cache.mkdir(parents=True, exist_ok=True)
     url = package.url
-    if pypi_mirror and url.startswith(PYPI_FILES):
-        url = pypi_mirror.rstrip("/") + url[len(PYPI_FILES) :]
     data = b""
-    for attempt in range(1, 4):
+    attempts = 6
+    for attempt in range(1, attempts + 1):
         print(f"[ort] downloading {url}")
         try:
             with urllib.request.urlopen(url, timeout=600) as response:
                 data = response.read()
             break
         except OSError as exc:
-            if attempt == 3:
+            if attempt == attempts:
                 raise SystemExit(f"[ort] download failed: {exc}") from exc
-            print(f"[ort] retrying after: {exc}")
+            print(f"[ort] retrying in {5 * attempt} s after: {exc}")
+            time.sleep(5 * attempt)
     digest = hashlib.sha256(data).hexdigest()
     if digest != package.sha256:
         raise SystemExit(f"[ort] SHA-256 mismatch for {url}: {digest} != {package.sha256}")
@@ -148,11 +145,11 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="directory to copy the libraries into (repeatable; default target/release and target/debug)",
     )
-    parser.add_argument("--cache", type=Path, default=None, help="download cache (default target/ort-cache)")
     parser.add_argument(
-        "--pypi-mirror",
+        "--cache",
+        type=Path,
         default=None,
-        help="a PyPI mirror serving /packages/... like files.pythonhosted.org (the digest is still checked)",
+        help="download cache (default target/ort-cache); an archive already there is used if its digest matches",
     )
     args = parser.parse_args(argv)
     system = platform.system()
@@ -162,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     root = repo_root()
     package = PACKAGES[key]
-    files = extract(package, download(package, args.cache or root / "target" / "ort-cache", args.pypi_mirror))
+    files = extract(package, download(package, args.cache or root / "target" / "ort-cache"))
     for dest in args.dest or [root / "target" / "release", root / "target" / "debug"]:
         install(files, dest)
     return 0

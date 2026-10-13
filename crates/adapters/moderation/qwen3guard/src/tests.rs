@@ -75,7 +75,7 @@ fn spec(model_dir: String, metadata: serde_json::Value) -> ModelSpec {
     }
 }
 
-/// `LOCAL_QWEN3GUARD_MODEL_DIR=<fp16 export> ORT_DYLIB_PATH=<onnxruntime 1.30>
+/// `LOCAL_QWEN3GUARD_MODEL_DIR=<fp16 export> ORT_DYLIB_PATH=<onnxruntime 1.31>
 /// cargo test --release -p local-adapter-qwen3guard --features cuda real_model
 /// -- --nocapture` with `LOCAL_TEST_PROVIDER_ORDER=cuda,cpu`. Expected values
 /// are the Python onnxruntime-genai run of the same float16 export (prefill of

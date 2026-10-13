@@ -22,8 +22,8 @@ python -m onnxruntime_genai.models.builder -i <src> -o workdir/models/qwen3-4b-i
 The directory holds `model.onnx(.data)`, `genai_config.json`, `tokenizer.json`
 and `chat_template.jinja`. Keep `rtn_last` (int8 LM head shared with the
 embedding): with `k_quant*` the model tends to end tool calls without
-`</tool_call>`. The decoder graphs need ONNX Runtime 1.30 on CUDA (older
-builds produce wrong tokens).
+`</tool_call>`. The decoder graphs need ONNX Runtime 1.30 or newer on CUDA
+(older builds produce wrong tokens).
 
 ## Calling it
 

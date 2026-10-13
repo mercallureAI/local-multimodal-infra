@@ -15,8 +15,8 @@ ort-runtime = []
 local-error.workspace = true
 half.workspace = true
 # ONNX Runtime is loaded at run time (onnxruntime.dll / libonnxruntime.so beside
-# the binary, or ORT_DYLIB_PATH): the official 1.30 builds run the
-# onnxruntime-genai decoder exports correctly on CUDA, the bundled 1.24 does not.
+# the binary, or ORT_DYLIB_PATH), the official 1.31 build: 1.30 and newer run
+# the onnxruntime-genai decoder exports correctly on CUDA, the bundled 1.24 does not.
 ort = { workspace = true, features = ["std", "tracing", "load-dynamic", "api-24", "half"] }
 serde.workspace = true
 serde_json.workspace = true

@@ -13,10 +13,10 @@ RUN apt-get update \
     && rustc --version \
     && cargo --version
 
-# The official ONNX Runtime 1.30.0 CUDA 12 build, pinned by digest. Before the
+# The official ONNX Runtime 1.31.0 CUDA 12 build (built with CUDA 12.8), pinned by digest. Before the
 # sources, so a code change does not download it again.
-ARG ORT_VERSION=1.30.0
-ARG ORT_SHA256=f9886932ee7bb0b4d3fcab736a392d4ff5efaa0672b47f19f0cec03437cf64f1
+ARG ORT_VERSION=1.31.0
+ARG ORT_SHA256=62d3af5269af2143b5d37494337573f1ffb8885f3ad7477ae0cb1cc79c8dedfd
 RUN set -eux; \
     curl -fsSL -o /tmp/ort.tgz \
         "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-gpu_cuda12-${ORT_VERSION}.tgz"; \

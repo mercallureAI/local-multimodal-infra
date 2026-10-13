@@ -168,9 +168,9 @@ python -m scripts.local.qwen3_tts_onnx_run --package workdir/models/qwen3-tts-0.
 # Rust:
 cargo run --release -p local-adapter-qwen3-tts --features cuda --example synthesize -- \
     workdir/models/qwen3-tts-0.6b-onnx scripts/assets/tts-input-mon3tr.wav --ref-text "<transcript>" --repeat 3 "你好。"
-# Tests run from the crate directory: absolute paths; ORT 1.30 via ORT_DYLIB_PATH (AGENTS.md).
+# Tests run from the crate directory: absolute paths; ORT 1.31 via ORT_DYLIB_PATH (AGENTS.md).
 LOCAL_QWEN3_TTS_MODEL_DIR=<abs>/workdir/models/qwen3-tts-0.6b-onnx LOCAL_QWEN3_TTS_REFERENCE=<abs>/scripts/assets/tts-input-mon3tr.wav \
-    ORT_DYLIB_PATH=<onnxruntime 1.30> cargo test --release -p local-adapter-qwen3-tts --features cuda real_model_smoke_if_env_set -- --nocapture
+    ORT_DYLIB_PATH=<onnxruntime 1.31> cargo test --release -p local-adapter-qwen3-tts --features cuda real_model_smoke_if_env_set -- --nocapture
 python -m scripts.local.realtime_e2e --audio-dir <r00.wav ...> --model-dir workdir/models --ref-text "<transcript>"
 ```
 
