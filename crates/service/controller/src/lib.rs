@@ -2776,6 +2776,16 @@ impl OpenAiApi for ControllerState {
     async fn list_models(&self) -> Result<Vec<ModelSpec>> {
         Ok(self.registry.list().await)
     }
+    async fn downloaded_model_ids(&self) -> Option<std::collections::HashSet<String>> {
+        let models = AdminApi::list_models(self).await.ok()?;
+        Some(
+            models
+                .into_iter()
+                .filter(|info| info.downloaded)
+                .map(|info| info.spec.id)
+                .collect(),
+        )
+    }
     async fn dispatch(&self, task: InferenceTask) -> Result<InferenceOutput> {
         let started = std::time::Instant::now();
         let request_id = task.id;

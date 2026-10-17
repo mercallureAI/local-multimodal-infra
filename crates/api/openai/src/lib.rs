@@ -27,6 +27,12 @@ const MODERATION_MAX_BYTES: usize = 64 * 1024 * 1024;
 #[async_trait]
 pub trait OpenAiApi: Send + Sync + 'static {
     async fn list_models(&self) -> Result<Vec<ModelSpec>>;
+
+    /// Ids of the listed models whose files are present; `None` when the
+    /// service cannot tell (`GET /v1/models` then leaves `downloaded` out).
+    async fn downloaded_model_ids(&self) -> Option<std::collections::HashSet<String>> {
+        None
+    }
     async fn dispatch(&self, task: InferenceTask) -> Result<InferenceOutput>;
 
     /// Runs `task` and returns its events as they happen; the last one is
@@ -286,25 +292,39 @@ struct ModelObject {
     id: String,
     object: &'static str,
     owned_by: &'static str,
+    // Not in the OpenAI schema; clients that only read `id` ignore them.
+    name: String,
+    task_kinds: Vec<TaskKind>,
+    enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    downloaded: Option<bool>,
 }
 
 async fn list_models(State(state): State<OpenAiApiState>) -> impl IntoResponse {
     match state.service.list_models().await {
-        Ok(models) => (
-            StatusCode::OK,
-            Json(json!(ModelListResponse {
-                object: "list",
-                data: models
-                    .into_iter()
-                    .map(|m| ModelObject {
-                        id: m.id,
-                        object: "model",
-                        owned_by: "local"
-                    })
-                    .collect()
-            })),
-        )
-            .into_response(),
+        Ok(mut models) => {
+            let downloaded = state.service.downloaded_model_ids().await;
+            models.sort_by(|a, b| a.id.cmp(&b.id));
+            (
+                StatusCode::OK,
+                Json(json!(ModelListResponse {
+                    object: "list",
+                    data: models
+                        .into_iter()
+                        .map(|m| ModelObject {
+                            downloaded: downloaded.as_ref().map(|ids| ids.contains(&m.id)),
+                            id: m.id,
+                            object: "model",
+                            owned_by: "local",
+                            name: m.name,
+                            task_kinds: m.task_kinds,
+                            enabled: m.enabled,
+                        })
+                        .collect()
+                })),
+            )
+                .into_response()
+        }
         Err(err) => error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }
@@ -586,6 +606,35 @@ mod tests {
             .await
             .expect("body");
         (status, String::from_utf8(body.to_vec()).expect("utf8"))
+    }
+
+    #[tokio::test]
+    async fn models_list_their_task_kinds_and_state() {
+        let app = router(OpenAiApiState {
+            service: std::sync::Arc::new(RecordingOpenAiApi::default()),
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let model = &payload["data"][0];
+        assert_eq!(model["id"], "sensevoice-small-onnx");
+        assert_eq!(model["object"], "model");
+        assert_eq!(model["name"], "FunASR SenseVoiceSmall ONNX");
+        assert_eq!(model["task_kinds"], serde_json::json!(["asr.transcribe"]));
+        assert_eq!(model["enabled"], true);
+        // The test service cannot tell whether files are present.
+        assert!(model.get("downloaded").is_none());
     }
 
     #[tokio::test]
