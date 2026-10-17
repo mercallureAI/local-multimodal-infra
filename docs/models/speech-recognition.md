@@ -84,7 +84,7 @@ FLEURS dev, with each model's full pipeline on an RTX 4090 (SenseVoice is
 | English WER, 321 without numbers | **5.52%** | 7.80% |
 | 1.5 s / 3 s / 6 s of speech | ~30-45 / ~55 / ~85 ms | ~16 / ~22 / ~35 ms |
 | ~10 s utterances (mean) | ~105 ms | ~48 ms |
-| GPU memory, process | ~3.1 GB | ~1.4 GB |
+| GPU memory, process (CUDA context included) | ~2.5 GB | ~1.7 GB |
 
 Fun-ASR-Nano often writes numbers in Chinese numerals (二十一比二十,
 一七六七年) where FLEURS has digits, hence the "all" Mandarin row. On 20

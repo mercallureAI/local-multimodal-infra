@@ -6,8 +6,8 @@
 //! `AddInitializer`, which ORT uses in place.
 //!
 //! `AddInitializer` only accepts values whose buffer the caller owns, so a
-//! device copy made by ORT (`Tensor::to`) is kept as the owner and sessions get
-//! a non-owning view of the same device memory.
+//! device copy made by ORT is kept as the owner and sessions get a non-owning
+//! view of the same device memory.
 
 use super::*;
 use ort::{memory::AllocationDevice, value::DynValue, AsPointer};
@@ -35,6 +35,9 @@ pub struct SharedInitializers {
     values: Arc<Vec<(String, Arc<DynValue>)>>,
     /// Device buffers the views in `values` point into.
     _owners: Arc<Vec<DynValue>>,
+    /// The session whose allocator `_owners` came from (packed uploads):
+    /// dropped after them, which frees their memory.
+    _carrier: Option<Arc<Session>>,
     cuda_device: Option<u32>,
     bytes: u64,
     /// Last: held while the fields above are released (see `Drop`).
@@ -150,19 +153,32 @@ impl OrtBackend {
             drop_gate: Default::default(),
             values: Arc::new(values),
             _owners: Arc::new(owners),
+            _carrier: None,
             cuda_device,
             bytes,
         })
     }
 }
 
-/// The span of `data_file` that `ranges` cover, uploaded in one copy, each
-/// range a view into it.
+/// Bytes per host-to-device copy of a packed upload. ORT copies through a
+/// process-wide identity session whose arena keeps its largest staging
+/// buffer for good: a whole span copied at once (SenseVoice's 266 MB,
+/// Fun-ASR-Nano's 399 MB) stayed allocated twice.
+#[cfg(feature = "cuda")]
+const UPLOAD_CHUNK: usize = 16 << 20;
+
+/// The span of `data_file` that `ranges` cover, in one device buffer, each
+/// range a view into it. The buffer comes from the allocator of a session of
+/// its own (exact-size arena) and is filled in [`UPLOAD_CHUNK`] pieces;
+/// dropping the initializers frees it.
+#[cfg(feature = "cuda")]
 fn upload_packed(
     data_file: &Path,
     ranges: &[InitializerRange],
     device: u32,
 ) -> Result<SharedInitializers> {
+    use ort::memory::{Allocator, AllocatorType, MemoryInfo, MemoryType};
+
     let start = ranges.iter().map(|range| range.offset).min().unwrap_or(0);
     let end = ranges
         .iter()
@@ -189,14 +205,63 @@ fn upload_packed(
     file.seek(SeekFrom::Start(start))
         .and_then(|_| file.read_exact(&mut span))
         .map_err(|e| InfraError::io(Some(data_file.to_path_buf()), e))?;
-    let host = Tensor::from_array((vec![span.len() as i64], span.into_boxed_slice()))
-        .map(|tensor| tensor.into_dyn())
-        .map_err(map_ort_err)?;
-    let owner = to_cuda(host, device as i32, &data_file.display().to_string())?;
+    let what = data_file.display().to_string();
+    let upload_error = |err: ort::Error| {
+        InfraError::Backend(format!("upload `{what}` to CUDA device {device}: {err}"))
+    };
+    let _gate = crate::gpu_shared();
+    let carrier = Arc::new(
+        Session::builder(ort_environment()?)
+            .map_err(map_ort_err)?
+            .with_execution_providers([ort::ep::CUDA::default()
+                .with_device_id(device as i32)
+                .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
+                .build()
+                .error_on_failure()])
+            .map_err(map_ort_err)?
+            .with_optimization_level(GraphOptimizationLevel::Disable)
+            .map_err(map_ort_err)?
+            .commit_from_memory(crate::IDENTITY_F32_ONNX)
+            .map_err(upload_error)?,
+    );
+    let memory = MemoryInfo::new(
+        AllocationDevice::CUDA,
+        device as i32,
+        AllocatorType::Device,
+        MemoryType::Default,
+    )
+    .map_err(map_ort_err)?;
+    let allocator = Allocator::new(&carrier, memory).map_err(upload_error)?;
+    let owner = Tensor::<u8>::new(&allocator, [span.len()])
+        .map_err(upload_error)?
+        .into_dyn();
     let tensor = owner
         .downcast_ref::<ort::value::DynTensorValueType>()
         .map_err(map_ort_err)?;
     let base = tensor.data_ptr() as *mut u8;
+    for (index, chunk) in span.chunks(UPLOAD_CHUNK).enumerate() {
+        let host =
+            Tensor::from_array((vec![chunk.len() as i64], chunk.to_vec().into_boxed_slice()))
+                .map_err(map_ort_err)?;
+        // SAFETY: the piece lies inside `owner`'s buffer of `span.len()`
+        // bytes; the view carries the buffer's own allocator, so the copy
+        // targets its device, and it is dropped before `owner`.
+        let view = unsafe {
+            wrap_memory(
+                tensor.memory_info(),
+                &allocator,
+                base.add(index * UPLOAD_CHUNK) as *mut _,
+                chunk.len(),
+                &[chunk.len() as i64],
+                ort::value::TensorElementType::Uint8,
+                &what,
+            )
+        }?;
+        let mut view = view
+            .downcast::<ort::value::TensorValueType<u8>>()
+            .map_err(map_ort_err)?;
+        host.copy_into(&mut view).map_err(upload_error)?;
+    }
     let mut values = Vec::with_capacity(ranges.len());
     for range in ranges {
         let shape = range
@@ -224,11 +289,24 @@ fn upload_packed(
         drop_gate: Default::default(),
         values: Arc::new(values),
         _owners: Arc::new(vec![owner]),
+        _carrier: Some(carrier),
         cuda_device: Some(device),
         bytes: ranges.iter().map(|range| range.length).sum(),
     })
 }
 
+#[cfg(not(feature = "cuda"))]
+fn upload_packed(
+    _data_file: &Path,
+    _ranges: &[InitializerRange],
+    device: u32,
+) -> Result<SharedInitializers> {
+    Err(InfraError::Unsupported(format!(
+        "packed upload to CUDA device {device} without the cuda feature"
+    )))
+}
+
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 fn ort_element(element: TensorElement, name: &str) -> Result<ort::value::TensorElementType> {
     use ort::value::TensorElementType as Ort;
     Ok(match element {

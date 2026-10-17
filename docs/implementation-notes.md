@@ -113,7 +113,9 @@ independent of actual ORT EP selection.
 
 The CTC greedy text guards the LLM: no CTC text, no segment text; an LLM output that hits the token limit (16 + 12 per second) is replaced by the CTC text. Accuracy, latency and memory against SenseVoice are in [docs/models/speech-recognition.md](models/speech-recognition.md).
 
-Memory (RTX 4090, ORT arena logs): the shared audio weights (399 MB) are allocated twice, because `Tensor::to` copies through ort's identity session, whose arena keeps the staging copy (SenseVoice's 266 MB likewise); the four buckets take ~330 MB of arena; the LLM 587 MB of weights plus the 112 MB KV cache; each CUDA session adds its own cuBLAS/cuDNN handles.
+Memory (RTX 4090, ORT arena logs): the shared audio weights take 399 MB (plus a 16 MB upload staging buffer, see `backend-ort`'s packed upload), the four buckets ~330 MB of arena, the LLM 587 MB of weights plus the 112 MB KV cache, and each CUDA session its own cuBLAS/cuDNN handles: ~2.5 GB for the process against ~1.7 GB for `sensevoice-small-int8-gpu-onnx`.
+
+Shared initializers (`OrtBackend::upload_initializers`, packed path) go into one device buffer from the allocator of a session of their own (exact-size arena), filled in 16 MB pieces. ort's `Tensor::to` copies through a process-wide identity session whose arena keeps both the copy and its staging buffer for good: SenseVoice's weights took 2 x 266 MB that way and stayed allocated after the model was unloaded.
 
 ## Document OCR (Unlimited-OCR)
 
@@ -129,7 +131,7 @@ KV cache and R-SWA: every layer reads `past_key_values.{l}.*` and writes `presen
 
 Decoding follows upstream `infer`: base-mode preprocessing (`ImageOps.pad` to 1024 with the mean colour, EXIF orientation), the prompt `[BOS] + 273 image tokens + "document parsing."`, greedy decoding with the sliding-window no-repeat-ngram processor (35-grams over the last 128 tokens, no whitelist), stopping at EOS.
 
-Memory: the OCR backend grows CUDA arenas by the requested size, skips cuDNN's maximal workspace, and shrinks the vision and prefill arenas after each run; shared weights are uploaded largest first so the copy staging buffer is reused. On an RTX 4090 the process holds about 6.6 GB with a 7.9 GB transient peak during the vision encoder.
+Memory: the OCR backend grows CUDA arenas by the requested size, skips cuDNN's maximal workspace, and shrinks the vision and prefill arenas after each run; the shared weights (3.45 GB, one packed buffer) are uploaded in 16 MB pieces. On an RTX 4090 the device's memory in use peaks ~4.9 GB above idle during the vision encoder (it was ~8.3 GB while uploads kept a staging copy of the whole buffer).
 
 Accuracy and speed (RTX 4090, ORT 1.30): against the upstream PyTorch model the package matches token for token except where two coordinate tokens are within the logit noise of the precisions involved. On the 14 pages of the Unlimited-OCR paper (300 dpi), recognized text is identical to the official HF transformers pipeline (bf16) on 12 pages and differs by one token on the other two; the run takes 95.7 s (6.8 s per page, 144.5 tokens/s decode) against 490.5 s (35 s per page) for the official pipeline on the same GPU. Batched multi-request decoding and the multi-page prompt are not implemented.
 

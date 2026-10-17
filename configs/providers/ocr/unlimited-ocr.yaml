@@ -22,7 +22,7 @@ runtime:
   idle_ttl_sec: 600
 resources:
   min_ram_mb: 4096
-  min_vram_mb: 8192
+  min_vram_mb: 6144
 load_policy:
   lazy: true
   evictable: true

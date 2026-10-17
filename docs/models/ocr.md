@@ -3,7 +3,7 @@
 | Model | For | Get it | Runs on |
 | --- | --- | --- | --- |
 | `ppocrv5-mobile-onnx` | text lines in photos, screens, game frames | download (~21 MB) | CPU or CUDA |
-| `unlimited-ocr-onnx` | whole document pages, with layout and tables | local export | CUDA only (8 GB+ VRAM) |
+| `unlimited-ocr-onnx` | whole document pages, with layout and tables | local export | CUDA only (6 GB+ VRAM) |
 
 ## `ppocrv5-mobile-onnx`
 
@@ -60,7 +60,7 @@ Calling: the task `ocr.recognize` with an `image` file (MCP and JSON-RPC), or
 JSON-RPC `ocr_recognize` (`image` file ref or `image_path`). `max_new_tokens` (8192)
 bounds the decode per page.
 
-On an RTX 4090: ~145 tokens/s, ~6.6 GB of GPU memory; the 14-page paper takes
+On an RTX 4090: ~145 tokens/s, a ~4.9 GB GPU memory peak; the 14-page paper takes
 6.8 s per page against 35 s for the official transformers pipeline on the same
 GPU, with identical text on 12 of 14 pages. Details:
 [implementation notes](../implementation-notes.md#document-ocr-unlimited-ocr).
