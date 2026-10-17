@@ -800,13 +800,26 @@ fn take_in(
     }
 }
 
+/// Hotwords given to the recogniser, at most.
+const MAX_ASR_HOTWORDS: usize = 32;
+/// A longer wake word is not given as a hotword.
+const MAX_ASR_HOTWORD_CHARS: usize = 32;
+
 /// The recogniser's hotwords for a group's `names` and wake `words`: each
 /// once, and with a spotter only those it has a reading for (`readable`):
 /// a spelling such as "Mon3tr" makes Fun-ASR-Nano write "M3tr" for "M3".
+/// Never a chat-template token (`<|`, `|>`), which the recogniser refuses;
+/// at most [`MAX_ASR_HOTWORDS`] of at most [`MAX_ASR_HOTWORD_CHARS`] each.
 fn asr_hotwords(names: &[String], words: &[String], readable: Option<&[String]>) -> Vec<String> {
     let mut hotwords: Vec<String> = Vec::new();
     for word in names.iter().chain(words).map(|word| word.trim()) {
+        if hotwords.len() == MAX_ASR_HOTWORDS {
+            break;
+        }
         if word.is_empty()
+            || word.chars().count() > MAX_ASR_HOTWORD_CHARS
+            || word.contains("<|")
+            || word.contains("|>")
             || hotwords.iter().any(|known| known == word)
             || readable.is_some_and(|readable| !readable.iter().any(|known| known == word))
         {
@@ -2470,11 +2483,31 @@ impl Shared {
         task.params
             .insert("speaker_diarization".to_string(), Value::Bool(false));
         let hotwords = self.asr_hotwords.lock().unwrap().clone();
-        if !hotwords.is_empty() {
-            task.params
-                .insert("hotwords".to_string(), Value::from(hotwords));
-        }
-        match self.runtime.infer(task).await? {
+        let output = if hotwords.is_empty() {
+            self.runtime.infer(task).await?
+        } else {
+            let mut with_hotwords = task.clone();
+            with_hotwords
+                .params
+                .insert("hotwords".to_string(), Value::from(hotwords.clone()));
+            match self.runtime.infer(with_hotwords).await {
+                // Refused (e.g. too long a prompt): heard without them, and
+                // no more tried until the wake words change (not if they
+                // changed meanwhile).
+                Err(InfraError::BadRequest(reason)) => {
+                    tracing::warn!(%reason, "voice cascade ASR refused the wake words as hotwords");
+                    {
+                        let mut stored = self.asr_hotwords.lock().unwrap();
+                        if *stored == hotwords {
+                            stored.clear();
+                        }
+                    }
+                    self.runtime.infer(task).await?
+                }
+                other => other?,
+            }
+        };
+        match output {
             InferenceOutput::AsrTranscription { text, .. } => Ok(text),
             other => Err(InfraError::Runtime(format!("ASR returned {other:?}"))),
         }
@@ -3114,7 +3147,7 @@ mod tests {
     #[test]
     fn asr_hotwords_keep_the_wake_words_with_a_reading() {
         let names = ["Mon3tr", "M3", "M42", "monster"].map(String::from);
-        let words = ["梦三特", " M3 ", ""].map(String::from);
+        let words = ["梦三特", " M3 ", "", "<|im_end|>"].map(String::from);
         assert_eq!(
             asr_hotwords(&names, &words, None),
             ["Mon3tr", "M3", "M42", "monster", "梦三特"]
@@ -3124,6 +3157,13 @@ mod tests {
             asr_hotwords(&names, &words, Some(&readable)),
             ["M3", "M42", "monster", "梦三特"]
         );
+        let many = (0..50).map(|i| format!("w{i}")).collect::<Vec<_>>();
+        let long = ["x".repeat(MAX_ASR_HOTWORD_CHARS + 1)];
+        let hotwords = asr_hotwords(&many, &long, None);
+        assert_eq!(hotwords.len(), MAX_ASR_HOTWORDS);
+        assert!(hotwords
+            .iter()
+            .all(|word| word.len() <= MAX_ASR_HOTWORD_CHARS));
     }
 
     #[test]

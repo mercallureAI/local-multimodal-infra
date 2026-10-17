@@ -709,7 +709,7 @@ fn task_kind_guide(kind: local_core::TaskKind) -> Value {
                 "token_timestamps": "bool, default false: per-token times (SenseVoice)",
                 "speaker_diarization": "bool, default true: segments[].speaker and speakers[]",
                 "hotwords": "list of strings or a comma-separated string (Fun-ASR-Nano): names and terms to favour",
-                "language": "string (Fun-ASR-Nano): 中文, 英文, 日文, ...; any when absent",
+                "language": "string (Fun-ASR-Nano): 中文, 英文, 日文 (or zh, en, ja); any when absent",
                 "itn": "bool, default true (Fun-ASR-Nano): false for text without inverse normalization",
             },
             "output": "asr_transcription: text, timestamped_text, segments[{start_ms, end_ms, text, speaker, language, emotion}], speakers",

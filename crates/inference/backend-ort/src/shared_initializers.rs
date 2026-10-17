@@ -232,6 +232,8 @@ fn upload_packed(
     )
     .map_err(map_ort_err)?;
     let allocator = Allocator::new(&carrier, memory).map_err(upload_error)?;
+    // The tensor keeps the allocator's handle (released after the buffer);
+    // `carrier`, kept in the result, outlives both.
     let owner = Tensor::<u8>::new(&allocator, [span.len()])
         .map_err(upload_error)?
         .into_dyn();

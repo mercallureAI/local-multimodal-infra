@@ -147,6 +147,8 @@ def load_model(source: Path):
     if model.ctc_decoder is None:
         raise SystemExit("the checkpoint has no trained CTC decoder (use the ModelScope snapshot)")
     torch.set_grad_enabled(False)
+    # Intermediate files in --work-dir are reused only for this checkpoint.
+    model.export_digest = digest
     return wrapper, model
 
 
@@ -212,7 +214,8 @@ def export_audio(model, work: Path):
     import torch
 
     fp32 = work / "audio_fp32.onnx"
-    if not fp32.is_file():
+    stamp = work / "audio_fp32.stamp"
+    if not (fp32.is_file() and stamp.is_file() and stamp.read_text(encoding="utf-8") == model.export_digest):
         speech = torch.randn(2, 30, 560)
         lengths = torch.tensor([6, 30], dtype=torch.int32)
         torch.onnx.export(
@@ -227,6 +230,7 @@ def export_audio(model, work: Path):
                 "encoder_out_lens": {0: "batch_size"},
             },
             opset_version=OPSET, dynamo=False)
+        stamp.write_text(model.export_digest, encoding="utf-8")
         print(f"[audio] traced {fp32}")
     quantized = quantize(onnx.load(str(fp32)), AUDIO_BLOCK, exclude_prefixes=("/ctc_lo/",))
     model_proto = sort_topologically(quantized)
@@ -269,7 +273,10 @@ def build_llm_body(model, source: Path, work: Path, builder_python: Path):
     from safetensors.torch import save_file
 
     body_dir = work / "llm_body"
-    if (body_dir / "model.onnx").is_file() and (body_dir / "model.onnx.data").is_file():
+    stamp = f"{model.export_digest} {RESIDUAL_SCALE}"
+    stamp_file = body_dir / "stamp.txt"
+    if (body_dir / "model.onnx").is_file() and stamp_file.is_file() \
+            and stamp_file.read_text(encoding="utf-8") == stamp:
         print(f"[llm] reusing builder output in {body_dir}")
         return onnx.load(str(body_dir / "model.onnx"), load_external_data=True)
     hf_dir = work / "llm_hf"
@@ -297,6 +304,7 @@ def build_llm_body(model, source: Path, work: Path, builder_python: Path):
         ],
         check=True,
     )
+    stamp_file.write_text(stamp, encoding="utf-8")
     return onnx.load(str(body_dir / "model.onnx"), load_external_data=True)
 
 
@@ -398,7 +406,7 @@ def write_package(wrapper, model, source: Path, out: Path) -> None:
     manifest = {
         "schema": MANIFEST_SCHEMA,
         "source": {"modelscope": MODELSCOPE_REPO, "revision": MODELSCOPE_REVISION,
-                   "model_pt_sha256": MODEL_SHA256},
+                   "model_pt_sha256": model.export_digest},
         "audio_encoder": AUDIO_FILE,
         "llm": LLM_FILE,
         "embed_tokens": EMBED_FILE,
@@ -442,8 +450,8 @@ def cmd_export(args: argparse.Namespace) -> None:
         actual = run_audio(ort.InferenceSession(str(staging / AUDIO_FILE),
                                                 providers=["CPUExecutionProvider"]), feats)
         reference = torch_audio(model, feats)
-        report_audio("fp32 graph vs torch", expected, reference)
-        report_audio("int8 graph vs torch", actual, reference)
+        report_audio("fp32 graph vs torch", expected, reference, int(model.blank_id))
+        report_audio("int8 graph vs torch", actual, reference, int(model.blank_id))
         for name in (AUDIO_FILE, AUDIO_FILE + ".data", Path(AUDIO_FILE).stem + ".shared.json"):
             shutil.move(str(staging / name), str(asr / name))
     if "llm" in args.parts:
@@ -497,7 +505,7 @@ def ctc_collapse(ids, blank: int) -> list[int]:
     return out
 
 
-def report_audio(label: str, actual: dict, expected: dict, blank: int = 60514) -> None:
+def report_audio(label: str, actual: dict, expected: dict, blank: int) -> None:
     frames = int(expected["lengths"][0])
     used = fake_token_len(frames)
     a = actual["embeds"][0, :used].astype(np.float64)
@@ -561,7 +569,7 @@ def cmd_parity(args: argparse.Namespace) -> None:
     for path in args.audio:
         feats = features(wrapper, path)
         tokens, audio = onnx_transcribe(audio_session, llm_session, manifest, asr, feats)
-        report_audio(path.name, audio, torch_audio(model, feats))
+        report_audio(path.name, audio, torch_audio(model, feats), int(model.blank_id))
         reference = model.inference([str(path)], key=[path.stem], tokenizer=tokenizer,
                                     frontend=wrapper.kwargs["frontend"], device="cpu")[0][0]
         text = tokenizer.decode(tokens)

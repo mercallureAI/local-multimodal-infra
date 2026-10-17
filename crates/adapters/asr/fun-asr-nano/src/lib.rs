@@ -248,6 +248,12 @@ impl FunAsrNanoAdapter {
             pipeline,
             recognizer,
         };
+        adapter
+            .check_prompt_room(adapter.recognizer.prompt.prefix_ids.len())
+            .map_err(|error| InfraError::ModelNotConfigured {
+                model_id: spec.id.clone(),
+                reason: error.to_string(),
+            })?;
         adapter.warm_up()?;
         tracing::info!(
             model_id = adapter.model_id,
@@ -274,18 +280,46 @@ impl FunAsrNanoAdapter {
         audio: &FileRef,
         params: &BTreeMap<String, Value>,
     ) -> Result<InferenceOutput> {
-        self.recognizer.prefix = self
+        let prefix = self
             .recognizer
             .prompt_prefix(&PromptOptions::from_params(params)?)?;
+        self.check_prompt_room(prefix.len())?;
+        self.recognizer.prefix = prefix;
         self.recognizer.stats = RecognizerStats::default();
-        self.pipeline
-            .transcribe(audio, params, &mut self.recognizer)
+        let output = self
+            .pipeline
+            .transcribe(audio, params, &mut self.recognizer);
+        self.recognizer.prefix = self.recognizer.prompt.prefix_ids.clone();
+        output
     }
 
-    /// One speech segment (16 kHz mono samples, no VAD): its text.
+    /// One speech segment (16 kHz mono samples, no VAD) with the default
+    /// prompt: its text (empty when the CTC guard hears no speech).
     pub fn recognize_samples(&mut self, samples: &[f32]) -> Result<RecognizedText> {
         let features = self.pipeline.extract_features(samples)?;
-        self.recognizer.recognize(features)
+        self.recognizer.prefix = self.recognizer.prompt.prefix_ids.clone();
+        Ok(self.recognizer.recognize(features)?.unwrap_or_default())
+    }
+
+    /// Fails unless a prompt of `prefix` tokens before the audio leaves room
+    /// in the LLM context for the longest segment the VAD cuts and its
+    /// output (hotwords make the prefix long).
+    fn check_prompt_room(&self, prefix: usize) -> Result<()> {
+        let max_ms = self.pipeline.max_segment_ms() as u64;
+        let frames = (max_ms / self.pipeline.output_frame_ms() + 1) as usize;
+        let needed = prefix
+            + fake_token_len(frames)
+            + self.recognizer.prompt.suffix_ids.len()
+            + max_new_tokens(max_ms as f64 / 1000.0)
+            + 1;
+        let capacity = self.recognizer.llm.capacity();
+        if needed > capacity {
+            return Err(InfraError::BadRequest(format!(
+                "the Fun-ASR-Nano prompt takes {prefix} tokens before the audio: with a {:.0} s speech segment and its output that is {needed} positions, over the LLM context of {capacity} (fewer or shorter hotwords, or a larger max_context)",
+                max_ms as f64 / 1000.0
+            )));
+        }
+        Ok(())
     }
 
     pub fn model_id(&self) -> &str {
@@ -340,6 +374,29 @@ impl FunAsrNanoAdapter {
     }
 }
 
+/// Upstream's name for a `language` parameter (Fun-ASR-Nano-2512 knows
+/// 中文, 英文, 日文; the codes and English names map to them); `None` for
+/// any language.
+fn prompt_language(language: &str) -> Result<Option<String>> {
+    let name = match language.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" => return Ok(None),
+        "中文" | "zh" | "zh-cn" | "cmn" | "chinese" | "mandarin" => "中文",
+        "英文" | "en" | "english" => "英文",
+        "日文" | "ja" | "jp" | "japanese" => "日文",
+        _ => {
+            return Err(InfraError::BadRequest(format!(
+            "ASR parameter `language` must be 中文, 英文 or 日文 (or zh, en, ja), got {language:?}"
+        )))
+        }
+    };
+    Ok(Some(name.to_string()))
+}
+
+/// Text that would put a chat-template token into the prompt.
+fn has_special_token(text: &str) -> bool {
+    text.contains("<|") || text.contains("|>")
+}
+
 /// Per-request prompt options.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PromptOptions {
@@ -377,6 +434,11 @@ impl PromptOptions {
                 )))
             }
         };
+        if let Some(word) = hotwords.iter().find(|word| has_special_token(word)) {
+            return Err(InfraError::BadRequest(format!(
+                "ASR hotword {word:?} holds a special token (`<|` or `|>`)"
+            )));
+        }
         if hotwords.len() > MAX_HOTWORDS {
             return Err(InfraError::BadRequest(format!(
                 "at most {MAX_HOTWORDS} hotwords, got {}",
@@ -385,11 +447,7 @@ impl PromptOptions {
         }
         let language = match params.get("language") {
             None | Some(Value::Null) => None,
-            Some(Value::String(language)) => {
-                let language = language.trim();
-                (!language.is_empty() && !language.eq_ignore_ascii_case("auto"))
-                    .then(|| language.to_string())
-            }
+            Some(Value::String(language)) => prompt_language(language)?,
             Some(other) => {
                 return Err(InfraError::BadRequest(format!(
                     "ASR parameter `language` must be a string, got {other}"
@@ -485,7 +543,7 @@ impl NanoRecognizer {
 }
 
 impl SegmentRecognizer for NanoRecognizer {
-    fn recognize(&mut self, features: SenseVoiceFeatures) -> Result<RecognizedText> {
+    fn recognize(&mut self, features: SenseVoiceFeatures) -> Result<Option<RecognizedText>> {
         let started = Instant::now();
         let audio = self.encoder.run(&features)?;
         let audio_ms = ms(started);
@@ -494,30 +552,29 @@ impl SegmentRecognizer for NanoRecognizer {
         let ctc_text = self.ctc.decode(&audio.ctc_ids);
         if self.ctc_guard && ctc_text.is_empty() {
             self.stats.silent_segments += 1;
-            return Ok(RecognizedText::default());
+            return Ok(None);
         }
         let embeds = self.prompt(&audio)?;
         let positions = embeds.len() / self.hidden;
         let seconds = (audio.frames as u64 * self.output_frame_ms) as f64 / 1000.0;
-        let limit = (MAX_NEW_TOKENS_BASE + (seconds * MAX_NEW_TOKENS_PER_SECOND).ceil() as usize)
-            .min(self.llm.room_after(positions));
+        let limit = max_new_tokens(seconds).min(self.llm.room_after(positions));
         let at = Instant::now();
         let mut token = self.llm.prefill(embeds)?;
         let prefill_ms = ms(at);
         let at = Instant::now();
         let mut generated = Vec::new();
-        let mut stopped = false;
-        while generated.len() < limit {
+        // Up to `limit` tokens and then their EOS (`room_after` keeps a
+        // position for that last step).
+        let stopped = loop {
             if self.eos.contains(&token) {
-                stopped = true;
-                break;
+                break true;
+            }
+            if generated.len() == limit {
+                break false;
             }
             generated.push(token);
-            if generated.len() == limit {
-                break;
-            }
             token = self.llm.step(self.embeddings.row(token)?)?;
-        }
+        };
         let decode_ms = ms(at);
         self.stats.prefill_ms += prefill_ms;
         self.stats.decode_ms += decode_ms;
@@ -550,10 +607,10 @@ impl SegmentRecognizer for NanoRecognizer {
             decode_ms,
             "Fun-ASR-Nano segment"
         );
-        Ok(RecognizedText {
+        Ok(Some(RecognizedText {
             text,
             ..RecognizedText::default()
-        })
+        }))
     }
 }
 
@@ -565,6 +622,11 @@ pub fn fake_token_len(frames: usize) -> usize {
     // 1 + (length - 3 + 2) // 2
     let halve = |length: usize| if length == 0 { 0 } else { 1 + (length - 1) / 2 };
     halve(halve(halve(frames)))
+}
+
+/// Generated tokens allowed for `seconds` of speech.
+fn max_new_tokens(seconds: f64) -> usize {
+    MAX_NEW_TOKENS_BASE + (seconds * MAX_NEW_TOKENS_PER_SECOND).ceil() as usize
 }
 
 /// Upstream post-processing: `/sil` marks as spaces, runs of white space

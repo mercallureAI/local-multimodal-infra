@@ -188,6 +188,11 @@ impl FsmnVad {
         self.session.provider_report()
     }
 
+    /// The longest speech segment it cuts.
+    pub fn max_segment_ms(&self) -> usize {
+        self.config.model_conf.max_single_segment_time
+    }
+
     /// The per-frame speech probabilities of [`Self::segment`]'s stream and
     /// of one model run over the whole recording's features.
     #[cfg(test)]

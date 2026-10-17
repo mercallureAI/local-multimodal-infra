@@ -120,15 +120,18 @@ layer 2 writes ~1.25e5 into it, past FP16's range), `asr/embed_tokens.f16`
 which only CUDA implements, so the LLM graph does not run on the CPU).
 
 The CTC branch guards the LLM (`ctc_guard`, default true): a segment in
-which it hears no speech gets no text (an LLM makes up text for noise), and
-an LLM output that runs into the token limit (16 + 12 per second of
-speech: a repetition loop) is replaced by the CTC text. No token
-timestamps or language/emotion tags.
+which it hears no speech is left out (no text, no timeline entry, no
+speaker time; an LLM makes up text for noise), and an LLM output that runs
+into the token limit (16 + 12 per second of speech: a repetition loop) is
+replaced by the CTC text. No token timestamps or language/emotion tags.
 
 Per-request parameters besides those below: `hotwords` (a list, or a
 comma-separated string: names and terms to favour, upstream's context
-prompt), `language` (中文, 英文, 日文; any when absent) and `itn: false`
-(no inverse text normalization).
+prompt; no `<|`/`|>`), `language` (中文, 英文, 日文, or zh, en, ja; any when
+absent) and `itn: false` (no inverse text normalization). A request whose
+hotwords leave too little of the LLM context (`max_context`) for the
+longest speech segment and its output is refused before any audio is
+decoded.
 
 ## Options
 
@@ -158,4 +161,4 @@ Long-audio timing and memory:
 `cargo run --release -p local-adapter-sensevoice-asr --features cuda --example long_audio -- <model dir> <audio>`.
 Fun-ASR-Nano next to SenseVoice, file by file (text and time; `@list` reads
 paths from a file):
-`FUN_ASR_NANO_COMPARE_SENSEVOICE=<sensevoice-small-int8-gpu-onnx dir> cargo run --release -p local-adapter-fun-asr-nano --features cuda --example transcribe -- <fun-asr-nano-onnx dir> <audio or @list>...`.
+`FUN_ASR_NANO_COMPARE_SENSEVOICE=<sensevoice-small-int8-gpu-onnx dir> cargo run --release -p local-adapter-fun-asr-nano --features cuda --example fun_asr_nano_transcribe -- <fun-asr-nano-onnx dir> <audio or @list>...`.

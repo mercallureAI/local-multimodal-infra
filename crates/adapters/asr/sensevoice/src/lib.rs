@@ -184,9 +184,11 @@ pub struct SenseVoiceAsrAdapter {
     _weights: Option<SharedInitializers>,
 }
 
-/// One speech segment's recognizer: its FBANK/LFR features in, text out.
+/// One speech segment's recognizer: its FBANK/LFR features in, text out;
+/// `None` when it judges the segment not to be speech (it is then left out,
+/// as a segment too short for one feature frame is).
 pub trait SegmentRecognizer {
-    fn recognize(&mut self, features: SenseVoiceFeatures) -> Result<RecognizedText>;
+    fn recognize(&mut self, features: SenseVoiceFeatures) -> Result<Option<RecognizedText>>;
 }
 
 /// The FunASR pipeline around a recognizer: streamed audio decoding and
@@ -270,6 +272,11 @@ impl SpeechPipeline {
         self.vad.provider_report()
     }
 
+    /// The longest speech segment a recognizer gets (the VAD cuts there).
+    pub fn max_segment_ms(&self) -> usize {
+        self.vad.max_segment_ms()
+    }
+
     pub fn speaker_provider_report(&self) -> SessionProviderReport {
         self.speaker.provider_report()
     }
@@ -325,6 +332,12 @@ impl SpeechPipeline {
             let prepare = preparer.join().expect("feature thread panicked");
             read.and(prepare).and(decoded)
         })?;
+        // Segments left out (no text) take no part in the speakers.
+        let kept = decoded
+            .iter()
+            .map(|segment| segment.text.is_some())
+            .collect::<Vec<_>>();
+        let (chunks, embeddings) = kept_speaker_chunks(&decoded, chunks, embeddings);
 
         let mut speaker_labels = if options.speaker_diarization {
             speaker::label_segments(
@@ -338,7 +351,7 @@ impl SpeechPipeline {
         } else {
             vec![0; decoded.len()]
         };
-        relabel_speakers_by_first_segment(&mut speaker_labels);
+        number_kept_speakers(&mut speaker_labels, &kept);
         let speaker_embedding = options
             .speaker_embedding
             .then(|| speaker::mean_embedding(&embeddings))
@@ -511,7 +524,10 @@ impl SenseVoiceAsrAdapter {
 
     #[cfg(test)]
     fn infer_features(&mut self, features: SenseVoiceFeatures) -> Result<RecognizedText> {
-        self.asr.recognize(features)
+        Ok(self
+            .asr
+            .recognize(features)?
+            .expect("SenseVoice always gives text"))
     }
 }
 
@@ -605,7 +621,7 @@ fn decode_segments(
         let text = if features.frames == 0 {
             None
         } else {
-            Some(asr.recognize(features)?)
+            asr.recognize(features)?
         };
         decoded.push(DecodedSegment { segment, text });
         pending_chunks.extend(segment_chunks);
@@ -647,13 +663,13 @@ impl SenseVoiceRecognizer {
 }
 
 impl SegmentRecognizer for SenseVoiceRecognizer {
-    fn recognize(&mut self, features: SenseVoiceFeatures) -> Result<RecognizedText> {
+    fn recognize(&mut self, features: SenseVoiceFeatures) -> Result<Option<RecognizedText>> {
         if let Some(graphs) = self.graphs.as_mut() {
             if let Some(ids) = graphs.run(&features)? {
-                return decode_ids(&ids, &self.tokens, self.output_frame_ms);
+                return decode_ids(&ids, &self.tokens, self.output_frame_ms).map(Some);
             }
         }
-        self.infer_session(features)
+        self.infer_session(features).map(Some)
     }
 }
 
@@ -1041,6 +1057,44 @@ fn summarize_speakers(segments: &[AsrSegment]) -> Vec<AsrSpeaker> {
         .into_iter()
         .map(|(id, speech_ms)| AsrSpeaker { id, speech_ms })
         .collect()
+}
+
+/// The speaker chunks (and their embeddings) of the segments that are kept.
+fn kept_speaker_chunks(
+    decoded: &[DecodedSegment],
+    chunks: Vec<speaker::SpeakerChunk>,
+    embeddings: Vec<Vec<f32>>,
+) -> (Vec<speaker::SpeakerChunk>, Vec<Vec<f32>>) {
+    let ranges = decoded
+        .iter()
+        .filter(|segment| segment.text.is_some())
+        .map(|segment| (segment.segment.start_sample, segment.segment.end_sample))
+        .collect::<Vec<_>>();
+    chunks
+        .into_iter()
+        .zip(embeddings)
+        .filter(|(chunk, _)| {
+            ranges
+                .iter()
+                .any(|&(start, end)| start <= chunk.start_sample && chunk.end_sample <= end)
+        })
+        .unzip()
+}
+
+/// Speakers numbered by first appearance among the kept segments (`kept`);
+/// the others' labels are left as they are (they are not output).
+fn number_kept_speakers(labels: &mut [usize], kept: &[bool]) {
+    let indices = (0..labels.len())
+        .filter(|&index| kept[index])
+        .collect::<Vec<_>>();
+    let mut kept_labels = indices
+        .iter()
+        .map(|&index| labels[index])
+        .collect::<Vec<_>>();
+    relabel_speakers_by_first_segment(&mut kept_labels);
+    for (&index, &label) in indices.iter().zip(&kept_labels) {
+        labels[index] = label;
+    }
 }
 
 fn relabel_speakers_by_first_segment(labels: &mut [usize]) {

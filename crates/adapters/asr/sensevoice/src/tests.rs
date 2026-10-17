@@ -335,6 +335,14 @@ fn timeline_does_not_split_inside_ascii_wordpieces() {
 }
 
 #[test]
+fn speakers_are_numbered_among_kept_segments() {
+    // A segment left out (no text) ahead of the others takes no number.
+    let mut labels = vec![2, 1, 2, 0];
+    number_kept_speakers(&mut labels, &[false, true, true, true]);
+    assert_eq!(&labels[1..], [0, 1, 2]);
+}
+
+#[test]
 fn real_model_smoke_if_env_set() {
     let Ok(model_dir) = std::env::var("LOCAL_SENSEVOICE_ASR_MODEL_DIR") else {
         return;

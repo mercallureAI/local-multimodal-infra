@@ -1,6 +1,6 @@
 //! Transcribes audio files, one `file<TAB>ms<TAB>text` line each (no
 //! timestamps or speakers, as the realtime cascade asks):
-//! `cargo run --release -p local-adapter-fun-asr-nano --features cuda --example transcribe -- <package dir> <audio or @list file>...`
+//! `cargo run --release -p local-adapter-fun-asr-nano --features cuda --example fun_asr_nano_transcribe -- <package dir> <audio or @list file>...`
 //!
 //! With `FUN_ASR_NANO_COMPARE_SENSEVOICE=<sensevoice-small-int8-gpu-onnx dir>`
 //! each line adds that model's `ms<TAB>text` (its GPU int8 graph with CUDA
