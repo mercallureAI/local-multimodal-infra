@@ -31,7 +31,7 @@ the OpenAI routes also take `x-local-infer-token`, admin routes
 | `POST /v1/detect/objects` | object detection; image as the body | [vision](models/vision.md) |
 | `POST /v1/depth` | metric depth grid; image as the body | [vision](models/vision.md) |
 | `GET /v1/inferences` | recent inferences and their timings | below |
-| `GET /v1/models` | model list | |
+| `GET /v1/models` | model list; besides the OpenAI fields each model has `name`, `task_kinds`, `enabled` and `downloaded` (its files are present) | |
 
 Only these are implemented; it is not the full OpenAI API. Point an OpenAI
 client at `http://127.0.0.1:17890/v1` with an inference token as the API key.
