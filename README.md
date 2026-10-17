@@ -164,10 +164,6 @@ curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
 - worker 优先加载 `ORT_DYLIB_PATH`，否则加载二进制旁的 ONNX Runtime。Windows 上需要在 PATH 中提供 CUDA 12.8+ 运行时（cudart、cuBLAS）与 cuDNN 9，且不要让它加载 `C:\Windows\System32\onnxruntime.dll`。
 - `/health` 只说明服务在运行；模型实际使用的 provider 见 worker 日志 `lazy loading model`。
 
-## 在 AstrBot 中使用
-
-AstrBot 在 WebUI「模型提供商 → 本地多模态服务」（`local_infra` 设置）中接入本服务：填写服务地址（不带 `/v1`）和推理 token 后，按 `GET /v1/models` 返回的任务类型与启用 / 下载状态，为语音识别、语音合成、嵌入、重排序、内容审核和实时语音分别选择模型，并通过 `Context.get_local_infra()` 把同一个服务提供给插件。
-
 ## 文档
 
 - [部署指南](docs/getting-started.md)

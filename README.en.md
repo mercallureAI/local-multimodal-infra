@@ -208,15 +208,6 @@ outputs: [API](docs/api.md).
 - `/health` says the services are up; the providers a model really uses are
   in the worker's `lazy loading model` log line.
 
-## Used by AstrBot
-
-AstrBot connects to this service in its WebUI under Providers → Local service
-(the `local_infra` setting): given the server address (without `/v1`) and an
-inference token, it picks a model for each of speech-to-text, text-to-speech,
-embeddings, rerank, content moderation and realtime voice from the task kinds
-and enabled / downloaded state in `GET /v1/models`, and hands the same server
-to plugins through `Context.get_local_infra()`.
-
 ## Documentation
 
 - [Getting started](docs/getting-started.md)
