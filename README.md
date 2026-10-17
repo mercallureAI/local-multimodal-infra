@@ -22,6 +22,7 @@
 | --- | --- | --- | --- | --- |
 | `sensevoice-small-onnx` | SenseVoiceSmall + FSMN-VAD + CAM++：文本、时间轴、语言、情绪、发言人 | INT8 | 下载 | CPU / GPU |
 | `sensevoice-small-int8-gpu-onnx` | 同上，全程在 GPU 上 + CUDA graph，1.5 秒语音约 16 ms；实时语音的默认 ASR | INT8 权重 | 导出 | GPU |
+| `fun-asr-nano-onnx` | Fun-ASR-Nano（SenseVoice 编码器 + Qwen3-0.6B）+ 同一管线：比 SenseVoice 更准，支持热词；1.5 秒语音约 30–45 ms | INT8 权重 + FP16 | 导出 | GPU |
 
 ### 语音合成 · [文档](docs/models/speech-synthesis.md)
 
@@ -184,6 +185,7 @@ curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
 - [microsoft/onnxruntime](https://github.com/microsoft/onnxruntime)、[pykeio/ort](https://github.com/pykeio/ort)：CPU / CUDA 推理运行时及其 Rust 绑定
 - [microsoft/onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai)：Qwen3、Qwen3Guard 的 INT4 导出（`models.builder`）
 - [modelscope/FunASR](https://github.com/modelscope/FunASR)、[FunAudioLLM/SenseVoice](https://github.com/FunAudioLLM/SenseVoice)：SenseVoice 前处理、推理与 FSMN-VAD 管线
+- [QwenAudio/Fun-ASR](https://github.com/QwenAudio/Fun-ASR)：Fun-ASR-Nano 的模型结构、提示词与推理流程
 - [ultralytics/ultralytics](https://github.com/ultralytics/ultralytics)：YOLO 预处理、输出解码与 COCO 标签
 - [PaddlePaddle/PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)：PP-OCRv5、DB 检测后处理与 CTC 解码
 - [baidu/Unlimited-OCR](https://github.com/baidu/Unlimited-OCR)：预处理、提示词、R-SWA 与防重复采样

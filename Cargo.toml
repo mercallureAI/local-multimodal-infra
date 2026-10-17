@@ -69,6 +69,7 @@ local-jieba = { path = "crates/text/jieba" }
 local-wetext = { path = "crates/text/wetext" }
 local-zh-tts-frontend = { path = "crates/text/zh-tts-frontend" }
 local-adapter-sensevoice-asr = { path = "crates/adapters/asr/sensevoice" }
+local-adapter-fun-asr-nano = { path = "crates/adapters/asr/fun-asr-nano" }
 local-adapter-index-tts = { path = "crates/adapters/tts/index-tts" }
 local-adapter-index-tts2 = { path = "crates/adapters/tts/index-tts2" }
 local-adapter-qwen3-tts = { path = "crates/adapters/tts/qwen3-tts" }

@@ -706,8 +706,11 @@ fn task_kind_guide(kind: local_core::TaskKind) -> Value {
             "params": {
                 "timestamps": "bool, default true: timestamped_text and timed segments",
                 "timestamp_granularity_sec": "number, default 10: length of the timeline's segments",
-                "token_timestamps": "bool, default false: per-token times",
+                "token_timestamps": "bool, default false: per-token times (SenseVoice)",
                 "speaker_diarization": "bool, default true: segments[].speaker and speakers[]",
+                "hotwords": "list of strings or a comma-separated string (Fun-ASR-Nano): names and terms to favour",
+                "language": "string (Fun-ASR-Nano): 中文, 英文, 日文, ...; any when absent",
+                "itn": "bool, default true (Fun-ASR-Nano): false for text without inverse normalization",
             },
             "output": "asr_transcription: text, timestamped_text, segments[{start_ms, end_ms, text, speaker, language, emotion}], speakers",
         }),
@@ -987,7 +990,12 @@ mod tests {
         for name in expected {
             assert!(McpAccess::Infer.allows(name), "{name}");
         }
-        for removed in ["asr_transcribe", "object_detect", "text_embed", "sign_asset_urls"] {
+        for removed in [
+            "asr_transcribe",
+            "object_detect",
+            "text_embed",
+            "sign_asset_urls",
+        ] {
             assert!(!McpAccess::Infer.allows(removed), "{removed}");
         }
         // The catalogs share only list_models, which differs per catalog.
@@ -1147,12 +1155,18 @@ mod tests {
         });
         server.refresh_asset_urls(&mut result);
         let client = reqwest::Client::new();
-        for url in [&result["output"]["audio"]["url"], &result["files"][0]["url"]] {
+        for url in [
+            &result["output"]["audio"]["url"],
+            &result["files"][0]["url"],
+        ] {
             let url = url.as_str().expect("fresh url");
             assert!(url.starts_with(&base_url), "{url}");
             let response = client.get(url).send().await.expect("download speech");
             assert_eq!(response.status(), StatusCode::OK, "{url}");
-            assert_eq!(response.bytes().await.expect("speech bytes").as_ref(), speech);
+            assert_eq!(
+                response.bytes().await.expect("speech bytes").as_ref(),
+                speech
+            );
         }
 
         // A result too long to inline comes back as a text artifact whose
@@ -1182,7 +1196,9 @@ mod tests {
             .expect("run_task");
         let schema = serde_json::to_value(run).expect("serialize tool");
         let kinds = &schema["inputSchema"]["properties"]["task_kind"]["enum"];
-        assert!(kinds.as_array().is_some_and(|kinds| kinds.contains(&json!("asr.transcribe"))));
+        assert!(kinds
+            .as_array()
+            .is_some_and(|kinds| kinds.contains(&json!("asr.transcribe"))));
         assert!(!kinds.as_array().unwrap().contains(&json!("voice.realtime")));
         for name in ["model", "files", "params"] {
             assert!(

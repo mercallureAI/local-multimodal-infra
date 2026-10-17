@@ -17,6 +17,8 @@
 use local_adapter_depth_anything_v2::DepthAnythingAdapter;
 #[cfg(feature = "embedding")]
 use local_adapter_e5_embedding::E5EmbeddingAdapter;
+#[cfg(feature = "asr")]
+use local_adapter_fun_asr_nano::FunAsrNanoAdapter;
 #[cfg(feature = "tts")]
 use local_adapter_index_tts::IndexTtsAdapter;
 #[cfg(feature = "tts")]
@@ -69,7 +71,7 @@ pub fn compiled_adapters() -> Vec<AdapterKind> {
         .into_iter()
         .filter(|adapter| match adapter {
             AdapterKind::Yolo | AdapterKind::DepthAnythingV2 => cfg!(feature = "detect"),
-            AdapterKind::SenseVoiceAsr => cfg!(feature = "asr"),
+            AdapterKind::SenseVoiceAsr | AdapterKind::FunAsrNano => cfg!(feature = "asr"),
             AdapterKind::IndexTts | AdapterKind::IndexTts2 | AdapterKind::Qwen3Tts => {
                 cfg!(feature = "tts")
             }
@@ -628,6 +630,10 @@ impl LoadedEntry {
             AdapterKind::SenseVoiceAsr => {
                 LoadedModel::SenseVoiceAsr(SenseVoiceAsrAdapter::load(&spec)?)
             }
+            #[cfg(feature = "asr")]
+            AdapterKind::FunAsrNano => {
+                LoadedModel::FunAsrNano(Box::new(FunAsrNanoAdapter::load(&spec)?))
+            }
             #[cfg(feature = "tts")]
             AdapterKind::IndexTts => LoadedModel::IndexTts(IndexTtsAdapter::load(&spec)?),
             #[cfg(feature = "tts")]
@@ -778,6 +784,9 @@ fn validated_runtime_providers_for_model(model_id: &str) -> Option<&'static [&'s
         // The FunASR ASR pipeline loads FSMN-VAD, SenseVoice, and CAM++ ONNX
         // sessions with one shared provider policy.
         "sensevoice-small-onnx" | "sensevoice-small-int8-gpu-onnx" => Some(&["cuda", "cpu"]),
+        // The same pipeline around Fun-ASR-Nano, whose LLM graph runs on CUDA
+        // only (the adapter refuses another provider).
+        "fun-asr-nano-onnx" => Some(&["cuda", "cpu"]),
         // All A-F/prefill sessions receive the same provider selection. Root
         // FP32 CUDA is policy-enabled, but still needs real NVIDIA validation.
         "indextts-1.5-onnx" => Some(&["cuda", "cpu"]),
@@ -811,6 +820,8 @@ enum LoadedModel {
     DepthAnythingV2(DepthAnythingAdapter),
     #[cfg(feature = "asr")]
     SenseVoiceAsr(SenseVoiceAsrAdapter),
+    #[cfg(feature = "asr")]
+    FunAsrNano(Box<FunAsrNanoAdapter>),
     #[cfg(feature = "tts")]
     IndexTts(IndexTtsAdapter),
     #[cfg(feature = "tts")]
@@ -938,6 +949,12 @@ impl LoadedModel {
             #[cfg(feature = "asr")]
             (
                 LoadedModel::SenseVoiceAsr(adapter),
+                TaskKind::AsrTranscribe,
+                InferenceInput::AsrTranscribe { audio },
+            ) => adapter.transcribe_with_params(audio, &task.params),
+            #[cfg(feature = "asr")]
+            (
+                LoadedModel::FunAsrNano(adapter),
                 TaskKind::AsrTranscribe,
                 InferenceInput::AsrTranscribe { audio },
             ) => adapter.transcribe_with_params(audio, &task.params),
@@ -1594,7 +1611,7 @@ mod tests {
     fn test_spec(id: &str, adapter: AdapterKind, enabled: bool, path: PathBuf) -> ModelSpec {
         let task_kinds = match adapter {
             AdapterKind::Yolo => vec![TaskKind::ObjectDetect],
-            AdapterKind::SenseVoiceAsr => vec![TaskKind::AsrTranscribe],
+            AdapterKind::SenseVoiceAsr | AdapterKind::FunAsrNano => vec![TaskKind::AsrTranscribe],
             AdapterKind::IndexTts | AdapterKind::IndexTts2 | AdapterKind::Qwen3Tts => {
                 vec![TaskKind::TtsSynthesize]
             }

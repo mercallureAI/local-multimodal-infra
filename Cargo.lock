@@ -1406,6 +1406,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "local-adapter-fun-asr-nano"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "half",
+ "hound",
+ "local-adapter-sensevoice-asr",
+ "local-backend-ort",
+ "local-core",
+ "local-error",
+ "serde",
+ "serde_json",
+ "tokenizers",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "local-adapter-index-tts"
 version = "0.1.0"
 dependencies = [
@@ -1807,6 +1825,7 @@ dependencies = [
  "hound",
  "local-adapter-depth-anything-v2",
  "local-adapter-e5-embedding",
+ "local-adapter-fun-asr-nano",
  "local-adapter-index-tts",
  "local-adapter-index-tts2",
  "local-adapter-mmarco-reranker",

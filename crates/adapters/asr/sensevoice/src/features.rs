@@ -110,10 +110,12 @@ fn parse_vector(line: &str) -> Result<Vec<f32>> {
         .collect()
 }
 
+/// LFR features of `samples`, CMVN applied when given (SenseVoice's
+/// `am.mvn`; Fun-ASR-Nano has none).
 pub fn extract(
     samples: &[f32],
     frontend: &FrontendConfig,
-    cmvn: &Cmvn,
+    cmvn: Option<&Cmvn>,
 ) -> Result<SenseVoiceFeatures> {
     let raw = fbank_frames(samples, frontend)?;
     if raw.is_empty() {
@@ -167,7 +169,7 @@ impl FrontendConfig {
 fn lfr_cmvn(
     mut raw: Vec<Vec<f32>>,
     frontend: &FrontendConfig,
-    cmvn: &Cmvn,
+    cmvn: Option<&Cmvn>,
 ) -> Result<SenseVoiceFeatures> {
     let original_frames = raw.len();
     let output_frames = original_frames.div_ceil(frontend.lfr_n);
@@ -185,7 +187,9 @@ fn lfr_cmvn(
         for offset in 0..frontend.lfr_m {
             frame.extend_from_slice(raw.get(start + offset).unwrap_or(last));
         }
-        cmvn.apply(&mut frame);
+        if let Some(cmvn) = cmvn {
+            cmvn.apply(&mut frame);
+        }
         data.extend_from_slice(&frame);
     }
     Ok(SenseVoiceFeatures {
@@ -201,5 +205,5 @@ pub fn lfr_cmvn_for_test(
     frontend: &FrontendConfig,
     cmvn: &Cmvn,
 ) -> Result<SenseVoiceFeatures> {
-    lfr_cmvn(raw, frontend, cmvn)
+    lfr_cmvn(raw, frontend, Some(cmvn))
 }

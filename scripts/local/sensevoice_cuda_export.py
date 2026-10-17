@@ -264,10 +264,11 @@ def finish(model):
     return model
 
 
-def save_package(model, folder: Path) -> None:
-    """``model`` as MODEL_FILE with its large initializers in DATA_FILE, and
-    SHARED_FILE listing their byte ranges there: the runtime uploads them to
-    the GPU once for all its fixed-length (CUDA graph) sessions."""
+def save_package(model, folder: Path, model_file: str = MODEL_FILE) -> None:
+    """``model`` as ``model_file`` (MODEL_FILE) with its large initializers in
+    ``<model_file>.data``, and ``<stem>.shared.json`` listing their byte
+    ranges there: the runtime uploads them to the GPU once for all its
+    fixed-length (CUDA graph) sessions."""
     import json
 
     import onnx
@@ -276,13 +277,15 @@ def save_package(model, folder: Path) -> None:
                      10: "f16"}
     from onnx import external_data_helper, numpy_helper
 
-    for name in PACKAGE_FILES:
+    data_file = model_file + ".data"
+    shared_file = Path(model_file).stem + ".shared.json"
+    for name in (model_file, data_file, shared_file):
         (folder / name).unlink(missing_ok=True)
     # Written here rather than by onnx.save: every tensor starts at a
     # multiple of ALIGNMENT, so the runtime uploads the file in one copy and
     # views each tensor inside it (aligned for the CUDA kernels' loads).
     tensors, offset = [], 0
-    with open(folder / DATA_FILE, "wb") as data:
+    with open(folder / data_file, "wb") as data:
         for tensor in model.graph.initializer:
             raw = tensor.raw_data or numpy_helper.to_array(tensor).tobytes()
             if len(raw) < EXTERNAL_THRESHOLD:
@@ -294,7 +297,7 @@ def save_package(model, folder: Path) -> None:
             for field in ("float_data", "int32_data", "int64_data", "double_data", "uint64_data"):
                 tensor.ClearField(field)
             tensor.raw_data = raw
-            external_data_helper.set_external_data(tensor, DATA_FILE, offset, len(raw))
+            external_data_helper.set_external_data(tensor, data_file, offset, len(raw))
             tensor.ClearField("raw_data")
             tensor.data_location = onnx.TensorProto.EXTERNAL
             tensors.append({
@@ -305,9 +308,9 @@ def save_package(model, folder: Path) -> None:
                 "length": len(raw),
             })
             offset += len(raw)
-    onnx.save(model, str(folder / MODEL_FILE))
-    (folder / SHARED_FILE).write_text(
-        json.dumps({"data_file": DATA_FILE, "tensors": tensors}, indent=1), encoding="utf-8")
+    onnx.save(model, str(folder / model_file))
+    (folder / shared_file).write_text(
+        json.dumps({"data_file": data_file, "tensors": tensors}, indent=1), encoding="utf-8")
 
 
 def report(folder: Path, source: str | None = None) -> None:

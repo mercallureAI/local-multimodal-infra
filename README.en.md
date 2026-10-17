@@ -26,6 +26,7 @@ package, export it locally from the source model as its doc shows.
 | --- | --- | --- | --- | --- |
 | `sensevoice-small-onnx` | SenseVoiceSmall + FSMN-VAD + CAM++: text, timeline, language, emotion, speakers | INT8 | download | CPU / GPU |
 | `sensevoice-small-int8-gpu-onnx` | the same, all on the GPU with CUDA graphs, ~16 ms for 1.5 s of speech; the realtime voice's default ASR | INT8 weights | export | GPU |
+| `fun-asr-nano-onnx` | Fun-ASR-Nano (SenseVoice encoder + Qwen3-0.6B) in the same pipeline: more accurate than SenseVoice, takes hotwords; ~30-45 ms for 1.5 s of speech | INT8 weights + FP16 | export | GPU |
 
 ### Speech synthesis · [docs](docs/models/speech-synthesis.md)
 
@@ -235,6 +236,7 @@ Upstream code this project ports or follows:
 - [microsoft/onnxruntime](https://github.com/microsoft/onnxruntime) and [pykeio/ort](https://github.com/pykeio/ort): the CPU / CUDA runtime and its Rust bindings.
 - [microsoft/onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai): the Qwen3 and Qwen3Guard INT4 exports (`models.builder`).
 - [modelscope/FunASR](https://github.com/modelscope/FunASR), [FunAudioLLM/SenseVoice](https://github.com/FunAudioLLM/SenseVoice): SenseVoice preprocessing, inference and the FSMN-VAD pipeline.
+- [QwenAudio/Fun-ASR](https://github.com/QwenAudio/Fun-ASR): Fun-ASR-Nano's model structure, prompt and inference flow.
 - [ultralytics/ultralytics](https://github.com/ultralytics/ultralytics): YOLO preprocessing, output decoding and the COCO labels.
 - [PaddlePaddle/PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR): PP-OCRv5, DB detection post-processing and CTC decoding.
 - [baidu/Unlimited-OCR](https://github.com/baidu/Unlimited-OCR): preprocessing, prompt, R-SWA and the no-repeat sampling.

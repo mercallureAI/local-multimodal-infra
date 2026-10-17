@@ -198,7 +198,7 @@ impl FsmnVad {
         }
         self.finish(&mut stream)?;
         let streamed = std::mem::take(&mut stream.decoder.trace);
-        let feats = features::extract(samples, &self.config.frontend_conf, &self.cmvn)?;
+        let feats = features::extract(samples, &self.config.frontend_conf, Some(&self.cmvn))?;
         let mut stream = self.start();
         stream.sample_count = samples.len();
         stream.block = feats.data;

@@ -10,6 +10,7 @@ group sessions. Its own files are only the VAD; it runs the models it names
 | VAD | Silero VAD v6.2.3 (the `voice-cascade` download) | download |
 | Speech recognition | `asr_model`: `sensevoice-small-int8-gpu-onnx` | local export, see [speech recognition](speech-recognition.md) |
 | | `asr_fallback_model`: `sensevoice-small-onnx`, used when the above is missing | download |
+| | or `asr_model`: `fun-asr-nano-onnx`, more accurate, ~15-30 ms slower per utterance, ~1.8 GB more GPU memory | local export, see [speech recognition](speech-recognition.md) |
 | Chat | `chat_model`: `qwen3-4b-instruct-2507-int4-onnx` | local export, see [chat](chat.md) |
 | Speech synthesis | `tts_model`: `qwen3-tts-0.6b-onnx` (or `indextts-1.5-onnx`, `indextts-2.5-onnx`) | see [speech synthesis](speech-synthesis.md) |
 | Wake words (optional) | sherpa-onnx KWS zipformer zh-en 3M, in `kws_dir` | `python -m scripts.local.fetch_kws_model` |

@@ -233,7 +233,7 @@ fn timeline_options_default_to_ten_seconds_and_are_configurable() {
 
 #[test]
 fn timeline_splits_near_target_and_formats_boundary_pairs() {
-    let decoded = DecodedText {
+    let decoded = RecognizedText {
         text: "甲乙丙丁戊".to_string(),
         language: Some("zh".to_string()),
         emotion: Some("NEUTRAL".to_string()),
@@ -241,7 +241,7 @@ fn timeline_splits_near_target_and_formats_boundary_pairs() {
         tokens: [0, 5_000, 10_000, 15_000, 20_000]
             .into_iter()
             .zip(['甲', '乙', '丙', '丁', '戊'])
-            .map(|(start_ms, text)| RelativeTokenTimestamp {
+            .map(|(start_ms, text)| TokenTiming {
                 start_ms,
                 end_ms: start_ms + 1_000,
                 text: text.to_string(),
@@ -296,31 +296,31 @@ fn timeline_merges_short_adjacent_segments_only_for_same_speaker() {
 
 #[test]
 fn timeline_does_not_split_inside_ascii_wordpieces() {
-    let decoded = DecodedText {
+    let decoded = RecognizedText {
         text: "deep seek works".to_string(),
         language: Some("en".to_string()),
         emotion: None,
         events: Vec::new(),
         tokens: vec![
-            RelativeTokenTimestamp {
+            TokenTiming {
                 start_ms: 0,
                 end_ms: 5_000,
                 text: "de".to_string(),
                 starts_word: true,
             },
-            RelativeTokenTimestamp {
+            TokenTiming {
                 start_ms: 5_000,
                 end_ms: 10_000,
                 text: "ep".to_string(),
                 starts_word: false,
             },
-            RelativeTokenTimestamp {
+            TokenTiming {
                 start_ms: 10_000,
                 end_ms: 15_000,
                 text: "seek".to_string(),
                 starts_word: true,
             },
-            RelativeTokenTimestamp {
+            TokenTiming {
                 start_ms: 15_000,
                 end_ms: 20_000,
                 text: "works".to_string(),
@@ -441,7 +441,11 @@ fn real_vad_stream_matches_one_shot_if_env_set() {
     let mut adapter = SenseVoiceAsrAdapter::load(&model_spec(PathBuf::from(model_dir)))
         .expect("load real SenseVoice model");
     let samples = audio::read_audio_mono_16k(&audio).expect("read audio");
-    let (streamed, one_shot) = adapter.vad.compare_one_shot(&samples).expect("VAD");
+    let (streamed, one_shot) = adapter
+        .pipeline
+        .vad
+        .compare_one_shot(&samples)
+        .expect("VAD");
     assert_eq!(streamed.len(), one_shot.len());
     let differences = streamed
         .iter()
@@ -584,27 +588,20 @@ fn real_cuda_graph_matches_session_if_env_set() {
     let mut adapter = SenseVoiceAsrAdapter::load(&spec).expect("load real SenseVoice model");
     assert_eq!(adapter.cuda_graph_frames(), [64, 128, 256, 352]);
     let samples = audio::read_audio_mono_16k(&audio).expect("read audio");
-    let segments = adapter.vad.segment(&samples).expect("vad");
+    let segments = adapter.pipeline.vad.segment(&samples).expect("vad");
     let mut compared = 0;
     for segment in segments.iter().take(40) {
         let features = features::extract(
             &samples[segment.start_sample..segment.end_sample],
-            &adapter.config.frontend_conf,
-            &adapter.cmvn,
+            adapter.pipeline.frontend(),
+            adapter.pipeline.cmvn.as_ref(),
         )
         .expect("features");
         if features.frames == 0 {
             continue;
         }
         let graph = adapter.infer_features(features.clone()).expect("graph");
-        let session = Asr {
-            session: &mut adapter.session,
-            graphs: None,
-            tokens: &adapter.tokens,
-            frontend: &adapter.config.frontend_conf,
-        }
-        .infer(features)
-        .expect("session");
+        let session = adapter.asr.infer_session(features).expect("session");
         assert_eq!(graph.text, session.text, "segment {segment:?}");
         compared += 1;
     }
@@ -625,12 +622,17 @@ fn real_speaker_benchmark_if_env_set() {
     );
     let mut adapter = SenseVoiceAsrAdapter::load(&model_spec(model_dir)).expect("load model");
     let samples = audio::read_audio_mono_16k(&audio).expect("read benchmark audio");
-    let segments = adapter.vad.segment(&samples).expect("benchmark VAD");
+    let segments = adapter
+        .pipeline
+        .vad
+        .segment(&samples)
+        .expect("benchmark VAD");
     let mut elapsed_ms = Vec::new();
     let mut labels = Vec::new();
     for _ in 0..2 {
         let started = std::time::Instant::now();
         labels = adapter
+            .pipeline
             .speaker
             .label_segments(&samples, &segments)
             .expect("benchmark speakers");
@@ -760,15 +762,15 @@ fn real_model_stage_timing_if_env_set() {
         let read = audio::read_audio_mono_16k(&cut).expect("read cut audio");
         let read_ms = started.elapsed().as_secs_f64() * 1000.0;
         let at = std::time::Instant::now();
-        let segments = adapter.vad.segment(&read).expect("vad");
+        let segments = adapter.pipeline.vad.segment(&read).expect("vad");
         let vad_ms = at.elapsed().as_secs_f64() * 1000.0;
         let (mut features_ms, mut asr_ms) = (0.0, 0.0);
         for segment in &segments {
             let at = std::time::Instant::now();
             let features = features::extract(
                 &read[segment.start_sample..segment.end_sample],
-                &adapter.config.frontend_conf,
-                &adapter.cmvn,
+                adapter.pipeline.frontend(),
+                adapter.pipeline.cmvn.as_ref(),
             )
             .expect("features");
             features_ms += at.elapsed().as_secs_f64() * 1000.0;

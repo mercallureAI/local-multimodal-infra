@@ -4,10 +4,12 @@
 | --- | --- | --- |
 | `sensevoice-small-onnx` | download | CPU or CUDA |
 | `sensevoice-small-int8-gpu-onnx` | local export | CUDA (CPU works, slowly) |
+| `fun-asr-nano-onnx` | local export | CUDA only |
 
-Both are the same pipeline: FSMN-VAD cuts speech segments (at most 20 s,
-cut at the weakest speech), SenseVoiceSmall transcribes them (language and
-emotion tags included), and CAM++ speaker embeddings label who spoke.
+All are the same pipeline: FSMN-VAD cuts speech segments (at most 20 s,
+cut at the weakest speech), a recognizer transcribes them, and CAM++
+speaker embeddings label who spoke. SenseVoiceSmall adds language and
+emotion tags; Fun-ASR-Nano is more accurate, slower, and takes hotwords.
 Audio: WAV, FLAC, Ogg Vorbis, MP3, AAC (MP4/M4A, fragmented `.m4s`) and ALAC;
 long recordings are streamed, not loaded whole.
 
@@ -62,6 +64,72 @@ their byte ranges (`model_gpu_int8.shared.json`). Requests for the retired
 `sensevoice-small-fp16-onnx` (its float16 kernels overflowed into NaN on loud
 speech) get this model. `auto_select: false`: used only where named.
 
+## `fun-asr-nano-onnx`
+
+[FunAudioLLM/Fun-ASR-Nano-2512](https://modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512)
+(Apache-2.0, 0.8B): SenseVoiceSmall's encoder (same FBANK/LFR frontend, no
+CMVN) feeding a transformer adaptor whose output takes the place of
+placeholder tokens in a Qwen3-0.6B prompt, which writes the transcript
+(greedy, upstream's prompt `语音转写：`). A CTC decoder on the same encoder
+gives a second, plain transcript ([spec](../../configs/providers/asr/fun-asr-nano.yaml)).
+
+FLEURS dev, with each model's full pipeline on an RTX 4090 (SenseVoice is
+`sensevoice-small-int8-gpu-onnx`; punctuation and case ignored):
+
+| | Fun-ASR-Nano | SenseVoiceSmall |
+| --- | --- | --- |
+| Mandarin CER, 328 utterances without numbers | **4.29%** | 5.27% |
+| Mandarin CER, all 409 | 6.33% | 6.26% |
+| English WER, all 394 | **7.18%** | 9.76% |
+| English WER, 321 without numbers | **5.52%** | 7.80% |
+| 1.5 s / 3 s / 6 s of speech | ~30-45 / ~55 / ~85 ms | ~16 / ~22 / ~35 ms |
+| ~10 s utterances (mean) | ~105 ms | ~48 ms |
+| GPU memory, process | ~3.1 GB | ~1.4 GB |
+
+Fun-ASR-Nano often writes numbers in Chinese numerals (二十一比二十,
+一七六七年) where FLEURS has digits, hence the "all" Mandarin row. On 20
+Mandarin sentences with English terms (帮我打开 YouTube…, synthesized by
+Qwen3-TTS) Fun-ASR-Nano kept 39 of 41 English terms, SenseVoice 33 (it drops
+or misspells them: issue, Zoom → zom, Claude → cloud, Lakers → lars); neither
+switched a sentence to English. `hotwords: ["Tesla"]` turned Fun-ASR-Nano's
+特斯拉 into Tesla. A 1.5 s
+segment costs ~8 ms of audio graph (CUDA graph), ~10 ms of LLM prefill and
+~2 ms per generated token (the decode step replays as a CUDA graph).
+
+Export (the ModelScope snapshot: its `model.pt`, SHA-256 `81fec861...`, has
+the trained CTC decoder the Hugging Face copy lacks; download
+`sensevoice-small-onnx` first for `vad/` and `speaker/`):
+
+```bash
+python -m scripts.local.fun_asr_nano_export export \
+  --source-model-dir workdir/models/Fun-ASR-Nano-2512 \
+  --base-dir workdir/models/sensevoice-small-onnx \
+  --output-dir workdir/models/fun-asr-nano-onnx \
+  --builder-python <python with onnxruntime-genai>
+```
+
+It writes `asr/audio_encoder.onnx` (encoder, adaptor and CTC decoder: int8
+weights, float32 activations, weights shared by the CUDA graph buckets as
+for SenseVoice), `asr/llm.onnx` (Qwen3's 28 layers from the
+onnxruntime-genai builder: FP16 with int8 weights, GroupQueryAttention over a
+fixed KV cache; the residual stream runs scaled by 1/8, since Qwen3's
+layer 2 writes ~1.25e5 into it, past FP16's range), `asr/embed_tokens.f16`
+(the token embeddings, kept in host memory), the tokenizers and a manifest.
+`parity` compares a package with the PyTorch model token by token
+(`--provider cuda`: the builder's attention kernel fuses Qwen3's q/k norms,
+which only CUDA implements, so the LLM graph does not run on the CPU).
+
+The CTC branch guards the LLM (`ctc_guard`, default true): a segment in
+which it hears no speech gets no text (an LLM makes up text for noise), and
+an LLM output that runs into the token limit (16 + 12 per second of
+speech: a repetition loop) is replaced by the CTC text. No token
+timestamps or language/emotion tags.
+
+Per-request parameters besides those below: `hotwords` (a list, or a
+comma-separated string: names and terms to favour, upstream's context
+prompt), `language` (中文, 英文, 日文; any when absent) and `itn: false`
+(no inverse text normalization).
+
 ## Options
 
 Spec `metadata` (defaults) and per-request parameters of the same name:
@@ -73,8 +141,10 @@ Spec `metadata` (defaults) and per-request parameters of the same name:
 | `token_timestamps` (`token_timestamps_default`) | `false` | per-token times |
 | `speaker_diarization` (`speaker_diarization_default`) | `true` | `segments[].speaker` and `speakers[]` |
 | `vad_max_segment_seconds` | `20` | longest speech segment |
-| `asr_model_file` | `model_quant.onnx` | the graph in `asr/` |
+| `asr_model_file` | `model_quant.onnx` | SenseVoice: the graph in `asr/` |
 | `asr_cuda_graph_frames` | (unset) | CUDA graph buckets, in LFR frames |
+| `max_context` | `1024` | Fun-ASR-Nano: LLM positions of the KV cache (112 KB each) |
+| `ctc_guard` | `true` | Fun-ASR-Nano: the CTC branch drops silent segments and replaces runaway output |
 
 ## Calling it
 
@@ -86,3 +156,6 @@ Spec `metadata` (defaults) and per-request parameters of the same name:
 
 Long-audio timing and memory:
 `cargo run --release -p local-adapter-sensevoice-asr --features cuda --example long_audio -- <model dir> <audio>`.
+Fun-ASR-Nano next to SenseVoice, file by file (text and time; `@list` reads
+paths from a file):
+`FUN_ASR_NANO_COMPARE_SENSEVOICE=<sensevoice-small-int8-gpu-onnx dir> cargo run --release -p local-adapter-fun-asr-nano --features cuda --example transcribe -- <fun-asr-nano-onnx dir> <audio or @list>...`.

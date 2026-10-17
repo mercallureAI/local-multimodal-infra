@@ -1,0 +1,65 @@
+id: fun-asr-nano-onnx
+# Fun-ASR-Nano-2512 (FunAudioLLM): SenseVoice's encoder feeding Qwen3-0.6B,
+# in the FunASR pipeline of the SenseVoice models (FSMN-VAD, CAM++
+# speakers, timeline). More accurate than SenseVoiceSmall (FLEURS dev:
+# Mandarin CER 4.3% vs 5.3% without numbers, English WER 7.2% vs 9.8%),
+# slower (1.5 s of speech: ~30-45 ms against ~16 ms) and CUDA only. Takes
+# `hotwords` and `language` parameters.
+name: Fun-ASR-Nano ONNX, GPU int8
+enabled: true
+task_kinds:
+  - asr.transcribe
+adapter: fun_asr_nano
+backend: ort
+artifacts:
+  # Local export (path omitted: <model_dir>/fun-asr-nano-onnx) of the
+  # ModelScope snapshot of FunAudioLLM/Fun-ASR-Nano-2512 (model.pt SHA-256
+  # 81fec8616083c69377f3ceef36aba3655660ee0ca69a5d4a1e9810cd340ca499, the
+  # copy with the trained CTC decoder; Apache-2.0):
+  #   python -m scripts.local.fun_asr_nano_export export \
+  #     --source-model-dir <model_dir>/Fun-ASR-Nano-2512 \
+  #     --base-dir <model_dir>/sensevoice-small-onnx \
+  #     --output-dir <model_dir>/fun-asr-nano-onnx \
+  #     --builder-python <python with onnxruntime-genai>
+  # asr/: audio_encoder.onnx (+ .data, .shared.json), llm.onnx (+ .data),
+  # embed_tokens.f16, tokenizer.json, ctc_tokens.json, config.yaml,
+  # manifest.json; vad/ and speaker/ come from sensevoice-small-onnx.
+  - type: local
+runtime:
+  provider_order: [cuda, cpu]
+  max_concurrency: 1
+  idle_ttl_sec: 600
+resources:
+  min_ram_mb: 2048
+  min_vram_mb: 3072
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  # Used where it is named (voice-cascade's asr_model), never picked for a
+  # task naming no model: most installs lack the local export.
+  auto_select: false
+  license: Apache-2.0
+  runtime: onnxruntime
+  model_family: funasr_full_asr
+  task: automatic-speech-recognition
+  source: FunAudioLLM/Fun-ASR-Nano-2512
+  modelscope_revision: db823224e5c2510001b4a3d3ed97f430bd52ac88
+  # Speech segments are cut (at the weakest speech) at this length.
+  vad_max_segment_seconds: 20
+  # Audio graph input lengths (LFR frames of 60 ms) run as CUDA graphs:
+  # 3.8, 7.7, 15.4 and 21.1 s; a longer input runs without a graph.
+  asr_cuda_graph_frames: [64, 128, 256, 352]
+  # LLM positions (prompt + generated tokens) of the KV cache (112 KB each).
+  max_context: 1024
+  # The CTC branch drops segments it hears no speech in and replaces an
+  # output that runs into the token limit.
+  ctc_guard: true
+  vad_provider_order: [cpu]
+  speaker_batch_size: 32
+  speaker_io_binding: true
+  speaker_diarization_default: true
+  timestamps_default: true
+  timestamp_granularity_sec: 10
+  token_timestamps_default: false

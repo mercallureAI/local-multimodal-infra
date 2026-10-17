@@ -511,6 +511,7 @@ async fn converse(
         system: prompt::system(&config),
         chat_model: config.chat_model.clone().unwrap_or(models.chat_model),
         asr_model: Mutex::new(config.asr_model.clone().unwrap_or(models.asr_model)),
+        asr_hotwords: Mutex::new(Vec::new()),
         moderation: Mutex::new(config.moderation.clone().filter(|m| m.enabled && audio)),
         tts_model,
         tts_params,
@@ -626,6 +627,11 @@ async fn converse(
             },
             None => tracing::warn!("voice cascade has no keyword spotter model (kws_dir): wake words go by the transcripts"),
         }
+        *shared.asr_hotwords.lock().unwrap() = asr_hotwords(
+            names.as_deref().unwrap_or_default(),
+            &wake_words,
+            input.spotter.as_ref().map(KeywordSpotter::keywords),
+        );
     }
     let mut listener = Listener::default();
     if input.spotter.is_some() {
@@ -659,6 +665,11 @@ async fn converse(
                             wake_words = words;
                         }
                         input.set_wake_words(names.as_deref().unwrap_or_default(), &wake_words);
+                        *shared.asr_hotwords.lock().unwrap() = asr_hotwords(
+                            names.as_deref().unwrap_or_default(),
+                            &wake_words,
+                            input.spotter.as_ref().map(KeywordSpotter::keywords),
+                        );
                     }
                     if let Some(moderation) = update.moderation {
                         let on = moderation.enabled && shared.audio;
@@ -787,6 +798,23 @@ fn take_in(
         let (utterance, _) = waiting.pop_front().expect("the front");
         heard(shared, utterance, names, gate, listener, &input.callers);
     }
+}
+
+/// The recogniser's hotwords for a group's `names` and wake `words`: each
+/// once, and with a spotter only those it has a reading for (`readable`):
+/// a spelling such as "Mon3tr" makes Fun-ASR-Nano write "M3tr" for "M3".
+fn asr_hotwords(names: &[String], words: &[String], readable: Option<&[String]>) -> Vec<String> {
+    let mut hotwords: Vec<String> = Vec::new();
+    for word in names.iter().chain(words).map(|word| word.trim()) {
+        if word.is_empty()
+            || hotwords.iter().any(|known| known == word)
+            || readable.is_some_and(|readable| !readable.iter().any(|known| known == word))
+        {
+            continue;
+        }
+        hotwords.push(word.to_string());
+    }
+    hotwords
 }
 
 fn user_message(text: String) -> ChatMessage {
@@ -1830,6 +1858,10 @@ struct Shared {
     chat_model: String,
     /// The fallback once the configured one failed to load.
     asr_model: Mutex<String>,
+    /// What the recogniser is told to listen for (`hotwords`, which
+    /// Fun-ASR-Nano takes and SenseVoice ignores): the wake words with a
+    /// reading.
+    asr_hotwords: Mutex<Vec<String>>,
     /// Content moderation of what is heard (audio mode; None: off).
     moderation: Mutex<Option<Moderation>>,
     tts_model: String,
@@ -2437,6 +2469,11 @@ impl Shared {
             .insert("timestamps".to_string(), Value::Bool(false));
         task.params
             .insert("speaker_diarization".to_string(), Value::Bool(false));
+        let hotwords = self.asr_hotwords.lock().unwrap().clone();
+        if !hotwords.is_empty() {
+            task.params
+                .insert("hotwords".to_string(), Value::from(hotwords));
+        }
         match self.runtime.infer(task).await? {
             InferenceOutput::AsrTranscription { text, .. } => Ok(text),
             other => Err(InfraError::Runtime(format!("ASR returned {other:?}"))),
@@ -3075,6 +3112,21 @@ mod tests {
     use crate::protocol::SpeakerCandidate;
 
     #[test]
+    fn asr_hotwords_keep_the_wake_words_with_a_reading() {
+        let names = ["Mon3tr", "M3", "M42", "monster"].map(String::from);
+        let words = ["梦三特", " M3 ", ""].map(String::from);
+        assert_eq!(
+            asr_hotwords(&names, &words, None),
+            ["Mon3tr", "M3", "M42", "monster", "梦三特"]
+        );
+        let readable = ["M3", "M42", "monster", "梦三特"].map(String::from);
+        assert_eq!(
+            asr_hotwords(&names, &words, Some(&readable)),
+            ["M3", "M42", "monster", "梦三特"]
+        );
+    }
+
+    #[test]
     fn a_live_clause_holds_back_a_word_that_may_be_a_url() {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut live = LiveClause {
@@ -3219,6 +3271,7 @@ mod tests {
             system: String::new(),
             chat_model: String::new(),
             asr_model: Mutex::new(String::new()),
+            asr_hotwords: Mutex::new(Vec::new()),
             moderation: Mutex::new(None),
             tts_model: String::new(),
             tts_params: BTreeMap::new(),

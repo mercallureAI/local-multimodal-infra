@@ -165,7 +165,6 @@ impl AudioStream {
 }
 
 /// The whole of `path`, 16 kHz mono.
-#[cfg(test)]
 pub fn read_audio_mono_16k(path: &Path) -> Result<Vec<f32>> {
     let mut stream = AudioStream::open(path)?;
     let mut samples = Vec::new();

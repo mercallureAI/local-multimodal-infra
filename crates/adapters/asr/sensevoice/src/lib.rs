@@ -2,6 +2,11 @@
 //!
 //! The frontend, LFR+CMVN, four-input ONNX invocation and CTC collapse follow
 //! the official FunASR `runtime/onnxruntime/src/sensevoice-small.cpp` path.
+//!
+//! The FunASR pipeline around the recognizer (streamed decoding, FSMN-VAD,
+//! FBANK/LFR features, CAM++ speakers, the timeline) is [`SpeechPipeline`];
+//! other FunASR recognizers (Fun-ASR-Nano) plug into it through
+//! [`SegmentRecognizer`].
 
 mod audio;
 mod cuda_graph;
@@ -9,7 +14,9 @@ mod features;
 mod speaker;
 mod vad;
 
-use features::{Cmvn, SenseVoiceConfigFile, SenseVoiceFeatures};
+pub use audio::read_audio_mono_16k;
+use features::{Cmvn, SenseVoiceConfigFile};
+pub use features::{FrontendConfig, SenseVoiceFeatures};
 use local_backend_ort::{
     OrtBackend, OrtSession, OrtTensorData, OrtTensorInput, OrtTensorOutput, ProviderKind,
     ProviderSelection, SessionProviderReport, SharedInitializers, TensorElement,
@@ -171,90 +178,58 @@ impl SenseVoiceArtifacts {
 pub struct SenseVoiceAsrAdapter {
     model_id: String,
     artifacts: SenseVoiceArtifacts,
-    session: OrtSession,
-    config: SenseVoiceConfigFile,
-    cmvn: Cmvn,
-    tokens: Vec<String>,
-    vad: vad::FsmnVad,
-    speaker: speaker::CampPlus,
-    graphs: Option<cuda_graph::CudaGraphRunner>,
-    /// Last: the weights `session` and `graphs` share outlive them.
+    pipeline: SpeechPipeline,
+    asr: SenseVoiceRecognizer,
+    /// Last: the weights the recognizer's sessions share outlive them.
     _weights: Option<SharedInitializers>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SenseVoicePipelineProviderReport {
-    pub asr: SessionProviderReport,
-    pub vad: SessionProviderReport,
-    pub speaker: SessionProviderReport,
+/// One speech segment's recognizer: its FBANK/LFR features in, text out.
+pub trait SegmentRecognizer {
+    fn recognize(&mut self, features: SenseVoiceFeatures) -> Result<RecognizedText>;
 }
 
-impl SenseVoiceAsrAdapter {
-    pub fn load(spec: &ModelSpec) -> Result<Self> {
-        let artifacts = SenseVoiceArtifacts::from_spec(spec)?;
-        let config = SenseVoiceConfigFile::load(&artifacts.config)?;
+/// The FunASR pipeline around a recognizer: streamed audio decoding and
+/// FSMN-VAD, FBANK/LFR (+ CMVN) features, CAM++ speaker labels and the
+/// timestamped output. The VAD and speaker graphs are `vad/` and `speaker/`
+/// of the model directory.
+#[derive(Debug)]
+pub struct SpeechPipeline {
+    config: SenseVoiceConfigFile,
+    cmvn: Option<Cmvn>,
+    vad: vad::FsmnVad,
+    speaker: speaker::CampPlus,
+}
+
+/// The files [`SpeechPipeline::load`] reads from a model directory besides
+/// the frontend configuration.
+pub fn pipeline_files(root: &Path) -> [PathBuf; 4] {
+    let vad = root.join("vad");
+    [
+        vad.join(MODEL_FILE),
+        vad.join(CONFIG_FILE),
+        vad.join(CMVN_FILE),
+        root.join("speaker").join("campplus_cn_en_common_200k.onnx"),
+    ]
+}
+
+impl SpeechPipeline {
+    /// The pipeline of the model directory `root`: the frontend of `config`
+    /// (a FunASR `config.yaml`), CMVN from `cmvn` when given, and the spec's
+    /// VAD/speaker metadata (`vad_provider_order`, `vad_max_segment_seconds`,
+    /// `speaker_provider_order`, `speaker_batch_size`, `speaker_io_binding`).
+    pub fn load(spec: &ModelSpec, root: &Path, config: &Path, cmvn: Option<&Path>) -> Result<Self> {
+        let config = SenseVoiceConfigFile::load(config)?;
         let feature_dim = config.frontend_conf.n_mels * config.frontend_conf.lfr_m;
-        let cmvn = Cmvn::load(&artifacts.cmvn, feature_dim)?;
-        let tokens: Vec<String> = serde_json::from_slice(
-            &fs::read(&artifacts.tokens)
-                .map_err(|e| InfraError::io(Some(artifacts.tokens.clone()), e))?,
-        )?;
-        if tokens.is_empty() {
-            return Err(InfraError::Adapter(format!(
-                "SenseVoice token list is empty: {}",
-                artifacts.tokens.display()
-            )));
-        }
+        let cmvn = cmvn.map(|path| Cmvn::load(path, feature_dim)).transpose()?;
         let providers = ProviderSelection::from_strings(&spec.runtime.provider_order);
-        let backend = OrtBackend::new(providers.clone());
-        let graph_frames = metadata_frames(spec, CUDA_GRAPH_FRAMES_KEY)?;
-        // Weights uploaded once and shared by every session of the graph.
-        let manifest = cuda_graph::manifest_path(&artifacts.model);
-        let weights = if manifest.is_file() {
-            let manifest: cuda_graph::SharedWeightsManifest = serde_json::from_slice(
-                &fs::read(&manifest).map_err(|e| InfraError::io(Some(manifest.clone()), e))?,
-            )?;
-            Some(backend.upload_initializers(
-                &artifacts.asr_root.join(&manifest.data_file),
-                &manifest.tensors,
-            )?)
-        } else {
-            None
-        };
-        let session = match &weights {
-            Some(weights) => backend.load_session_with_initializers(&artifacts.model, weights)?,
-            None => backend.load_session(&artifacts.model)?,
-        };
-        validate_session(&session)?;
-        let feature_dim = config.frontend_conf.n_mels * config.frontend_conf.lfr_m;
-        let graphs = match &weights {
-            Some(weights)
-                if !graph_frames.is_empty()
-                    && weights.cuda_device().is_some()
-                    && session.provider() == ProviderKind::Cuda
-                    && session
-                        .outputs()
-                        .iter()
-                        .any(|output| output.name == cuda_graph::IDS_OUTPUT) =>
-            {
-                Some(cuda_graph::CudaGraphRunner::load(
-                    &artifacts.model,
-                    weights,
-                    &graph_frames,
-                    feature_dim,
-                    LANGUAGE_AUTO_ID,
-                    WITH_ITN_ID,
-                )?)
-            }
-            _ => None,
-        };
         let vad_providers = metadata_provider_selection(spec, "vad_provider_order")?
             .unwrap_or_else(ProviderSelection::default);
-        let speaker_providers = metadata_provider_selection(spec, "speaker_provider_order")?
-            .unwrap_or_else(|| providers.clone());
+        let speaker_providers =
+            metadata_provider_selection(spec, "speaker_provider_order")?.unwrap_or(providers);
         let vad_max_segment_ms = metadata_seconds(spec, "vad_max_segment_seconds")?
             .map(|seconds| (seconds * 1000.0).round() as usize);
-        let vad = vad::FsmnVad::load(&artifacts.vad_root, &vad_providers, vad_max_segment_ms)?;
+        let vad = vad::FsmnVad::load(&root.join("vad"), &vad_providers, vad_max_segment_ms)?;
         let speaker_batch_size = metadata_usize(
             spec,
             "speaker_batch_size",
@@ -263,52 +238,64 @@ impl SenseVoiceAsrAdapter {
         )?;
         let speaker_io_binding = metadata_bool(spec, "speaker_io_binding", true)?;
         let speaker = speaker::CampPlus::load(
-            &artifacts.speaker_root,
+            &root.join("speaker"),
             &speaker_providers,
             speaker_batch_size,
             speaker_io_binding,
         )?;
         Ok(Self {
-            model_id: spec.id.clone(),
-            artifacts,
-            session,
             config,
             cmvn,
-            tokens,
             vad,
             speaker,
-            graphs,
-            _weights: weights,
         })
     }
 
-    pub fn transcribe(&mut self, audio: &FileRef) -> Result<InferenceOutput> {
-        self.transcribe_with_params(audio, &BTreeMap::new())
+    pub fn frontend(&self) -> &FrontendConfig {
+        &self.config.frontend_conf
+    }
+
+    /// The recognizer input for `samples` (16 kHz mono, one segment).
+    pub fn extract_features(&self, samples: &[f32]) -> Result<SenseVoiceFeatures> {
+        features::extract(samples, &self.config.frontend_conf, self.cmvn.as_ref())
+    }
+
+    /// The length of one LFR frame (one recognizer output frame for CTC).
+    pub fn output_frame_ms(&self) -> u64 {
+        let frontend = &self.config.frontend_conf;
+        frontend.frame_shift as u64 * frontend.lfr_n as u64
+    }
+
+    pub fn vad_provider_report(&self) -> SessionProviderReport {
+        self.vad.provider_report()
+    }
+
+    pub fn speaker_provider_report(&self) -> SessionProviderReport {
+        self.speaker.provider_report()
     }
 
     /// Transcribes a recording as a stream: decoding + FSMN-VAD, features,
-    /// and the ASR/CAM++ runs are three threads joined by short queues, so
-    /// they overlap and memory follows the longest speech segment rather
-    /// than the recording. Only the speaker clustering waits for the end.
-    pub fn transcribe_with_params(
+    /// and the recognizer/CAM++ runs are three threads joined by short
+    /// queues, so they overlap and memory follows the longest speech segment
+    /// rather than the recording. Only the speaker clustering waits for the
+    /// end.
+    pub fn transcribe(
         &mut self,
         audio: &FileRef,
         params: &BTreeMap<String, serde_json::Value>,
+        recognizer: &mut dyn SegmentRecognizer,
     ) -> Result<InferenceOutput> {
         let options = AsrOptions::from_params(params)?;
         let path = local_files::local_path(audio)?;
         let with_speakers = options.speaker_diarization || options.speaker_embedding;
         let Self {
-            session,
             config,
             cmvn,
-            tokens,
             vad,
             speaker,
-            graphs,
-            ..
         } = self;
         let frontend = &config.frontend_conf;
+        let cmvn = cmvn.as_ref();
         let (decoded, chunks, embeddings) = std::thread::scope(|scope| {
             let (segment_tx, segment_rx) = mpsc::sync_channel::<SegmentAudio>(PIPELINE_QUEUE);
             let (prepared_tx, prepared_rx) = mpsc::sync_channel::<PreparedSegment>(PIPELINE_QUEUE);
@@ -332,13 +319,7 @@ impl SenseVoiceAsrAdapter {
                 }
                 Ok(())
             });
-            let mut asr = Asr {
-                session,
-                graphs: graphs.as_mut(),
-                tokens,
-                frontend,
-            };
-            let decoded = decode_segments(&mut asr, speaker, prepared_rx);
+            let decoded = decode_segments(recognizer, speaker, prepared_rx);
             // A failed stage closes its queues, which ends the others.
             let read = reader.join().expect("audio reader thread panicked");
             let prepare = preparer.join().expect("feature thread panicked");
@@ -399,6 +380,105 @@ impl SenseVoiceAsrAdapter {
             speaker_embedding,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SenseVoicePipelineProviderReport {
+    pub asr: SessionProviderReport,
+    pub vad: SessionProviderReport,
+    pub speaker: SessionProviderReport,
+}
+
+impl SenseVoiceAsrAdapter {
+    pub fn load(spec: &ModelSpec) -> Result<Self> {
+        let artifacts = SenseVoiceArtifacts::from_spec(spec)?;
+        let pipeline = SpeechPipeline::load(
+            spec,
+            &artifacts.root,
+            &artifacts.config,
+            Some(&artifacts.cmvn),
+        )?;
+        let tokens: Vec<String> = serde_json::from_slice(
+            &fs::read(&artifacts.tokens)
+                .map_err(|e| InfraError::io(Some(artifacts.tokens.clone()), e))?,
+        )?;
+        if tokens.is_empty() {
+            return Err(InfraError::Adapter(format!(
+                "SenseVoice token list is empty: {}",
+                artifacts.tokens.display()
+            )));
+        }
+        let providers = ProviderSelection::from_strings(&spec.runtime.provider_order);
+        let backend = OrtBackend::new(providers.clone());
+        let graph_frames = metadata_frames(spec, CUDA_GRAPH_FRAMES_KEY)?;
+        // Weights uploaded once and shared by every session of the graph.
+        let manifest = cuda_graph::manifest_path(&artifacts.model);
+        let weights = if manifest.is_file() {
+            let manifest: cuda_graph::SharedWeightsManifest = serde_json::from_slice(
+                &fs::read(&manifest).map_err(|e| InfraError::io(Some(manifest.clone()), e))?,
+            )?;
+            Some(backend.upload_initializers(
+                &artifacts.asr_root.join(&manifest.data_file),
+                &manifest.tensors,
+            )?)
+        } else {
+            None
+        };
+        let session = match &weights {
+            Some(weights) => backend.load_session_with_initializers(&artifacts.model, weights)?,
+            None => backend.load_session(&artifacts.model)?,
+        };
+        validate_session(&session)?;
+        let frontend = pipeline.frontend();
+        let feature_dim = frontend.n_mels * frontend.lfr_m;
+        let graphs = match &weights {
+            Some(weights)
+                if !graph_frames.is_empty()
+                    && weights.cuda_device().is_some()
+                    && session.provider() == ProviderKind::Cuda
+                    && session
+                        .outputs()
+                        .iter()
+                        .any(|output| output.name == cuda_graph::IDS_OUTPUT) =>
+            {
+                Some(cuda_graph::CudaGraphRunner::load(
+                    &artifacts.model,
+                    weights,
+                    &graph_frames,
+                    feature_dim,
+                    LANGUAGE_AUTO_ID,
+                    WITH_ITN_ID,
+                )?)
+            }
+            _ => None,
+        };
+        let asr = SenseVoiceRecognizer {
+            session,
+            graphs,
+            tokens,
+            output_frame_ms: pipeline.output_frame_ms(),
+        };
+        Ok(Self {
+            model_id: spec.id.clone(),
+            artifacts,
+            pipeline,
+            asr,
+            _weights: weights,
+        })
+    }
+
+    pub fn transcribe(&mut self, audio: &FileRef) -> Result<InferenceOutput> {
+        self.transcribe_with_params(audio, &BTreeMap::new())
+    }
+
+    /// Transcribes a recording as a stream (see [`SpeechPipeline::transcribe`]).
+    pub fn transcribe_with_params(
+        &mut self,
+        audio: &FileRef,
+        params: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<InferenceOutput> {
+        self.pipeline.transcribe(audio, params, &mut self.asr)
+    }
 
     pub fn model_id(&self) -> &str {
         &self.model_id
@@ -409,12 +489,13 @@ impl SenseVoiceAsrAdapter {
     }
 
     pub fn provider_report(&self) -> SessionProviderReport {
-        self.session.provider_report()
+        self.asr.session.provider_report()
     }
 
     /// The input lengths (LFR frames) replayed as CUDA graphs.
     pub fn cuda_graph_frames(&self) -> Vec<usize> {
-        self.graphs
+        self.asr
+            .graphs
             .as_ref()
             .map(cuda_graph::CudaGraphRunner::frames)
             .unwrap_or_default()
@@ -422,21 +503,15 @@ impl SenseVoiceAsrAdapter {
 
     pub fn pipeline_provider_report(&self) -> SenseVoicePipelineProviderReport {
         SenseVoicePipelineProviderReport {
-            asr: self.session.provider_report(),
-            vad: self.vad.provider_report(),
-            speaker: self.speaker.provider_report(),
+            asr: self.asr.session.provider_report(),
+            vad: self.pipeline.vad_provider_report(),
+            speaker: self.pipeline.speaker_provider_report(),
         }
     }
 
     #[cfg(test)]
-    fn infer_features(&mut self, features: SenseVoiceFeatures) -> Result<DecodedText> {
-        Asr {
-            session: &mut self.session,
-            graphs: self.graphs.as_mut(),
-            tokens: &self.tokens,
-            frontend: &self.config.frontend_conf,
-        }
-        .infer(features)
+    fn infer_features(&mut self, features: SenseVoiceFeatures) -> Result<RecognizedText> {
+        self.asr.recognize(features)
     }
 }
 
@@ -459,7 +534,7 @@ struct PreparedSegment {
 struct DecodedSegment {
     segment: vad::SpeechSegment,
     /// `None` for a segment too short for one feature frame.
-    text: Option<DecodedText>,
+    text: Option<RecognizedText>,
 }
 
 /// Stage one: decodes `path` and sends each speech segment with its audio
@@ -509,7 +584,7 @@ fn read_segments(
 /// and the chunks' embeddings.
 #[allow(clippy::type_complexity)]
 fn decode_segments(
-    asr: &mut Asr<'_>,
+    asr: &mut dyn SegmentRecognizer,
     speaker: &mut speaker::CampPlus,
     prepared: mpsc::Receiver<PreparedSegment>,
 ) -> Result<(
@@ -530,7 +605,7 @@ fn decode_segments(
         let text = if features.frames == 0 {
             None
         } else {
-            Some(asr.infer(features)?)
+            Some(asr.recognize(features)?)
         };
         decoded.push(DecodedSegment { segment, text });
         pending_chunks.extend(segment_chunks);
@@ -549,29 +624,36 @@ fn decode_segments(
 
 /// The SenseVoice graph: CUDA graph buckets where they fit, the session
 /// otherwise.
-struct Asr<'a> {
-    session: &'a mut OrtSession,
-    graphs: Option<&'a mut cuda_graph::CudaGraphRunner>,
-    tokens: &'a [String],
-    frontend: &'a features::FrontendConfig,
+#[derive(Debug)]
+struct SenseVoiceRecognizer {
+    session: OrtSession,
+    graphs: Option<cuda_graph::CudaGraphRunner>,
+    tokens: Vec<String>,
+    output_frame_ms: u64,
 }
 
-impl Asr<'_> {
-    fn infer(&mut self, features: SenseVoiceFeatures) -> Result<DecodedText> {
-        let output_frame_ms = self.frontend.frame_shift as u64 * self.frontend.lfr_n as u64;
-        if let Some(graphs) = self.graphs.as_deref_mut() {
-            if let Some(ids) = graphs.run(&features)? {
-                return decode_ids(&ids, self.tokens, output_frame_ms);
-            }
-        }
-        let inputs = bind_inputs(self.session, features)?;
+impl SenseVoiceRecognizer {
+    /// The session alone, without the CUDA graphs.
+    fn infer_session(&mut self, features: SenseVoiceFeatures) -> Result<RecognizedText> {
+        let inputs = bind_inputs(&self.session, features)?;
         let outputs = self.session.run_tensors(&inputs).map_err(|error| {
             InfraError::Adapter(format!(
                 "SenseVoice ORT execution failed: {error}; {}",
-                format_session_io(self.session)
+                format_session_io(&self.session)
             ))
         })?;
-        decode_outputs(outputs, self.tokens, output_frame_ms)
+        decode_outputs(outputs, &self.tokens, self.output_frame_ms)
+    }
+}
+
+impl SegmentRecognizer for SenseVoiceRecognizer {
+    fn recognize(&mut self, features: SenseVoiceFeatures) -> Result<RecognizedText> {
+        if let Some(graphs) = self.graphs.as_mut() {
+            if let Some(ids) = graphs.run(&features)? {
+                return decode_ids(&ids, &self.tokens, self.output_frame_ms);
+            }
+        }
+        self.infer_session(features)
     }
 }
 
@@ -772,7 +854,7 @@ fn split_decoded_segment(
     start_ms: u64,
     end_ms: u64,
     speaker: Option<String>,
-    decoded: DecodedText,
+    decoded: RecognizedText,
     granularity_ms: u64,
     include_tokens: bool,
 ) -> Vec<AsrSegment> {
@@ -849,7 +931,7 @@ fn timeline_segment(
     language: Option<String>,
     emotion: Option<String>,
     events: Vec<String>,
-    tokens: &[RelativeTokenTimestamp],
+    tokens: &[TokenTiming],
     include_tokens: bool,
 ) -> AsrSegment {
     AsrSegment {
@@ -875,7 +957,7 @@ fn timeline_segment(
     }
 }
 
-fn render_timestamp_tokens(tokens: &[RelativeTokenTimestamp]) -> String {
+fn render_timestamp_tokens(tokens: &[TokenTiming]) -> String {
     let mut text = String::new();
     for token in tokens {
         if token.starts_word
@@ -889,10 +971,7 @@ fn render_timestamp_tokens(tokens: &[RelativeTokenTimestamp]) -> String {
     text.trim().to_string()
 }
 
-fn is_safe_timeline_boundary(
-    current: &RelativeTokenTimestamp,
-    next: &RelativeTokenTimestamp,
-) -> bool {
+fn is_safe_timeline_boundary(current: &TokenTiming, next: &TokenTiming) -> bool {
     next.starts_word
         || current
             .text
@@ -1054,28 +1133,31 @@ fn bind_inputs(session: &OrtSession, features: SenseVoiceFeatures) -> Result<Vec
         .collect()
 }
 
-#[derive(Debug)]
-struct DecodedText {
-    text: String,
-    language: Option<String>,
-    emotion: Option<String>,
-    events: Vec<String>,
-    tokens: Vec<RelativeTokenTimestamp>,
+/// A speech segment's text, its tags and its tokens' times (relative to the
+/// segment start).
+#[derive(Debug, Clone, Default)]
+pub struct RecognizedText {
+    pub text: String,
+    pub language: Option<String>,
+    pub emotion: Option<String>,
+    pub events: Vec<String>,
+    pub tokens: Vec<TokenTiming>,
 }
 
 #[derive(Debug, Clone)]
-struct RelativeTokenTimestamp {
-    start_ms: u64,
-    end_ms: u64,
-    text: String,
-    starts_word: bool,
+pub struct TokenTiming {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+    /// Starts a word (a space goes before it when rendered).
+    pub starts_word: bool,
 }
 
 fn decode_outputs(
     outputs: Vec<OrtTensorOutput>,
     tokens: &[String],
     output_frame_ms: u64,
-) -> Result<DecodedText> {
+) -> Result<RecognizedText> {
     // The argmax taken in the graph, when it has one.
     if let Some(output) = outputs
         .iter()
@@ -1125,7 +1207,7 @@ fn decode_outputs(
 }
 
 /// Greedy CTC: one token id per output frame, repeats and blanks dropped.
-fn decode_ids(ids: &[i64], tokens: &[String], output_frame_ms: u64) -> Result<DecodedText> {
+fn decode_ids(ids: &[i64], tokens: &[String], output_frame_ms: u64) -> Result<RecognizedText> {
     let mut collapsed = Vec::new();
     let mut previous = usize::MAX;
     for (frame, &id) in ids.iter().enumerate() {
@@ -1158,7 +1240,7 @@ fn decode_token_frames(
     ids: &[(usize, usize)],
     tokens: &[String],
     output_frame_ms: u64,
-) -> Result<DecodedText> {
+) -> Result<RecognizedText> {
     let body = ids.get(4..).unwrap_or(&[]);
     let mut text = String::new();
     let mut timestamps = Vec::new();
@@ -1174,7 +1256,7 @@ fn decode_token_frames(
                 text.push(' ');
             }
             text.push_str(word);
-            timestamps.push(RelativeTokenTimestamp {
+            timestamps.push(TokenTiming {
                 start_ms: frame as u64 * output_frame_ms,
                 end_ms: (frame as u64 + 1) * output_frame_ms,
                 text: word.to_string(),
@@ -1182,7 +1264,7 @@ fn decode_token_frames(
             });
         } else {
             text.push_str(token);
-            timestamps.push(RelativeTokenTimestamp {
+            timestamps.push(TokenTiming {
                 start_ms: frame as u64 * output_frame_ms,
                 end_ms: (frame as u64 + 1) * output_frame_ms,
                 text: token.clone(),
@@ -1208,7 +1290,7 @@ fn decode_token_frames(
         };
         text.push(punctuation);
         if let Some(last) = timestamps.last() {
-            timestamps.push(RelativeTokenTimestamp {
+            timestamps.push(TokenTiming {
                 start_ms: last.start_ms,
                 end_ms: last.end_ms,
                 text: punctuation.to_string(),
@@ -1228,7 +1310,7 @@ fn decode_token_frames(
             .filter(|value| !value.is_empty())
     };
     let event = control(2).filter(|value| !value.eq_ignore_ascii_case("speech"));
-    Ok(DecodedText {
+    Ok(RecognizedText {
         text,
         language: control(0),
         emotion: control(1),

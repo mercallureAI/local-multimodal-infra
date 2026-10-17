@@ -75,6 +75,13 @@ forty-two"), every combination one way to say the word. A word with letters on
 both sides of a digit ("Mon3tr") has no reading to guess: give how it is said
 as other words ("monster", "梦三特").
 
+The recogniser gets the wake words with a reading as `hotwords` (unread ones
+like "Mon3tr" left out: they turned Fun-ASR-Nano's "M3" into "M3tr").
+`fun-asr-nano-onnx` takes them, SenseVoice ignores them. Without them
+Fun-ASR-Nano writes the digits of a name in Chinese ("M三", "M四二"); the
+transcript calls below mind no Chinese numerals, but the chat model reads
+the name as said.
+
 With `wake` on (the default in a group) only an utterance a wake word was
 spoken in (anywhere: "<name>, ..." or "..., <name>?"), or one that starts
 within 5 s of a bare call ("<name>" alone, or after a short "嗯"; not what

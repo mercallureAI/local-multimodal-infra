@@ -15,6 +15,9 @@ pub enum BackendKind {
 pub enum AdapterKind {
     Yolo,
     SenseVoiceAsr,
+    /// Fun-ASR-Nano (SenseVoice encoder + Qwen3-0.6B) in the FunASR
+    /// pipeline of `SenseVoiceAsr`; CUDA only.
+    FunAsrNano,
     IndexTts,
     IndexTts2,
     /// Qwen3-TTS-12Hz Base (voice cloning), streaming.
@@ -38,9 +41,10 @@ pub enum AdapterKind {
 }
 
 impl AdapterKind {
-    pub const ALL: [AdapterKind; 14] = [
+    pub const ALL: [AdapterKind; 15] = [
         AdapterKind::Yolo,
         AdapterKind::SenseVoiceAsr,
+        AdapterKind::FunAsrNano,
         AdapterKind::IndexTts,
         AdapterKind::IndexTts2,
         AdapterKind::Qwen3Tts,
@@ -59,7 +63,7 @@ impl AdapterKind {
     pub fn category(self) -> ModelCategory {
         match self {
             AdapterKind::Yolo | AdapterKind::DepthAnythingV2 => ModelCategory::Detect,
-            AdapterKind::SenseVoiceAsr => ModelCategory::Asr,
+            AdapterKind::SenseVoiceAsr | AdapterKind::FunAsrNano => ModelCategory::Asr,
             AdapterKind::IndexTts | AdapterKind::IndexTts2 | AdapterKind::Qwen3Tts => {
                 ModelCategory::Tts
             }

@@ -104,6 +104,17 @@ built or configured. The control-plane hardware snapshot still reports
 independent of actual ORT EP selection.
 
 
+## Speech recognition (Fun-ASR-Nano)
+
+`fun-asr-nano-onnx` serves `asr.transcribe` through `crates/adapters/asr/fun-asr-nano`. The FunASR pipeline of the SenseVoice crate (streamed audio decoding, FSMN-VAD, FBANK/LFR features, CAM++ speakers, the timeline) is `local_adapter_sensevoice_asr::SpeechPipeline`; a recognizer plugs into it through `SegmentRecognizer` (SenseVoice's own is the CTC graph with its CUDA graph buckets). Fun-ASR-Nano's recognizer runs, per speech segment:
+
+- `asr/audio_encoder.onnx`: SenseVoice's encoder, the adaptor and the CTC decoder, from LFR features (no CMVN). Weight-only int8 with float32 activations, weights uploaded once and shared by fixed-length sessions replayed as CUDA graphs, as for SenseVoice. The CTC head stays float32: for more than one row the CUDA `MatMulNBits` kernel dequantizes its whole weight into a float32 scratch buffer (2 x 118 MB for 512 x 60515), which every bucket's arena would keep.
+- `asr/llm.onnx`: Qwen3-0.6B from the onnxruntime-genai builder (`exclude_embeds`, `exclude_lm_head`; FP16, int8 `MatMulNBits`), with the tied LM head and an argmax at the last position. The prompt is upstream's (`语音转写：`, or the hotword/language variant tokenized at request time), its embeddings looked up on the host (`asr/embed_tokens.f16`) with the first `fake_token_len` (~1/8) adaptor frames in place of the placeholders. The KV cache is a `StaticIoBinding` (past and present shared); prefill binds host inputs, each decode step only the token's embedding and the attention mask, replayed as a CUDA graph. The residual stream runs scaled by 1/8 (embeddings and the o_proj/down_proj weights): Qwen3's layer 2 writes ~1.25e5 at the first token, past FP16, and RMSNorm makes the scale invisible elsewhere. The builder fuses the q/k norms into `GroupQueryAttention`, which only CUDA implements: the adapter refuses other providers.
+
+The CTC greedy text guards the LLM: no CTC text, no segment text; an LLM output that hits the token limit (16 + 12 per second) is replaced by the CTC text. Accuracy, latency and memory against SenseVoice are in [docs/models/speech-recognition.md](models/speech-recognition.md).
+
+Memory (RTX 4090, ORT arena logs): the shared audio weights (399 MB) are allocated twice, because `Tensor::to` copies through ort's identity session, whose arena keeps the staging copy (SenseVoice's 266 MB likewise); the four buckets take ~330 MB of arena; the LLM 587 MB of weights plus the 112 MB KV cache; each CUDA session adds its own cuBLAS/cuDNN handles.
+
 ## Document OCR (Unlimited-OCR)
 
 `unlimited-ocr-onnx` serves `ocr.recognize` (generic task flow with an `image` upload over standard MCP or legacy RPC, and legacy RPC `ocr_recognize`) through `crates/adapters/ocr/unlimited-ocr`. The model is baidu/Unlimited-OCR: the DeepSeek-OCR DeepEncoder (SAM ViT-B + CLIP-L, linear projector) and a 12-layer DeepSeek-V2 MoE decoder (64 routed experts, top-6, 2 shared) whose attention is R-SWA.
