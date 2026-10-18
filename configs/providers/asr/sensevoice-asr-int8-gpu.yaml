@@ -12,21 +12,33 @@ task_kinds:
 adapter: sense_voice_asr
 backend: ort
 artifacts:
-  # Local export (path omitted: <model_dir>/sensevoice-small-int8-gpu-onnx,
-  # or <model_dir>/sensevoice-small-fp16-onnx where only that exists) of
-  # FunAudioLLM/SenseVoiceSmall at revision
-  # 3847d57b6bdf2dd8875cb1508d2af43d80a16bf7 (FunASR model license):
-  #   python -m scripts.local.sensevoice_cuda_export export \
-  #     --base-dir <model_dir>/sensevoice-small-onnx \
-  #     --output-dir <model_dir>/sensevoice-small-int8-gpu-onnx
-  # or, from an earlier float16 export (needs only onnx + onnxruntime):
-  #   python -m scripts.local.sensevoice_cuda_export from-fp16 \
-  #     --model-dir <model_dir>/sensevoice-small-fp16-onnx
-  # The directory is sensevoice-small-onnx's (asr/am.mvn, config.yaml,
-  # tokens.json, vad/, speaker/) with asr/model_gpu_int8.onnx, its weights
-  # (.onnx.data, ~270 MB) and their byte ranges (model_gpu_int8.shared.json)
-  # in place of asr/model_quant.onnx.
-  - type: local
+  # The published package (path omitted: <model_dir>/sensevoice-small-int8-gpu-onnx):
+  # sensevoice-small-onnx's files (asr/am.mvn, config.yaml, tokens.json,
+  # vad/, speaker/) with asr/model_gpu_int8.onnx, its weights (.onnx.data,
+  # ~270 MB) and their byte ranges (model_gpu_int8.shared.json) in place of
+  # asr/model_quant.onnx. Built from FunAudioLLM/SenseVoiceSmall at revision
+  # 3847d57b6bdf2dd8875cb1508d2af43d80a16bf7 (FunASR model license) by
+  # `python -m scripts.local.sensevoice_cuda_export export` (or `from-fp16`
+  # from an earlier float16 export).
+  - type: hugging_face
+    repo_id: ModaLeap/sensevoice-small-onnx
+    revision: f9ce3be8f1d08eef33a3d1480c3c584599fefbbe
+    files:
+      - asr/model_gpu_int8.onnx
+      - asr/model_gpu_int8.onnx.data
+      - asr/model_gpu_int8.shared.json
+      - asr/am.mvn
+      - asr/config.yaml
+      - asr/tokens.json
+      - vad/model_quant.onnx
+      - vad/am.mvn
+      - vad/config.yaml
+      - speaker/campplus_cn_en_common_200k.onnx
+      - manifest.json
+      - config.json
+      - LICENSE
+      - LICENSES/Apache-2.0.txt
+      - NOTICE
 runtime:
   provider_order: [cuda, cpu]
   max_concurrency: 1
@@ -40,7 +52,8 @@ load_policy:
   pin: false
 metadata:
   # Used where it is named (voice-cascade's asr_model), never picked for a
-  # task naming no model: most installs lack the local export.
+  # task naming no model: that stays sensevoice-small-onnx, which also runs
+  # on the CPU.
   auto_select: false
   license: FunASR Model License
   runtime: onnxruntime

@@ -1,0 +1,57 @@
+id: hy-mt2-1.8b-int4-onnx
+# Tencent Hunyuan's translation model (33 languages, terminology and
+# background in the prompt), on the qwen3_chat adapter (the same GQA decoder
+# layout). Prompt it with the model card's templates: one user turn, no
+# system prompt.
+name: Hy-MT2-1.8B INT4 ONNX
+enabled: true
+task_kinds:
+  - chat.complete
+adapter: qwen3_chat
+backend: ort
+artifacts:
+  # The published package (path omitted: <model_dir>/hy-mt2-1.8b-int4-onnx),
+  # built from tencent/Hy-MT2-1.8B at revision
+  # 9a341cd1b679d3efd23b46e847b01745a71ed792 by
+  #   python -m onnxruntime_genai.models.builder -i <src> \
+  #     -o <dir> -p int4 -e cuda --extra_options int4_algo_config=rtn_last prune_lm_head=true
+  # (the builder reads rope_theta, which Hy-MT2 keeps under rope_parameters:
+  # set it on the config before building), with the graph renamed
+  # model_int4.onnx (genai_config.json names it).
+  - type: hugging_face
+    repo_id: ModaLeap/hy-mt2-1.8b-onnx
+    revision: a1d884fcf0f5ec65f4043bb353de76f12c597dca
+    files:
+      - model_int4.onnx
+      - model_int4.onnx.data
+      - genai_config.json
+      - tokenizer.json
+      - tokenizer_config.json
+      - chat_template.jinja
+      - manifest.json
+      - config.json
+      - LICENSE
+runtime:
+  provider_order: [cuda, cpu]
+  max_concurrency: 1
+  idle_ttl_sec: 600
+resources:
+  min_ram_mb: 2048
+  min_vram_mb: 2560
+load_policy:
+  lazy: true
+  evictable: true
+  pin: false
+metadata:
+  # Used where it is named: chat requests naming no model keep the general
+  # chat model.
+  auto_select: false
+  license: Apache-2.0
+  runtime: onnxruntime
+  model_family: hunyuan
+  task: translation
+  precision: int4
+  source: tencent/Hy-MT2-1.8B
+  huggingface_revision: 9a341cd1b679d3efd23b46e847b01745a71ed792
+  # KV cache capacity in tokens, allocated once on load (~64 KB/token).
+  max_context: 8192

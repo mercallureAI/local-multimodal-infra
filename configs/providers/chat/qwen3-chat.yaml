@@ -6,13 +6,25 @@ task_kinds:
 adapter: qwen3_chat
 backend: ort
 artifacts:
-  # Local export (path omitted: <model_dir>/qwen3-4b-instruct-2507-int4-onnx):
-  #   hf download Qwen/Qwen3-4B-Instruct-2507 --revision cdbee75f17c01a7cc42f958dc650907174af0554 --local-dir <src>
+  # The published package (path omitted: <model_dir>/qwen3-4b-instruct-2507-int4-onnx),
+  # built from Qwen/Qwen3-4B-Instruct-2507 at revision
+  # cdbee75f17c01a7cc42f958dc650907174af0554 by
   #   python -m onnxruntime_genai.models.builder -i <src> \
   #     -o <dir> -p int4 -e cuda --extra_options int4_algo_config=rtn_last prune_lm_head=true
-  # The directory holds model.onnx(.data), genai_config.json, tokenizer.json
-  # and chat_template.jinja.
-  - type: local
+  # with the graph renamed model_int4.onnx (genai_config.json names it).
+  - type: hugging_face
+    repo_id: ModaLeap/qwen3-4b-instruct-2507-onnx
+    revision: 9edf4d82358af91d00e028f891f8a23ce738d997
+    files:
+      - model_int4.onnx
+      - model_int4.onnx.data
+      - genai_config.json
+      - tokenizer.json
+      - tokenizer_config.json
+      - chat_template.jinja
+      - manifest.json
+      - config.json
+      - LICENSE
 runtime:
   provider_order: [cuda, cpu]
   max_concurrency: 1

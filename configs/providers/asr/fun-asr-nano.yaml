@@ -12,19 +12,36 @@ task_kinds:
 adapter: fun_asr_nano
 backend: ort
 artifacts:
-  # Local export (path omitted: <model_dir>/fun-asr-nano-onnx) of the
-  # ModelScope snapshot of FunAudioLLM/Fun-ASR-Nano-2512 (model.pt SHA-256
-  # 81fec8616083c69377f3ceef36aba3655660ee0ca69a5d4a1e9810cd340ca499, the
-  # copy with the trained CTC decoder; Apache-2.0):
-  #   python -m scripts.local.fun_asr_nano_export export \
-  #     --source-model-dir <model_dir>/Fun-ASR-Nano-2512 \
-  #     --base-dir <model_dir>/sensevoice-small-onnx \
-  #     --output-dir <model_dir>/fun-asr-nano-onnx \
-  #     --builder-python <python with onnxruntime-genai>
+  # The published package (path omitted: <model_dir>/fun-asr-nano-onnx).
   # asr/: audio_encoder.onnx (+ .data, .shared.json), llm.onnx (+ .data),
   # embed_tokens.f16, tokenizer.json, ctc_tokens.json, config.yaml,
-  # manifest.json; vad/ and speaker/ come from sensevoice-small-onnx.
-  - type: local
+  # manifest.json; vad/ and speaker/ as in sensevoice-small-onnx. Built from
+  # the ModelScope snapshot of FunAudioLLM/Fun-ASR-Nano-2512 (model.pt
+  # SHA-256 81fec8616083c69377f3ceef36aba3655660ee0ca69a5d4a1e9810cd340ca499,
+  # the copy with the trained CTC decoder; Apache-2.0) by
+  # `python -m scripts.local.fun_asr_nano_export export`.
+  - type: hugging_face
+    repo_id: ModaLeap/fun-asr-nano-onnx
+    revision: 563e2395ddd8d963343f2f0ac4c256245fc9957c
+    files:
+      - asr/audio_encoder.onnx
+      - asr/audio_encoder.onnx.data
+      - asr/audio_encoder.shared.json
+      - asr/llm.onnx
+      - asr/llm.onnx.data
+      - asr/embed_tokens.f16
+      - asr/tokenizer.json
+      - asr/ctc_tokens.json
+      - asr/config.yaml
+      - asr/manifest.json
+      - vad/model_quant.onnx
+      - vad/am.mvn
+      - vad/config.yaml
+      - speaker/campplus_cn_en_common_200k.onnx
+      - manifest.json
+      - config.json
+      - LICENSE
+      - NOTICE
 runtime:
   provider_order: [cuda, cpu]
   max_concurrency: 1
@@ -38,7 +55,7 @@ load_policy:
   pin: false
 metadata:
   # Used where it is named (voice-cascade's asr_model), never picked for a
-  # task naming no model: most installs lack the local export.
+  # task naming no model: it needs CUDA.
   auto_select: false
   license: Apache-2.0
   runtime: onnxruntime

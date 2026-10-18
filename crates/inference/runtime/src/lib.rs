@@ -798,6 +798,7 @@ fn validated_runtime_providers_for_model(model_id: &str) -> Option<&'static [&'s
         "multilingual-e5-small-onnx" => Some(&["cuda", "cpu"]),
         "mmarco-minilm-l12-onnx" => Some(&["cuda", "cpu"]),
         "qwen3-4b-instruct-2507-int4-onnx" => Some(&["cuda", "cpu"]),
+        "hy-mt2-1.8b-int4-onnx" => Some(&["cuda", "cpu"]),
         // Two small dynamic-shape sessions (detection, recognition).
         "ppocrv5-mobile-onnx" => Some(&["cuda", "cpu"]),
         // One fixed-size ViT-S session.
