@@ -20,7 +20,7 @@ artifacts:
   # model_int4.onnx (genai_config.json names it).
   - type: hugging_face
     repo_id: ModaLeap/hy-mt2-1.8b-onnx
-    revision: a1d884fcf0f5ec65f4043bb353de76f12c597dca
+    revision: 92e654105c928c8b602a3c38e05575f4eab7c8c3
     files:
       - model_int4.onnx
       - model_int4.onnx.data
