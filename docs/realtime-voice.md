@@ -112,8 +112,8 @@ the bot's name in the transcript is what calls it.
 The chat, ASR and TTS models are named by the `voice-cascade` model
 (`configs/providers/realtime/voice-cascade.yaml`, whose artifact is the VAD model) and
 must be enabled (`tts_model` defaults to `qwen3-tts-0.6b-onnx`, a local
-export; `asr_model` to `sensevoice-small-int8-gpu-onnx`, a local GPU int8 export of
-SenseVoiceSmall replayed as CUDA graphs, ~15x faster on CUDA than the downloadable int8
+export; `asr_model` to `sensevoice-small-int8-gpu-onnx`, a GPU int8 build of
+SenseVoiceSmall replayed as CUDA graphs (downloaded from ModaLeap), ~15x faster on CUDA than the downloadable int8
 `sensevoice-small-onnx`; a session whose `asr_model` fails to load when it
 starts falls back to `asr_fallback_model`, `sensevoice-small-onnx`). With IndexTTS-2.5 the bot speaks with a fixed emotion,
 `tts_emotion` (default `calm`; `none` keeps the reference voice's own) at

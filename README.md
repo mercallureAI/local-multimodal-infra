@@ -21,8 +21,8 @@
 | 模型 | 说明 | 精度 | 获取 | 硬件 |
 | --- | --- | --- | --- | --- |
 | `sensevoice-small-onnx` | SenseVoiceSmall + FSMN-VAD + CAM++：文本、时间轴、语言、情绪、发言人 | INT8 | 下载 | CPU / GPU |
-| `sensevoice-small-int8-gpu-onnx` | 同上，全程在 GPU 上 + CUDA graph，1.5 秒语音约 16 ms；实时语音的默认 ASR | INT8 权重 | 导出 | GPU |
-| `fun-asr-nano-onnx` | Fun-ASR-Nano（SenseVoice 编码器 + Qwen3-0.6B）+ 同一管线：比 SenseVoice 更准，支持热词；1.5 秒语音约 30–45 ms | INT8 权重 + FP16 | 导出 | GPU |
+| `sensevoice-small-int8-gpu-onnx` | 同上，全程在 GPU 上 + CUDA graph，1.5 秒语音约 16 ms；实时语音的默认 ASR | INT8 权重 | 下载 | GPU |
+| `fun-asr-nano-onnx` | Fun-ASR-Nano（SenseVoice 编码器 + Qwen3-0.6B）+ 同一管线：比 SenseVoice 更准，支持热词；1.5 秒语音约 30–45 ms | INT8 权重 + FP16 | 下载 | GPU |
 
 ### 语音合成 · [文档](docs/models/speech-synthesis.md)
 
@@ -36,7 +36,8 @@
 
 | 模型 | 说明 | 精度 | 获取 | 硬件 |
 | --- | --- | --- | --- | --- |
-| `qwen3-4b-instruct-2507-int4-onnx` | Qwen3-4B，流式、工具调用、KV 前缀复用 | INT4 | 导出 | GPU |
+| `qwen3-4b-instruct-2507-int4-onnx` | Qwen3-4B，流式、工具调用、KV 前缀复用 | INT4 | 下载 | GPU |
+| `hy-mt2-1.8b-int4-onnx` | 腾讯混元 Hy-MT2-1.8B 翻译模型：33 种语言互译，支持术语与背景信息，KV 前缀复用 | INT4 | 下载 | GPU |
 
 ### 文本向量与重排 · [文档](docs/models/embedding-rerank.md)
 
@@ -151,6 +152,15 @@ curl --fail-with-body http://127.0.0.1:17890/rpc/admin \
 ```
 
 `LOCAL_MCP_INFER_TOKENS` 为空时去掉 `headers`。旧版 JSON-RPC 的 `/rpc/infer` 另保留 `asr_transcribe`、`tts_synthesize` 等直接方法。全部接口、任务类型与大结果的 URL 返回见 [API 文档](docs/api.md)。
+
+### 作为 Rust 库
+
+适配器 crate 也可以不经过服务、直接被应用（例如桌面客户端）以路径或 git 依赖引用：
+
+- `local-adapter-sensevoice-asr`：`recognize_samples` / `recognize_samples_with_language` 识别一段 16 kHz 单声道音频（不经 VAD 流水线；语言 zh、en、yue、ja、ko 作为 SenseVoice 的语言提示，CUDA graph 同样生效）；`AudioStream`、`Resampler` 负责解码与重采样。
+- `local-adapter-fun-asr-nano`：`recognize_samples_with_params`，可带 `hotwords`、`language`。
+- `local-adapter-qwen3-chat`：`complete` 复用上一次请求的 KV 前缀；`complete_after` 把给定文本预填为助手回复的开头再续写（例如重译时保留已稳定的译文）。
+- `local-adapter-silero-vad`：逐窗语音概率与 VAD 迭代器。
 
 ## GPU 与 ONNX Runtime
 

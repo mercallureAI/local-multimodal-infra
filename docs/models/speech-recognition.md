@@ -3,8 +3,8 @@
 | Model | Get it | Runs on |
 | --- | --- | --- |
 | `sensevoice-small-onnx` | download | CPU or CUDA |
-| `sensevoice-small-int8-gpu-onnx` | local export | CUDA (CPU works, slowly) |
-| `fun-asr-nano-onnx` | local export | CUDA only |
+| `sensevoice-small-int8-gpu-onnx` | download ([ModaLeap/sensevoice-small-onnx](https://huggingface.co/ModaLeap/sensevoice-small-onnx)) | CUDA (CPU works, slowly) |
+| `fun-asr-nano-onnx` | download ([ModaLeap/fun-asr-nano-onnx](https://huggingface.co/ModaLeap/fun-asr-nano-onnx)) | CUDA only |
 
 All are the same pipeline: FSMN-VAD cuts speech segments (at most 20 s,
 cut at the weakest speech), a recognizer transcribes them, and CAM++
@@ -46,9 +46,16 @@ the weights (~0.6 GB for the four). 1.5 s of audio: ~9 ms of SenseVoice, ~16 ms
 in all; 6 s: ~40 ms. The realtime voice cascade's default ASR
 ([spec](../../configs/providers/asr/sensevoice-asr-int8-gpu.yaml)).
 
-Export (from `FunAudioLLM/SenseVoiceSmall` at
-`3847d57b6bdf2dd8875cb1508d2af43d80a16bf7`, FunASR model license; download
-`sensevoice-small-onnx` first, the rest of the directory comes from it):
+Download it with `download_model` (`sensevoice-small-int8-gpu-onnx`): the
+package [ModaLeap/sensevoice-small-onnx](https://huggingface.co/ModaLeap/sensevoice-small-onnx)
+has the whole directory (FunASR model license for SenseVoice; FSMN-VAD and
+CAM++ Apache-2.0). Applications that link the adapter can pass the spoken
+language (`recognize_samples_with_language`: zh, en, yue, ja, ko) as
+SenseVoice's language prompt instead of detecting it.
+
+It was built from `FunAudioLLM/SenseVoiceSmall` at
+`3847d57b6bdf2dd8875cb1508d2af43d80a16bf7` (the rest of the directory is
+`sensevoice-small-onnx`'s):
 
 ```bash
 python -m scripts.local.sensevoice_cuda_export export \
@@ -96,9 +103,12 @@ switched a sentence to English. `hotwords: ["Tesla"]` turned Fun-ASR-Nano's
 segment costs ~8 ms of audio graph (CUDA graph), ~10 ms of LLM prefill and
 ~2 ms per generated token (the decode step replays as a CUDA graph).
 
-Export (the ModelScope snapshot: its `model.pt`, SHA-256 `81fec861...`, has
-the trained CTC decoder the Hugging Face copy lacks; download
-`sensevoice-small-onnx` first for `vad/` and `speaker/`):
+Download it with `download_model` (`fun-asr-nano-onnx`): the package
+[ModaLeap/fun-asr-nano-onnx](https://huggingface.co/ModaLeap/fun-asr-nano-onnx)
+has the whole directory (Apache-2.0). It was built from the ModelScope
+snapshot (its `model.pt`, SHA-256 `81fec861...`, has the trained CTC decoder
+the Hugging Face copy lacks; `vad/` and `speaker/` are
+`sensevoice-small-onnx`'s):
 
 ```bash
 python -m scripts.local.fun_asr_nano_export export \

@@ -25,8 +25,8 @@ package, export it locally from the source model as its doc shows.
 | Model | What | Precision | Get it | Hardware |
 | --- | --- | --- | --- | --- |
 | `sensevoice-small-onnx` | SenseVoiceSmall + FSMN-VAD + CAM++: text, timeline, language, emotion, speakers | INT8 | download | CPU / GPU |
-| `sensevoice-small-int8-gpu-onnx` | the same, all on the GPU with CUDA graphs, ~16 ms for 1.5 s of speech; the realtime voice's default ASR | INT8 weights | export | GPU |
-| `fun-asr-nano-onnx` | Fun-ASR-Nano (SenseVoice encoder + Qwen3-0.6B) in the same pipeline: more accurate than SenseVoice, takes hotwords; ~30-45 ms for 1.5 s of speech | INT8 weights + FP16 | export | GPU |
+| `sensevoice-small-int8-gpu-onnx` | the same, all on the GPU with CUDA graphs, ~16 ms for 1.5 s of speech; the realtime voice's default ASR | INT8 weights | download | GPU |
+| `fun-asr-nano-onnx` | Fun-ASR-Nano (SenseVoice encoder + Qwen3-0.6B) in the same pipeline: more accurate than SenseVoice, takes hotwords; ~30-45 ms for 1.5 s of speech | INT8 weights + FP16 | download | GPU |
 
 ### Speech synthesis · [docs](docs/models/speech-synthesis.md)
 
@@ -40,7 +40,8 @@ package, export it locally from the source model as its doc shows.
 
 | Model | What | Precision | Get it | Hardware |
 | --- | --- | --- | --- | --- |
-| `qwen3-4b-instruct-2507-int4-onnx` | Qwen3-4B, streaming, tool calls, KV prefix reuse | INT4 | export | GPU |
+| `qwen3-4b-instruct-2507-int4-onnx` | Qwen3-4B, streaming, tool calls, KV prefix reuse | INT4 | download | GPU |
+| `hy-mt2-1.8b-int4-onnx` | Tencent Hunyuan's Hy-MT2-1.8B translation model: 33 languages, terminology and background in the prompt, KV prefix reuse | INT4 | download | GPU |
 
 ### Embedding and reranking · [docs](docs/models/embedding-rerank.md)
 
@@ -188,6 +189,24 @@ Drop `headers` when `LOCAL_MCP_INFER_TOKENS` is empty. Legacy JSON-RPC
 `/rpc/infer` also keeps direct methods such as `asr_transcribe` and
 `tts_synthesize`. Every endpoint, the task kinds, and URL results for large
 outputs: [API](docs/api.md).
+
+### As a Rust library
+
+The adapter crates can also be used directly, without the service, by an
+application (a desktop client, say) as path or git dependencies:
+
+- `local-adapter-sensevoice-asr`: `recognize_samples` /
+  `recognize_samples_with_language` transcribe one 16 kHz mono segment
+  (no VAD pipeline; zh, en, yue, ja or ko becomes SenseVoice's language
+  prompt, CUDA graphs included); `AudioStream` and `Resampler` decode and
+  resample.
+- `local-adapter-fun-asr-nano`: `recognize_samples_with_params`, with
+  `hotwords` and `language`.
+- `local-adapter-qwen3-chat`: `complete` reuses the KV prefix of the previous
+  request; `complete_after` prefills a given start of the assistant's reply
+  and continues it (to keep a re-translation's stable part, for example).
+- `local-adapter-silero-vad`: per-window speech probability and the VAD
+  iterator.
 
 ## GPU and ONNX Runtime
 

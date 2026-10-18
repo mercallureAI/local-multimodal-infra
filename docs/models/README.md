@@ -43,6 +43,12 @@ Each spec's `artifacts` say where its files come from:
   checkpoint with the command in the model's doc (and in the spec's comments)
   into `workdir/models/<model id>/`. Nothing needs downloading afterwards.
 
+Packages this project exports are published under
+[ModaLeap](https://huggingface.co/ModaLeap) on Hugging Face, one repository
+per model with a model card, the license, `manifest.json` (sources, per-file
+licenses and SHA-256) and `config.json` (the Hub counts downloads by it).
+Repository names leave out the quantization; the file names carry it.
+
 Files always land in `<model_dir>/<model id>/` (`workdir/models` by default).
 
 ## Spec fields
