@@ -802,3 +802,16 @@ fn real_model_stage_timing_if_env_set() {
         );
     }
 }
+
+#[test]
+fn language_names_map_to_prompt_ids() {
+    assert_eq!(language_id(None).unwrap(), LANGUAGE_AUTO_ID);
+    assert_eq!(language_id(Some(" ")).unwrap(), LANGUAGE_AUTO_ID);
+    assert_eq!(language_id(Some("auto")).unwrap(), LANGUAGE_AUTO_ID);
+    assert_eq!(language_id(Some("zh")).unwrap(), 3);
+    assert_eq!(language_id(Some("EN")).unwrap(), 4);
+    assert_eq!(language_id(Some("yue")).unwrap(), 7);
+    assert_eq!(language_id(Some("ja")).unwrap(), 11);
+    assert_eq!(language_id(Some("ko")).unwrap(), 12);
+    assert!(language_id(Some("fr")).is_err());
+}

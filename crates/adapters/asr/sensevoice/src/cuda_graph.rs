@@ -126,7 +126,11 @@ impl CudaGraphRunner {
 
     /// The CTC ids of `features` (valid frames only), from the smallest
     /// bucket that holds them; `None` when they exceed every bucket.
-    pub fn run(&mut self, features: &SenseVoiceFeatures) -> Result<Option<Vec<i64>>> {
+    pub fn run(
+        &mut self,
+        features: &SenseVoiceFeatures,
+        language: i32,
+    ) -> Result<Option<Vec<i64>>> {
         if features.dim != self.dim {
             return Err(InfraError::Adapter(format!(
                 "SenseVoice features have dim {}, the CUDA graphs {}",
@@ -153,6 +157,7 @@ impl CudaGraphRunner {
             "speech_lengths",
             &OrtTensorData::I32(vec![features.frames as i32]),
         )?;
+        binding.write("language", &OrtTensorData::I32(vec![language]))?;
         session.run_static_fixed(binding, Some(GRAPH_ID))?;
         let OrtTensorData::I32(length) = binding.read("encoder_out_lens")?.data else {
             return Err(InfraError::Adapter(

@@ -25,6 +25,7 @@ pub struct AudioStream {
     interleaved: Vec<f32>,
     mono: Vec<f32>,
     finished: bool,
+    duration_ms: Option<u64>,
 }
 
 impl std::fmt::Debug for AudioStream {
@@ -67,6 +68,9 @@ impl AudioStream {
             .ok_or_else(|| {
                 InfraError::BadRequest(format!("{} has no audio codec parameters", path.display()))
             })?;
+        let duration_ms = track.num_frames.zip(track.time_base).map(|(frames, base)| {
+            (frames as u128 * base.numer.get() as u128 * 1000 / base.denom.get() as u128) as u64
+        });
         let decoder = symphonia::default::get_codecs()
             .make_audio_decoder(params, &AudioDecoderOptions::default())
             .map_err(unsupported)?;
@@ -80,7 +84,13 @@ impl AudioStream {
             interleaved: Vec::new(),
             mono: Vec::new(),
             finished: false,
+            duration_ms,
         })
+    }
+
+    /// The audio track's length as the container states it, if it does.
+    pub fn duration_ms(&self) -> Option<u64> {
+        self.duration_ms
     }
 
     /// Appends the next decoded stretch (one or more packets, 16 kHz mono)

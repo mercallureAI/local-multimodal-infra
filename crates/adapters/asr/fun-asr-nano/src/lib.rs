@@ -296,9 +296,28 @@ impl FunAsrNanoAdapter {
     /// One speech segment (16 kHz mono samples, no VAD) with the default
     /// prompt: its text (empty when the CTC guard hears no speech).
     pub fn recognize_samples(&mut self, samples: &[f32]) -> Result<RecognizedText> {
+        self.recognize_samples_with_params(samples, &BTreeMap::new())
+    }
+
+    /// As [`Self::recognize_samples`], with the prompt parameters of
+    /// [`Self::transcribe_with_params`] (`hotwords`, `language`, `itn`).
+    pub fn recognize_samples_with_params(
+        &mut self,
+        samples: &[f32],
+        params: &BTreeMap<String, Value>,
+    ) -> Result<RecognizedText> {
+        let prefix = self
+            .recognizer
+            .prompt_prefix(&PromptOptions::from_params(params)?)?;
+        self.check_prompt_room(prefix.len())?;
         let features = self.pipeline.extract_features(samples)?;
+        if features.frames == 0 {
+            return Ok(RecognizedText::default());
+        }
+        self.recognizer.prefix = prefix;
+        let recognized = self.recognizer.recognize(features);
         self.recognizer.prefix = self.recognizer.prompt.prefix_ids.clone();
-        Ok(self.recognizer.recognize(features)?.unwrap_or_default())
+        Ok(recognized?.unwrap_or_default())
     }
 
     /// Fails unless a prompt of `prefix` tokens before the audio leaves room

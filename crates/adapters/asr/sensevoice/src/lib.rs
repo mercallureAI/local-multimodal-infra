@@ -14,7 +14,7 @@ mod features;
 mod speaker;
 mod vad;
 
-pub use audio::read_audio_mono_16k;
+pub use audio::{read_audio_mono_16k, AudioStream, Resampler, TARGET_SAMPLE_RATE};
 use features::{Cmvn, SenseVoiceConfigFile};
 pub use features::{FrontendConfig, SenseVoiceFeatures};
 use local_backend_ort::{
@@ -43,6 +43,15 @@ const CMVN_FILE: &str = "am.mvn";
 const TOKENS_FILE: &str = "tokens.json";
 const BLANK_ID: usize = 0;
 const LANGUAGE_AUTO_ID: i32 = 0;
+/// SenseVoice's language prompt ids (FunASR's `lid_dict`).
+const LANGUAGE_IDS: [(&str, i32); 6] = [
+    ("auto", LANGUAGE_AUTO_ID),
+    ("zh", 3),
+    ("en", 4),
+    ("yue", 7),
+    ("ja", 11),
+    ("ko", 12),
+];
 const WITH_ITN_ID: i32 = 14;
 const DEFAULT_SPEAKER_BATCH_SIZE: usize = 32;
 const MAX_SPEAKER_BATCH_SIZE: usize = 256;
@@ -470,6 +479,7 @@ impl SenseVoiceAsrAdapter {
             graphs,
             tokens,
             output_frame_ms: pipeline.output_frame_ms(),
+            language: LANGUAGE_AUTO_ID,
         };
         Ok(Self {
             model_id: spec.id.clone(),
@@ -491,6 +501,35 @@ impl SenseVoiceAsrAdapter {
         params: &BTreeMap<String, serde_json::Value>,
     ) -> Result<InferenceOutput> {
         self.pipeline.transcribe(audio, params, &mut self.asr)
+    }
+
+    /// One speech segment (16 kHz mono samples, no VAD): its text, tags and
+    /// token times (relative to the segment start); empty for audio too
+    /// short for one feature frame.
+    pub fn recognize_samples(&mut self, samples: &[f32]) -> Result<RecognizedText> {
+        let features = self.pipeline.extract_features(samples)?;
+        if features.frames == 0 {
+            return Ok(RecognizedText::default());
+        }
+        Ok(self.asr.recognize(features)?.unwrap_or_default())
+    }
+
+    /// [`Self::recognize_samples`] told the spoken language (`zh`, `en`,
+    /// `yue`, `ja`, `ko`; `None` or `auto` detects it).
+    pub fn recognize_samples_with_language(
+        &mut self,
+        samples: &[f32],
+        language: Option<&str>,
+    ) -> Result<RecognizedText> {
+        let id = language_id(language)?;
+        let features = self.pipeline.extract_features(samples)?;
+        if features.frames == 0 {
+            return Ok(RecognizedText::default());
+        }
+        self.asr.language = id;
+        let recognized = self.asr.recognize(features);
+        self.asr.language = LANGUAGE_AUTO_ID;
+        Ok(recognized?.unwrap_or_default())
     }
 
     pub fn model_id(&self) -> &str {
@@ -646,12 +685,14 @@ struct SenseVoiceRecognizer {
     graphs: Option<cuda_graph::CudaGraphRunner>,
     tokens: Vec<String>,
     output_frame_ms: u64,
+    /// The language prompt id of the next segments.
+    language: i32,
 }
 
 impl SenseVoiceRecognizer {
     /// The session alone, without the CUDA graphs.
     fn infer_session(&mut self, features: SenseVoiceFeatures) -> Result<RecognizedText> {
-        let inputs = bind_inputs(&self.session, features)?;
+        let inputs = bind_inputs(&self.session, features, self.language)?;
         let outputs = self.session.run_tensors(&inputs).map_err(|error| {
             InfraError::Adapter(format!(
                 "SenseVoice ORT execution failed: {error}; {}",
@@ -665,7 +706,7 @@ impl SenseVoiceRecognizer {
 impl SegmentRecognizer for SenseVoiceRecognizer {
     fn recognize(&mut self, features: SenseVoiceFeatures) -> Result<Option<RecognizedText>> {
         if let Some(graphs) = self.graphs.as_mut() {
-            if let Some(ids) = graphs.run(&features)? {
+            if let Some(ids) = graphs.run(&features, self.language)? {
                 return decode_ids(&ids, &self.tokens, self.output_frame_ms).map(Some);
             }
         }
@@ -1143,7 +1184,29 @@ fn validate_session(session: &OrtSession) -> Result<()> {
     Ok(())
 }
 
-fn bind_inputs(session: &OrtSession, features: SenseVoiceFeatures) -> Result<Vec<OrtTensorInput>> {
+fn language_id(language: Option<&str>) -> Result<i32> {
+    let Some(language) = language
+        .map(str::trim)
+        .filter(|language| !language.is_empty())
+    else {
+        return Ok(LANGUAGE_AUTO_ID);
+    };
+    LANGUAGE_IDS
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(language))
+        .map(|&(_, id)| id)
+        .ok_or_else(|| {
+            InfraError::Adapter(format!(
+                "SenseVoice language must be auto, zh, en, yue, ja or ko, got {language:?}"
+            ))
+        })
+}
+
+fn bind_inputs(
+    session: &OrtSession,
+    features: SenseVoiceFeatures,
+    language: i32,
+) -> Result<Vec<OrtTensorInput>> {
     let mut unrecognized_i32 = 0;
     session
         .inputs()
@@ -1159,11 +1222,11 @@ fn bind_inputs(session: &OrtSession, features: SenseVoiceFeatures) -> Result<Vec
                 let value = if lower.contains("length") || lower.contains("len") {
                     features.frames as i32
                 } else if lower.contains("language") || lower.contains("lid") {
-                    LANGUAGE_AUTO_ID
+                    language
                 } else if lower.contains("textnorm") || lower.contains("itn") {
                     WITH_ITN_ID
                 } else {
-                    let fallback = [features.frames as i32, LANGUAGE_AUTO_ID, WITH_ITN_ID];
+                    let fallback = [features.frames as i32, language, WITH_ITN_ID];
                     let value = fallback.get(unrecognized_i32).copied().ok_or_else(|| {
                         InfraError::Adapter(format!(
                             "unrecognized SenseVoice input `{}`",

@@ -332,13 +332,30 @@ impl Qwen3ChatAdapter {
         options: &ChatOptions,
         sink: &mut dyn FnMut(InferenceEvent) -> bool,
     ) -> Result<InferenceOutput> {
+        self.complete_after(messages, tools, "", options, sink)
+    }
+
+    /// [`Self::complete`] with the assistant turn already begun: `prefix` is
+    /// prefilled as the start of the reply (forced, not sampled) and the
+    /// model continues it. Deltas and the returned content hold only the
+    /// continuation. A re-translation that keeps an earlier draft's stable
+    /// part passes that part here.
+    pub fn complete_after(
+        &mut self,
+        messages: &[ChatMessage],
+        tools: &[Json],
+        prefix: &str,
+        options: &ChatOptions,
+        sink: &mut dyn FnMut(InferenceEvent) -> bool,
+    ) -> Result<InferenceOutput> {
         if messages.is_empty() {
             return Err(InfraError::BadRequest(
                 "chat.complete requires at least one message".to_string(),
             ));
         }
         let started = Instant::now();
-        let prompt = self.template.render(messages, tools)?;
+        let mut prompt = self.template.render(messages, tools)?;
+        prompt.push_str(prefix);
         let prompt_ids = self
             .tokenizer
             .encode(prompt.as_str(), false)
